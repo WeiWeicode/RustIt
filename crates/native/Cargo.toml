@@ -1,0 +1,22 @@
+[package]
+name = "rustit-native"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+# 繪圖後端：預設 OpenGL（glow），執行檔小、啟動快。
+# 改用 wgpu（Windows 上為 DirectX 12 / Vulkan）：--no-default-features --features wgpu
+default = ["glow"]
+glow = ["eframe/glow"]
+wgpu = ["eframe/wgpu"]
+
+[build-dependencies]
+embed-resource = "3.0"
+
+[dependencies]
+eframe = { version = "0.36", default-features = false, features = ["default_fonts"] }
+memmap2 = "0.9"
+rustit-collector = { version = "0.1.0", path = "../collector" }
+serde_json = "1.0.151"
+sysinfo = "0.39"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_Time", "Win32_System_WindowsProgramming", "Win32_UI_WindowsAndMessaging"] }

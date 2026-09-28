@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-Hant" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RustIt 資產管理</title>
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <!-- 液態玻璃的折射濾鏡：以雜訊貼圖位移背景，做出玻璃邊緣的流動扭曲 -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <filter id="liquid-refract" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB">
+        <feTurbulence type="fractalNoise" baseFrequency="0.004 0.007" numOctaves="2" seed="17" result="noise"/>
+        <feGaussianBlur in="noise" stdDeviation="2.5" result="map"/>
+        <feDisplacementMap in="SourceGraphic" in2="map" scale="70" xChannelSelector="R" yChannelSelector="G"/>
+      </filter>
+      <filter id="liquid-lens" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB">
+        <feTurbulence type="turbulence" baseFrequency="0.012 0.018" numOctaves="1" seed="3" result="noise"/>
+        <feGaussianBlur in="noise" stdDeviation="3" result="map"/>
+        <feDisplacementMap in="SourceGraphic" in2="map" scale="36" xChannelSelector="R" yChannelSelector="B"/>
+      </filter>
+      <linearGradient id="spark-stroke" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0" stop-color="#38bdf8"/>
+        <stop offset=".55" stop-color="#818cf8"/>
+        <stop offset="1" stop-color="#e879f9"/>
+      </linearGradient>
+      <linearGradient id="spark-fill" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#818cf8" stop-opacity=".45"/>
+        <stop offset="1" stop-color="#818cf8" stop-opacity="0"/>
+      </linearGradient>
+    </defs>
+  </svg>
+
+  <div class="backdrop">
+    <div class="aurora" id="aurora"></div>
+    <div class="grain"></div>
+  </div>
+
+  <div class="shell">
+    <header class="titlebar glass" id="titlebar" data-tauri-drag-region>
+      <div class="brand" data-tauri-drag-region><img src="img/icon.png" alt="">RustIt <small data-tauri-drag-region>資產管理</small></div>
+      <div class="host-chip" id="host-chip" data-tauri-drag-region></div>
+      <div class="spacer" data-tauri-drag-region></div>
+      <div class="tb-actions">
+        <span class="collect-time" id="collect-time" data-tauri-drag-region></span>
+        <button class="btn icon" id="btn-theme" data-action="theme"></button>
+        <button class="btn" id="btn-refresh" data-action="refresh"></button>
+        <button class="btn primary" id="btn-export" data-action="export" title="匯出 Agent 將回報給伺服器的資料"></button>
+      </div>
+      <div class="win-ctrls">
+        <button class="win-btn" id="btn-min" data-action="win-min" title="最小化"></button>
+        <button class="win-btn" id="btn-max" data-action="win-max" title="最大化"></button>
+        <button class="win-btn close" id="btn-close" data-action="win-close" title="關閉"></button>
+      </div>
+    </header>
+
+    <aside class="sidebar glass">
+      <nav class="nav" id="nav"></nav>
+      <div class="sidebar-foot" id="foot-note"></div>
+    </aside>
+
+    <main class="content" id="content">
+      <div class="page" id="page"></div>
+    </main>
+  </div>
+
+  <div id="modal-root"></div>
+  <div class="toast-root" id="toast-root"></div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

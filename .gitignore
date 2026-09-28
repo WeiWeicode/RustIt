@@ -1,0 +1,33 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+
+# Compiled distribution binaries
+/dist
+*.exe
+*.dll
+*.pdb
+
+# Tauri generated schema & build artifacts
+/crates/demo/gen
+gen/
+
+# AI tools & IDEs
+/.claude
+/.vscode
+/.idea
+*.sublime-project
+*.sublime-workspace
+
+# Operating System files
+Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# Environment & Logs
+*.log
+.env
+.env.*
+!.env.example
