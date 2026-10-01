@@ -2,7 +2,7 @@
 
 - 日期：2026-09-27（同日補充「安裝檔來源：NAS + HTTPS」）
 - 狀態：建議中；Demo 已實作單機版（Firefox、WinRAR，直接從原廠下載）
-- 相關：[PRD](../PRD.md) 5.4（遠端管理指令）、4.3（軟體授權報表）、[0001](0001-nginx-gateway-and-grpc.md)（Agent 通訊採 gRPC）
+- 相關：[PRD](../PRD.md) 5.4（遠端管理指令）、4.3（軟體授權報表）、[0001](0001-nginx-gateway-and-grpc.md)（Agent 通訊:HTTPS 回報 + WebSocket 指令,2026-10-01 改定）
 
 ## 結論
 
@@ -56,7 +56,7 @@ pub fn install_msi(msi: &Path, log: &Path) -> std::io::Result<InstallResult> {
 
 ## 流程
 
-IT 勾選 → 經 gRPC 長連線下達給 Agent → Agent 從公司伺服器下載 → 驗證 SHA-256 與數位簽章 → 依序靜默安裝 → 回報結果 → 重新掃描登錄檔，確認真的裝好。
+IT 勾選 → 經 WebSocket 長連線下達給 Agent → Agent 從公司伺服器下載 → 驗證 SHA-256 與數位簽章 → 依序靜默安裝 → 回報結果 → 重新掃描登錄檔，確認真的裝好。
 
 每個軟體的狀態：排隊中 → 下載中 → 驗證中 → 安裝中 → 成功 / 需重開機 / 失敗（可重試）。
 移除時改用登錄檔裡的 `UninstallString`（或 `QuietUninstallString`）加上靜默參數；MSI 改成 `msiexec /x {產品代碼} /qn`。

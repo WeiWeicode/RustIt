@@ -1,13 +1,15 @@
 # 0001：經由 nginx 連到後端，Agent 通訊採 gRPC
 
 - 日期：2026-09-27
-- 狀態：建議中（待確認）
+- 狀態：**決策一已採用；決策二改採替代方案（2026-10-01）**：Agent 通訊改為 **HTTPS 回報 + WebSocket 接收指令**，不使用 gRPC
 - 相關：[PRD](../PRD.md) 第 3 節（系統架構）、第 7 節（非功能需求）
 
 ## 結論
 
-1. 所有 HTTP 流量都經過公司現有的 nginx（IP gateway）再到後端，只有 RustDesk 直接連線。
-2. Agent 與後端之間用 **gRPC**（`tonic`）；Web 後台與使用者介面用 **REST/JSON**（`axum`）。
+> **2026-10-01 更新**：需求方決定 Agent 改採本文「替代方案」：**全部 REST/JSON + 指令通道用 WebSocket**（1,000 台以內已足夠，兩端共用 serde 資料結構）。Gateway 端的規格以 `../giga-api-gateway-bff/docs/ENDPOINT-AGENT-GUIDE.md`（v0.3）與 Gateway PRD v0.9 §7.6 為準：Agent 經 Gateway `:9443`（mTLS、HTTP/1.1）連到 Endpoint Server `:51241`。以下「決策二」與 nginx 設定示意保留為當時的評估紀錄。
+
+1. 所有 HTTP 流量都經過公司的 nginx（GigaNexus Gateway）再到後端，只有 RustDesk 直接連線。
+2. ~~Agent 與後端之間用 **gRPC**（`tonic`）~~ → Agent 以 **HTTPS 回報資料、WebSocket 接收指令**（`axum` + `tokio-tungstenite`）；Web 後台與使用者介面用 **REST/JSON**（`axum`）。
 
 ```
 Agent（每台電腦） ──gRPC + mTLS──┐
@@ -121,4 +123,4 @@ server {
 - [ ] 目前的 `worker_connections` / `worker_rlimit_nofile` 設定值。
 - [ ] Agent 用戶端憑證由誰簽發：公司既有的 AD CS，或 RustIt 自建 CA？
 - [ ] 後端主機的內網 IP 與防火牆規則（只允許 nginx 連入）。
-- [ ] 最終採用 gRPC，或改用「全部 REST + WebSocket」的替代方案。
+- [x] 最終採用 gRPC，或改用「全部 REST + WebSocket」的替代方案。→ **REST + WebSocket**（2026-10-01）
