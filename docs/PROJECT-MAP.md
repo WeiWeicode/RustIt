@@ -1,6 +1,6 @@
 # 專案地圖 — RustIt (企業端點資產管理與控管平台)
 
-> **最後更新**：2026-09-29  
+> **最後更新**：2026-10-06(整合計畫 v0.2、AGENT.md、ADR 0004:Endpoint Server 改 Node.js〔ItAgentBack〕、目錄拆分規劃;程式與目錄尚未變動)  
 > **目前階段**：階段 1 MVP·資產蒐集與效能評估驗證（`collector`、`demo` [Tauri]、`native` [egui] 已實作完成）。  
 > **上位規範**：全專案總圖 [PROJECT-MAP.md](../../PROJECT-MAP.md)、Gateway 規範 [giga-api-gateway-bff/docs/](../../giga-api-gateway-bff/docs/)。
 
@@ -13,15 +13,20 @@ RustIt/
 ├─ Cargo.toml                       Cargo Workspace 設定 (collector, demo, native)
 ├─ Cargo.lock
 ├─ README.md                        專案簡介與快速上手
+├─ AGENT.md                         AI 協作準則(分工、部署區、Rust / Node.js 規則、修正紀錄)
 ├─ dist/                            編譯成品存放目錄 (RustIt-Demo.exe, RustIt-Native.exe)
 ├─ scripts/
 │  └─ bench.ps1                     效能取樣腳本 (量測記憶體、CPU、行程與執行緒)
 ├─ docs/
 │  ├─ PRD.md                        產品需求說明 (對標 IP-guard/SmartIT，四階段里程碑)
+│  ├─ INTEGRATION-PLAN.md           整合計畫:Agent → Node.js Endpoint Server → GigaItApp 電腦清單(目標、階段、待決)
+│  ├─ contracts/ (規劃中)             Agent ↔ Server 資料契約(JSON Schema + 去識別化範例)
+│  ├─ DevelopmentProcess/           修正紀錄(NewFeatures.md 等)
 │  ├─ PROJECT-MAP.md                本文件 (專案結構、分層、流程、跨專案關係)
 │  ├─ ui-performance-comparison.md  egui 原生 vs WebView2 效能實測比較報告
 │  ├─ decisions/                    重大技術架構決策
-│  │  └─ 0002-software-deployment.md 靜默軟體派送架構與安全機制
+│  │  ├─ 0002-software-deployment.md 靜默軟體派送架構與安全機制
+│  │  └─ 0004-node-endpoint-server.md Endpoint Server 改用 Node.js(Rust 只做端點)
 │  └─ images/                       架構與介面截圖
 ├─ crates/
 │  ├─ collector/                    端點資料蒐集核心庫 (Library)
@@ -52,7 +57,9 @@ RustIt/
 │  ├─ agent/ (規劃中)                常駐 Windows 服務 (SYSTEM 權限)
 │  │  └─ 定時資料蒐集、USB 控管監聽、mTLS HTTPS 回報 + WebSocket 指令、RustDesk 守護
 │  ├─ tray/ (規劃中)                 托盤程式 (一般使用者介面：報修、公告、設備自查)
-│  └─ server/ (規劃中)               Endpoint Server (Axum，HTTPS / WebSocket，接收 Agent 回報)
+│  └─ (原規劃 server/ Axum 已由 ItAgentBack/ 取代,見 ADR 0004)
+├─ (目錄拆分規劃:以上 Rust 內容於 M0 搬入 RustAgent/;新增 ItAgentBack/ = Node.js Endpoint Server,見 INTEGRATION-PLAN §2)
+├─ ItAgentBack/ (規劃中)             Endpoint Server (Node.js + Fastify):51241 Agent 通道、51240 管理 API;SQL Server + MongoDB + Redis
 ```
 
 ---

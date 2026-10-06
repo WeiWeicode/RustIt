@@ -1,6 +1,6 @@
 # RustIt
 
-公司內部 IT 資產管理平台（對標 IP-guard、SmartIT）。需求見 [docs/PRD.md](docs/PRD.md)，架構與跨專案對應見 [docs/PROJECT-MAP.md](docs/PROJECT-MAP.md)。
+公司內部 IT 資產管理平台（對標 IP-guard、SmartIT）。需求見 [docs/PRD.md](docs/PRD.md)，架構與跨專案對應見 [docs/PROJECT-MAP.md](docs/PROJECT-MAP.md)。進行中的整合工作(Agent → Node.js Endpoint Server → GigaItApp)見 [docs/INTEGRATION-PLAN.md](docs/INTEGRATION-PLAN.md);AI 協作準則見 [AGENT.md](AGENT.md)。
 
 ## 專案結構
 
