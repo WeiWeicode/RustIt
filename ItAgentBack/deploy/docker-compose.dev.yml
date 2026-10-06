@@ -1,0 +1,30 @@
+# ItAgentBack 本機開發用 MongoDB 7 / Redis 7(INTEGRATION-PLAN M1)
+#   cd ItAgentBack && docker compose -f deploy/docker-compose.dev.yml --env-file .env up -d
+#
+# 服務在 Windows 上以 npm run dev 執行、不在容器內,所以開發用 compose 必須讓主機連得到:
+# 只綁 127.0.0.1(不對外、不佔 27017 / 6379 預設 port)。測試區 / 正式區的 compose(M4)不宣告 ports,
+# Mongo / Redis 只在 ItAgentBack 的內部網路(同 giga-observe,AGENT.md §7.2)。
+# 資料目錄依部署區分開:ItAgentBack/data/dev/(.gitignore 已排除)。
+
+name: ita-dev
+
+services:
+  ita-mongo:
+    image: mongo:7
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ita
+      MONGO_INITDB_ROOT_PASSWORD: ${ITA_MONGO_PASSWORD:?ITA_MONGO_PASSWORD 必須在 .env 設定}
+    ports:
+      - '127.0.0.1:27027:27017'
+    volumes:
+      - ../data/dev/mongo:/data/db
+    restart: unless-stopped
+
+  ita-redis:
+    image: redis:7-alpine
+    command: ['redis-server', '--appendonly', 'yes', '--requirepass', '${ITA_REDIS_PASSWORD:?ITA_REDIS_PASSWORD 必須在 .env 設定}']
+    ports:
+      - '127.0.0.1:6389:6379'
+    volumes:
+      - ../data/dev/redis:/data
+    restart: unless-stopped
