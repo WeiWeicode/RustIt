@@ -1,0 +1,15 @@
+{
+  "v": 1,
+  "type": "hello",
+  "id": "0c6d1f0a-9a3e-4d55-8f37-6b3c2f4e1a01",
+  "body": {
+    "agent_version": "0.1.0",
+    "host_name": "PC-EXAMPLE-01",
+    "os_name": "Windows 11 Pro 24H2",
+    "os_version": "11 (26100)",
+    "ips": [
+      "192.0.2.10"
+    ],
+    "boot_time": 1791244800
+  }
+}

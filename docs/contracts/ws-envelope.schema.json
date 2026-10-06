@@ -1,0 +1,70 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://giganexus.local/rustit/contracts/ws-envelope.schema.json",
+  "title": "WebSocket GET /agent/v1/ws 訊息信封",
+  "description": "JSON 文字訊息,共用信封 {v, type, id, body}(Gateway ENDPOINT-AGENT-GUIDE §5.6)。回覆類訊息(hello_ack、heartbeat_ack、unsupported)沿用被回覆訊息的 id。收到不認得的 type 回 unsupported;不認得的欄位忽略。單則訊息上限 1 MB(§5.5)。Server 停用裝置時以 close code 4403 關閉(§5.4)。",
+  "type": "object",
+  "required": ["v", "type", "id"],
+  "properties": {
+    "v": { "type": "integer", "const": 1 },
+    "type": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "id": { "type": "string", "minLength": 1, "maxLength": 64, "description": "UUID;連線內追蹤用,寫入日誌(§5.7)" },
+    "body": { "type": "object" }
+  },
+  "allOf": [
+    { "if": { "properties": { "type": { "const": "hello" } } }, "then": { "required": ["body"], "properties": { "body": { "$ref": "#/definitions/HelloBody" } } } },
+    { "if": { "properties": { "type": { "const": "hello_ack" } } }, "then": { "required": ["body"], "properties": { "body": { "$ref": "#/definitions/HelloAckBody" } } } },
+    { "if": { "properties": { "type": { "const": "heartbeat" } } }, "then": { "properties": { "body": { "$ref": "#/definitions/HeartbeatBody" } } } },
+    {
+      "if": { "properties": { "type": { "const": "heartbeat_ack" } } },
+      "then": { "required": ["body"], "properties": { "body": { "$ref": "#/definitions/HeartbeatAckBody" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "unsupported" } } },
+      "then": { "required": ["body"], "properties": { "body": { "$ref": "#/definitions/UnsupportedBody" } } }
+    }
+  ],
+  "definitions": {
+    "HelloBody": {
+      "description": "Agent → Server,連線後第一則(§6.3 第 2 步)",
+      "type": "object",
+      "required": ["agent_version", "host_name"],
+      "properties": {
+        "agent_version": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "host_name": { "type": "string", "minLength": 1 },
+        "os_name": { "type": "string" },
+        "os_version": { "type": "string" },
+        "ips": { "type": "array", "items": { "type": "string" } },
+        "boot_time": { "type": "integer", "minimum": 0, "description": "Unix 秒" }
+      }
+    },
+    "HelloAckBody": {
+      "description": "Server → Agent。status 為 active 才會進行心跳;停用的裝置不回 hello_ack,直接以 4403 關閉",
+      "type": "object",
+      "required": ["device_id", "heartbeat_interval_sec", "server_time"],
+      "properties": {
+        "device_id": { "type": "string", "format": "uuid" },
+        "heartbeat_interval_sec": { "type": "integer", "minimum": 5 },
+        "server_time": { "type": "string", "format": "date-time" }
+      }
+    },
+    "HeartbeatBody": {
+      "description": "Agent → Server,每 heartbeat_interval_sec(預設 30)秒一則;連續 3 次沒收到判定離線(§5.3)",
+      "type": "object",
+      "properties": {
+        "outbox_pending": { "type": "integer", "minimum": 0, "description": "本機暫存中尚未被確認的快照數(M5 起有值)" },
+        "last_inventory_seq": { "type": "integer", "minimum": 0, "description": "最後一次被確認的 agent_seq" }
+      }
+    },
+    "HeartbeatAckBody": {
+      "type": "object",
+      "required": ["server_time"],
+      "properties": { "server_time": { "type": "string", "format": "date-time" } }
+    },
+    "UnsupportedBody": {
+      "type": "object",
+      "required": ["type"],
+      "properties": { "type": { "type": "string", "description": "不認得的訊息類型" } }
+    }
+  }
+}

@@ -5,17 +5,22 @@
 ## 專案結構
 
 ```
-crates/
-├─ collector/   端點資料蒐集函式庫（WMI、登錄檔、sysinfo），Demo 與之後的 Agent 共用
-├─ demo/        單機 Demo（Tauri），不連伺服器、不寫資料庫
-│  ├─ src/      Rust 後端：蒐集、即時使用率、匯出 JSON、開啟 RustDesk
-│  └─ ui/       介面（HTML/CSS/JS，Liquid Glass 風格），編譯時嵌入 exe
-└─ native/      同一個 Demo 的原生介面版（egui），用來和 WebView2 版比較效能
-docs/           PRD、介面技術比較（ui-performance-comparison.md）
-scripts/        bench.ps1：並排量測兩個版本的記憶體、CPU、行程數
+RustAgent/        Rust:端點電腦上的程式(Cargo workspace,以下指令都在此目錄執行)
+├─ crates/
+│  ├─ collector/  端點資料蒐集函式庫(WMI、登錄檔、sysinfo),Demo 與 Agent 共用
+│  ├─ demo/       單機 Demo(Tauri),不連伺服器、不寫資料庫
+│  │  ├─ src/     Rust 後端:蒐集、即時使用率、匯出 JSON、開啟 RustDesk
+│  │  └─ ui/      介面(HTML/CSS/JS,Liquid Glass 風格),編譯時嵌入 exe
+│  └─ native/     同一個 Demo 的原生介面版(egui),用來和 WebView2 版比較效能
+├─ docs/          介面技術比較(ui-performance-comparison.md)與截圖
+└─ scripts/       bench.ps1:並排量測兩個版本的記憶體、CPU、行程數
+ItAgentBack/      Node.js(Fastify + TypeScript):Endpoint Server(建置中,INTEGRATION-PLAN M1)
+docs/             共用文件:PRD、專案地圖、整合計畫、架構決策、資料契約(contracts/)、修正紀錄
 ```
 
 ## Demo
+
+以下 `cargo` 與 `scripts/` 指令都在 `RustAgent/` 目錄執行。
 
 打開後可看到這台電腦的硬體、網路、已安裝軟體、防毒 / USB / RustDesk 狀態，
 以及報修單、公告、遠端協助的模擬流程。介面由 Windows 內建的 WebView2 顯示。
@@ -84,7 +89,7 @@ powershell -ExecutionPolicy Bypass -File scripts/bench.ps1 -Runs 3
 ```
 
 2026-09-28 在開發機上的結果（總覽頁，取樣 30 秒 × 3 次平均），完整說明、截圖與取捨見
-[docs/ui-performance-comparison.md](docs/ui-performance-comparison.md)：
+[RustAgent/docs/ui-performance-comparison.md](RustAgent/docs/ui-performance-comparison.md)：
 
 | 項目 | 原生 egui | WebView2 完整特效 | WebView2 精簡 |
 | --- | ---: | ---: | ---: |

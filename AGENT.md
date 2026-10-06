@@ -1,6 +1,6 @@
 # GigaNexus RustIt 端點管理 — AI 協作準則(AGENT.md)
 
-> **目錄拆分(計畫 `docs/INTEGRATION-PLAN.md` §2,M0 執行)**:`RustIt/` 之下分為 `RustAgent/`(Rust)與 `ItAgentBack/`(Node.js)。本文使用**拆分後**的路徑;M0 搬移完成前,Rust 檔案仍在根目錄(`crates/`、`Cargo.toml`),`ItAgentBack/` 尚未建立。
+> **目錄**:`RustIt/` 之下分為 `RustAgent/`(Rust,Cargo workspace;`cargo` 指令在此目錄執行)與 `ItAgentBack/`(Node.js),共用文件在 `docs/`(計畫 `docs/INTEGRATION-PLAN.md` §2;2026-10-06 M0 完成搬移)。
 
 > 本文件是 AI 程式助手(Claude、Gemini 等)在本專案中的行為準則,所有 AI 協作開發必須遵守。
 > 結構對齊 `../GigaItApp/AGENT.md`,通用準則來源為 `../giga-api-gateway-bff/AGENT.md`。

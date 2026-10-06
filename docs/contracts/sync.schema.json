@@ -1,0 +1,46 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://giganexus.local/rustit/contracts/sync.schema.json",
+  "title": "POST /agent/v1/sync 請求",
+  "description": "Agent 連線後比對本機暫存(INTEGRATION-PLAN §4.2,M5)。Server 回覆 need(要上傳 payload 的 agent_seq),Agent 再以 POST /agent/v1/inventory 逐筆上傳;inventory 回 200 後才從暫存刪除。",
+  "type": "object",
+  "required": ["pending"],
+  "properties": {
+    "last_acked_seq": { "type": "integer", "minimum": 0, "description": "最後一次被確認的 agent_seq;沒有時為 0" },
+    "last_acked_hash": { "type": "string", "pattern": "^([0-9a-f]{64})?$", "description": "最後一次被確認的 content_hash;沒有時為空字串" },
+    "pending": {
+      "type": "array",
+      "maxItems": 200,
+      "items": {
+        "type": "object",
+        "required": ["agent_seq", "collected_at", "content_hash"],
+        "properties": {
+          "agent_seq": { "type": "integer", "minimum": 1 },
+          "collected_at": { "type": "string", "format": "date-time" },
+          "content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "SyncResponse": {
+      "title": "POST /agent/v1/sync 回應(200)",
+      "description": "need 依 collected_at 由舊到新排序;content_hash 與目前資料相同、或 (device, agent_seq, content_hash) 已收過的不列入。server_state 以 Server 為準(裝置狀態、device_id),Agent 套用(§4.2 第 4 點)",
+      "type": "object",
+      "required": ["device_id", "need", "server_state"],
+      "properties": {
+        "device_id": { "type": "string", "format": "uuid" },
+        "need": { "type": "array", "items": { "type": "integer" } },
+        "server_state": {
+          "type": "object",
+          "required": ["status", "last_hash"],
+          "properties": {
+            "status": { "type": "string", "enum": ["active", "disabled"] },
+            "last_hash": { "type": "string", "description": "目前資料的 content_hash;沒有資料時為空字串" },
+            "last_seq": { "type": "integer" }
+          }
+        }
+      }
+    }
+  }
+}

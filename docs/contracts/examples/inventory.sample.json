@@ -1,0 +1,161 @@
+{
+  "agent_version": "0.1.0",
+  "agent_seq": 1791273600001,
+  "collected_at": "2026-10-06T08:00:00Z",
+  "content_hash": "5f2c9a0e1b7d4c3a8e6f0d9b2a1c4e7f3b8d6a5c0e9f1d2b4a7c6e8f0a1b3c5d",
+  "inventory": {
+    "system": {
+      "host_name": "PC-EXAMPLE-01",
+      "user_name": "EXAMPLE\\user01",
+      "domain": "example.local",
+      "part_of_domain": true,
+      "manufacturer": "Example Computer Inc.",
+      "model": "ExampleBook 14 G1",
+      "os_name": "Windows 11 Pro 24H2",
+      "os_version": "11 (26100)",
+      "os_display_version": "24H2",
+      "os_build": "26100.6584",
+      "arch": "x86_64",
+      "boot_time": 1791244800
+    },
+    "identity": {
+      "bios_serial": "EXAMPLE-SN-0001",
+      "bios_vendor": "Example BIOS Co.",
+      "bios_version": "1.02.03",
+      "board_manufacturer": "Example Computer Inc.",
+      "board_product": "EX-MB-14",
+      "board_serial": "EXAMPLE-MB-0001",
+      "system_uuid": "00000000-0000-4000-8000-000000000001"
+    },
+    "cpu": {
+      "name": "Example(R) Core(TM) i5-1234U CPU @ 1.30GHz",
+      "cores": 10,
+      "logical": 12,
+      "max_mhz": 1300
+    },
+    "memory_total": 17179869184,
+    "memory_modules": [
+      {
+        "slot": "DIMM 0",
+        "capacity": 8589934592,
+        "speed_mhz": 3200,
+        "manufacturer": "ExampleRAM",
+        "part_number": "EX8G3200"
+      },
+      {
+        "slot": "DIMM 1",
+        "capacity": 8589934592,
+        "speed_mhz": 3200,
+        "manufacturer": "ExampleRAM",
+        "part_number": "EX8G3200"
+      }
+    ],
+    "physical_disks": [
+      {
+        "model": "Example NVMe SSD 512GB",
+        "serial": "EXAMPLE-DISK-0001",
+        "size": 512105932800,
+        "interface": "SCSI",
+        "media_type": "Fixed hard disk media"
+      }
+    ],
+    "volumes": [
+      {
+        "mount_point": "C:\\",
+        "label": "Windows",
+        "file_system": "NTFS",
+        "total": 510770802688,
+        "available": 201863462912,
+        "removable": false
+      }
+    ],
+    "gpus": [
+      {
+        "name": "Example Graphics",
+        "driver_version": "31.0.101.1234",
+        "resolution": "1920 × 1080"
+      }
+    ],
+    "network": [
+      {
+        "description": "Example Ethernet Controller",
+        "mac": "00:00:5E:00:53:01",
+        "ips": [
+          "192.0.2.10",
+          "fe80::200:5eff:fe00:5301"
+        ],
+        "gateways": [
+          "192.0.2.1"
+        ],
+        "dns": [
+          "192.0.2.53"
+        ],
+        "dhcp_enabled": true
+      },
+      {
+        "description": "Example Wi-Fi Adapter",
+        "mac": "00:00:5E:00:53:02",
+        "ips": [
+          "198.51.100.20"
+        ],
+        "gateways": [],
+        "dns": [],
+        "dhcp_enabled": true
+      }
+    ],
+    "software": [
+      {
+        "name": "Example Office Suite",
+        "version": "16.0.1",
+        "publisher": "Example Software Ltd.",
+        "install_date": "2026-09-15"
+      },
+      {
+        "name": "Example Browser",
+        "version": "128.0.1",
+        "publisher": "Example Web Inc.",
+        "install_date": "2026-10-01"
+      },
+      {
+        "name": "RustDesk",
+        "version": "1.4.2",
+        "publisher": "RustDesk",
+        "install_date": "2026-10-06"
+      }
+    ],
+    "security": {
+      "antivirus": [
+        {
+          "name": "Example Antivirus",
+          "enabled": true,
+          "up_to_date": true
+        }
+      ],
+      "recent_hotfixes": [
+        {
+          "id": "KB0000001",
+          "description": "Security Update",
+          "installed_on": "9/10/2026"
+        }
+      ]
+    },
+    "usb": {
+      "storage_policy": "Allowed",
+      "storage_history": [
+        {
+          "friendly_name": "Example USB Flash Drive",
+          "serial": "EXAMPLE-USB-0001"
+        }
+      ]
+    },
+    "rustdesk": {
+      "installed": true,
+      "version": "1.4.2",
+      "exe_path": "C:\\Program Files\\RustDesk\\rustdesk.exe",
+      "id": "000000001",
+      "custom_server": ""
+    },
+    "collect_ms": 2350,
+    "warnings": []
+  }
+}

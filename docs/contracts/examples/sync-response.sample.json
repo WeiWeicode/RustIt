@@ -1,0 +1,11 @@
+{
+  "device_id": "6f1d3a52-3b1e-4c7a-9a41-2d8f0c5e7b90",
+  "need": [
+    1791273600003
+  ],
+  "server_state": {
+    "status": "active",
+    "last_hash": "5f2c9a0e1b7d4c3a8e6f0d9b2a1c4e7f3b8d6a5c0e9f1d2b4a7c6e8f0a1b3c5d",
+    "last_seq": 1791273600001
+  }
+}

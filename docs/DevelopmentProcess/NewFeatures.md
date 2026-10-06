@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-06 M0 目錄重整與資料契約
+- 內容:依 INTEGRATION-PLAN §2(決策 D6)以 `git mv` 把 Rust 檔案搬入 `RustAgent/`(`Cargo.toml`、`Cargo.lock`、`crates/`、`scripts/`、`docs/ui-performance-comparison.md`、`docs/images/`),搬移單獨一個 commit(a1ec3f4,40 個 rename、0 行內容變更);未進版控的 `dist/` 一併移入。之後修正路徑:`.gitignore`(`/RustAgent/target`、`/RustAgent/dist` 等)、`README.md`、`AGENT.md` 開頭、`docs/PROJECT-MAP.md`;`scripts/bench.ps1` 以腳本上一層為根目錄,搬移後不需修改。新增 `docs/contracts/`:`inventory.schema.json`(請求 + `InventoryResponse`)、`ws-envelope.schema.json`(`hello` / `hello_ack` / `heartbeat` / `heartbeat_ack` / `unsupported`)、`sync.schema.json`(M5)與 9 個去識別化範例(RFC 5737 IP、RFC 7042 MAC、EXAMPLE 字樣;未使用 `dump` 的真實結果)。契約重點:`content_hash` = 把 `collect_ms` 設 0 後的 serde_json SHA-256,Server 只比對相等;`agent_seq` 須重啟後仍遞增(M5 前以啟動時 Unix 毫秒為起點);新增欄位不得列入 `required`。根目錄 `PROJECT-MAP.md` 的效能比較表連結改為 `RustIt/RustAgent/docs/`(根目錄 b4a9318)。
+- 檔案:`.gitignore`、`README.md`、`AGENT.md`、`docs/PROJECT-MAP.md`、`docs/contracts/`(README、3 個 schema、`examples/`)
+- 驗證:本機原無 Rust 工具鏈,經需求方同意以 winget 安裝 VS 2022 Build Tools(C++)與 rustup(rustc 1.99.0 stable-msvc);`RustAgent/` 下 `cargo build`(collector、demo、native)成功、`cargo test -p rustit-collector` 通過(collector 無測試案例,範例可編譯)。契約範例由兩端測試驗證:ItAgentBack `npm test`(Ajv draft-07)、RustAgent `cargo test -p rustit-agent`(jsonschema),見 M1、M2 紀錄。
+
 ## 2026-10-06 釐清端點權限 403 的原因(D9)
 - 內容:IT 管理系統「電腦清單」進頁 403(S112009 無 `endpoint.device.read`)。查 `GigaItApp/deploy/gateway-rbac.yaml`:`it.endpoint-device.read` 與 `.list` 沒有 `includes`(其他節點都綁對應 API 權限),且 `endpoint.device.read` 在 Gateway 內沒有任何定義,要等 Endpoint Server 的 OpenAPI 註冊才會建立。結論:代碼命名沒錯(`it.*` 為應用權限、`endpoint.*` 為 API 權限),缺的是綁定;改於整合計畫 M4(先註冊 OpenAPI,再補 `includes` 並 apply),不需手動 SQL 指派。D7(PEM 憑證)確認。僅文件,未改 GigaItApp。
 - 檔案:`docs/INTEGRATION-PLAN.md`(M4、D7、D9、§9)

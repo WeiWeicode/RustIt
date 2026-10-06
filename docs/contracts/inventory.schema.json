@@ -1,0 +1,249 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://giganexus.local/rustit/contracts/inventory.schema.json",
+  "title": "POST /agent/v1/inventory 請求",
+  "description": "Agent 回報一份完整資產快照(INTEGRATION-PLAN §5)。inventory 為 rustit-collector 的 ComputerInfo(serde 輸出,snake_case)。只新增欄位;收到不認得的欄位忽略(不設 additionalProperties: false)。新增欄位一律不得列入 required,舊版 Agent 才能通過驗證。",
+  "type": "object",
+  "required": ["agent_version", "agent_seq", "collected_at", "content_hash", "inventory"],
+  "properties": {
+    "agent_version": { "type": "string", "minLength": 1, "maxLength": 32, "description": "Agent 版本(Cargo 套件版本)" },
+    "agent_seq": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Agent 產生的快照序號,同一台電腦上必須單調遞增、Agent 重啟後仍遞增(M5 前以啟動時的 Unix 毫秒為起點,M5 起存在本機加密暫存);與裝置組成冪等鍵 (device, agent_seq, content_hash)(§4.2)"
+    },
+    "collected_at": { "type": "string", "format": "date-time", "description": "蒐集完成時間(RFC 3339,UTC);以 Agent 時鐘為準,不可信時以 agent_seq 輔助判斷" },
+    "content_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256(小寫十六進位)。計算方式:把 inventory 的 collect_ms 設為 0 後,以 Agent 的 serde_json 序列化結果計算。Server 只比對是否相等、不重算"
+    },
+    "inventory": { "$ref": "#/definitions/ComputerInfo" }
+  },
+  "definitions": {
+    "ComputerInfo": {
+      "type": "object",
+      "required": [
+        "system",
+        "identity",
+        "cpu",
+        "memory_total",
+        "memory_modules",
+        "physical_disks",
+        "volumes",
+        "gpus",
+        "network",
+        "software",
+        "security",
+        "usb",
+        "rustdesk",
+        "collect_ms",
+        "warnings"
+      ],
+      "properties": {
+        "system": { "$ref": "#/definitions/SystemSummary" },
+        "identity": { "$ref": "#/definitions/Identity" },
+        "cpu": {
+          "type": "object",
+          "required": ["name", "cores", "logical", "max_mhz"],
+          "properties": {
+            "name": { "type": "string" },
+            "cores": { "type": "integer", "minimum": 0 },
+            "logical": { "type": "integer", "minimum": 0 },
+            "max_mhz": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "memory_total": { "type": "integer", "minimum": 0, "description": "位元組" },
+        "memory_modules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["slot", "capacity", "speed_mhz", "manufacturer", "part_number"],
+            "properties": {
+              "slot": { "type": "string" },
+              "capacity": { "type": "integer", "minimum": 0 },
+              "speed_mhz": { "type": "integer", "minimum": 0 },
+              "manufacturer": { "type": "string" },
+              "part_number": { "type": "string" }
+            }
+          }
+        },
+        "physical_disks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["model", "serial", "size", "interface", "media_type"],
+            "properties": {
+              "model": { "type": "string" },
+              "serial": { "type": "string" },
+              "size": { "type": "integer", "minimum": 0 },
+              "interface": { "type": "string" },
+              "media_type": { "type": "string" }
+            }
+          }
+        },
+        "volumes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["mount_point", "label", "file_system", "total", "available", "removable"],
+            "properties": {
+              "mount_point": { "type": "string" },
+              "label": { "type": "string" },
+              "file_system": { "type": "string" },
+              "total": { "type": "integer", "minimum": 0 },
+              "available": { "type": "integer", "minimum": 0 },
+              "removable": { "type": "boolean" }
+            }
+          }
+        },
+        "gpus": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "driver_version", "resolution"],
+            "properties": { "name": { "type": "string" }, "driver_version": { "type": "string" }, "resolution": { "type": "string" } }
+          }
+        },
+        "network": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["description", "mac", "ips", "gateways", "dns", "dhcp_enabled"],
+            "properties": {
+              "description": { "type": "string" },
+              "mac": { "type": "string", "description": "WMI 格式,例 02:00:5E:00:53:01" },
+              "ips": { "type": "array", "items": { "type": "string" }, "description": "IPv4 與 IPv6 混合" },
+              "gateways": { "type": "array", "items": { "type": "string" } },
+              "dns": { "type": "array", "items": { "type": "string" } },
+              "dhcp_enabled": { "type": "boolean" }
+            }
+          }
+        },
+        "software": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "version", "publisher", "install_date"],
+            "properties": {
+              "name": { "type": "string" },
+              "version": { "type": "string" },
+              "publisher": { "type": "string" },
+              "install_date": { "type": "string", "description": "YYYY-MM-DD;登錄檔格式不符時原樣" }
+            }
+          }
+        },
+        "security": {
+          "type": "object",
+          "required": ["antivirus", "recent_hotfixes"],
+          "properties": {
+            "antivirus": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["name", "enabled", "up_to_date"],
+                "properties": { "name": { "type": "string" }, "enabled": { "type": "boolean" }, "up_to_date": { "type": "boolean" } }
+              }
+            },
+            "recent_hotfixes": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["id", "description", "installed_on"],
+                "properties": {
+                  "id": { "type": "string" },
+                  "description": { "type": "string" },
+                  "installed_on": { "type": "string", "description": "WMI 格式 M/D/YYYY" }
+                }
+              }
+            }
+          }
+        },
+        "usb": {
+          "type": "object",
+          "required": ["storage_policy", "storage_history"],
+          "properties": {
+            "storage_policy": { "type": "string", "enum": ["Allowed", "Blocked", "Unknown"] },
+            "storage_history": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["friendly_name", "serial"],
+                "properties": { "friendly_name": { "type": "string" }, "serial": { "type": "string" } }
+              }
+            }
+          }
+        },
+        "rustdesk": {
+          "type": "object",
+          "required": ["installed", "version", "exe_path", "id", "custom_server"],
+          "properties": {
+            "installed": { "type": "boolean" },
+            "version": { "type": "string" },
+            "exe_path": { "type": "string" },
+            "id": { "type": "string" },
+            "custom_server": { "type": "string" }
+          }
+        },
+        "collect_ms": { "type": "integer", "minimum": 0 },
+        "warnings": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "SystemSummary": {
+      "type": "object",
+      "required": [
+        "host_name",
+        "user_name",
+        "domain",
+        "part_of_domain",
+        "manufacturer",
+        "model",
+        "os_name",
+        "os_version",
+        "os_display_version",
+        "os_build",
+        "arch",
+        "boot_time"
+      ],
+      "properties": {
+        "host_name": { "type": "string", "minLength": 1 },
+        "user_name": { "type": "string", "description": "DOMAIN\\user;以 Windows 服務執行時為服務帳號(之後改由托盤回報登入者)" },
+        "domain": { "type": "string" },
+        "part_of_domain": { "type": "boolean" },
+        "manufacturer": { "type": "string" },
+        "model": { "type": "string" },
+        "os_name": { "type": "string" },
+        "os_version": { "type": "string" },
+        "os_display_version": { "type": "string" },
+        "os_build": { "type": "string" },
+        "arch": { "type": "string" },
+        "boot_time": { "type": "integer", "minimum": 0, "description": "Unix 秒" }
+      }
+    },
+    "Identity": {
+      "type": "object",
+      "required": ["bios_serial", "bios_vendor", "bios_version", "board_manufacturer", "board_product", "board_serial", "system_uuid"],
+      "properties": {
+        "bios_serial": { "type": "string" },
+        "bios_vendor": { "type": "string" },
+        "bios_version": { "type": "string" },
+        "board_manufacturer": { "type": "string" },
+        "board_product": { "type": "string" },
+        "board_serial": { "type": "string" },
+        "system_uuid": { "type": "string" }
+      }
+    },
+    "InventoryResponse": {
+      "title": "POST /agent/v1/inventory 回應(200)",
+      "description": "stored:成為目前資料;unchanged:content_hash 與目前資料相同,只更新最後回報時間;archived:collected_at 比目前資料舊(補傳),只進快照歷史。三者 Agent 都視為已確認、可從暫存刪除。停用的裝置回 403 ITA_DEVICE_DISABLED;SQL Server 無法寫入回 503 ITA_STORAGE_UNAVAILABLE(Agent 留在本機暫存重試)",
+      "type": "object",
+      "required": ["device_id", "agent_seq", "result", "server_time"],
+      "properties": {
+        "device_id": { "type": "string", "format": "uuid" },
+        "agent_seq": { "type": "integer" },
+        "result": { "type": "string", "enum": ["stored", "unchanged", "archived"] },
+        "server_time": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

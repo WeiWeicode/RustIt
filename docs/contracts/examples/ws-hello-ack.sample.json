@@ -1,0 +1,10 @@
+{
+  "v": 1,
+  "type": "hello_ack",
+  "id": "0c6d1f0a-9a3e-4d55-8f37-6b3c2f4e1a01",
+  "body": {
+    "device_id": "6f1d3a52-3b1e-4c7a-9a41-2d8f0c5e7b90",
+    "heartbeat_interval_sec": 30,
+    "server_time": "2026-10-06T08:00:00.500Z"
+  }
+}

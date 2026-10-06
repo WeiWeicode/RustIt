@@ -1,0 +1,16 @@
+{
+  "last_acked_seq": 1791273600001,
+  "last_acked_hash": "5f2c9a0e1b7d4c3a8e6f0d9b2a1c4e7f3b8d6a5c0e9f1d2b4a7c6e8f0a1b3c5d",
+  "pending": [
+    {
+      "agent_seq": 1791273600002,
+      "collected_at": "2026-10-06T09:00:00Z",
+      "content_hash": "5f2c9a0e1b7d4c3a8e6f0d9b2a1c4e7f3b8d6a5c0e9f1d2b4a7c6e8f0a1b3c5d"
+    },
+    {
+      "agent_seq": 1791273600003,
+      "collected_at": "2026-10-06T10:00:00Z",
+      "content_hash": "7a3e1c9b0d2f4e6a8c1b3d5f7e9a0c2e4b6d8f0a1c3e5b7d9f1a2c4e6b8d0f13"
+    }
+  ]
+}

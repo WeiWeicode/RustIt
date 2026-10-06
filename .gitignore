@@ -1,16 +1,26 @@
-# Rust build artifacts
-/target
+# Rust build artifacts(RustAgent/)
+/RustAgent/target
 **/*.rs.bk
 
 # Compiled distribution binaries
-/dist
+/RustAgent/dist
 *.exe
 *.dll
 *.pdb
 
 # Tauri generated schema & build artifacts
-/crates/demo/gen
+/RustAgent/crates/demo/gen
 gen/
+
+# RustAgent:本機 Agent 設定與裝置憑證(範本 agent.example.toml、agent.dev.toml 進版控)
+/RustAgent/crates/agent/agent.toml
+/RustAgent/crates/agent/pki/
+
+# ItAgentBack(Node.js):相依、建置輸出、本機 Mongo / Redis 資料、Docker secret
+/ItAgentBack/node_modules
+/ItAgentBack/dist
+/ItAgentBack/data
+/ItAgentBack/secrets
 
 # AI tools & IDEs
 /.claude

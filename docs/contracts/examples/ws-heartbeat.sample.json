@@ -1,0 +1,9 @@
+{
+  "v": 1,
+  "type": "heartbeat",
+  "id": "4b2e8c1d-7f60-4a9b-b3d2-1e5f7a9c0b02",
+  "body": {
+    "outbox_pending": 0,
+    "last_inventory_seq": 1791273600001
+  }
+}
