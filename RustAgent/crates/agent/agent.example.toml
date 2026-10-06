@@ -1,0 +1,11 @@
+# 測試區範例:經 Gateway :9443(mTLS)連 ItAgentBack。複製為 agent.toml 後修改(agent.toml 與 pki/ 不進版控)。
+#   rustit-agent run --config agent.toml
+# 裝置憑證由 giga-api-gateway-bff/deploy/gen-temp-pki.sh 簽發(決策 D7);正式區改讀 Windows 憑證存放區(後續)。
+server_url = "https://10.10.130.124:9443"   # Gateway 以 IP 設定(Gateway PRD Q1)
+inventory_interval_sec = 3600
+startup_jitter_sec = 30
+
+[tls]
+ca_file = "pki/ca.crt"        # 企業根 CA / 臨時 PKI 根憑證(驗證 Gateway)
+cert_file = "pki/agent.crt"   # 裝置憑證(Subject 例 O=GigaNexus Dev,CN=<電腦名稱>;EKU Client Authentication)
+key_file = "pki/agent.key"
