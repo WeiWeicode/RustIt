@@ -4,10 +4,13 @@
  *   - 標頭只採信來自 AGENT_TRUSTED_PROXIES(Nginx)的連線;dev 以 DEV_TRUST_CLIENT_HEADERS 讓本機 Agent 直連
  *   - POST /agent/v1/inventory(資料契約 inventory.schema.json)、WS GET /agent/v1/ws(信封 ws-envelope.schema.json)
  *   - 與 :51240 是不同的 Fastify 實例,不共用 hook(§5.2);日誌帶 x-request-id、DN、指紋(§5.7)
+ *   - 監控(giga-observe 服務 endpoint-agent,與管理 API 分開的 Key):HTTPS 回報逐筆;WebSocket 每條連線關閉時記一筆
+ *     (method WS、持續時間、關閉碼、訊息數;非正常關閉為 warn);心跳附上在線連線數。Agent 的 heartbeat 訊息不逐筆記錄(量大)
  */
 import { BlockList } from 'node:net';
 import websocket from '@fastify/websocket';
-import { errorBody } from '@giganexus/backend-sdk';
+import { errorBody, type DepStatus, type MonitorEnv, type MonitorLog } from '@giganexus/backend-sdk';
+import { setupGateway } from '@giganexus/backend-sdk/fastify';
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import type { Config } from './config.js';
 import { CONTRACT_IDS, compileWsEnvelope, contractsDir, loadContract, type HelloBody, type InventoryRequest, type WsEnvelope } from './contracts.js';
@@ -31,6 +34,39 @@ export interface AgentAppOptions {
   contractsDir?: string;
   /** 心跳逾時檢查間隔(毫秒) */
   sweepIntervalMs?: number;
+  /** giga-observe 監控(loadMonitorEnv;省略 = 不監控) */
+  monitor?: MonitorEnv;
+  /** 監控心跳附帶的相依服務狀態(SQL Server / Mongo / Redis) */
+  deps?: () => Promise<DepStatus[]>;
+}
+
+const WS_PATH = '/agent/v1/ws';
+/** 正常關閉(1000 正常、1001 離開);其餘(含 1006 斷線、4408 心跳逾時、4409 被新連線取代)記 warn */
+const NORMAL_CLOSE = new Set([1000, 1001]);
+
+/** WebSocket 連線結束時的監控紀錄(giga-observe API_CONTRACT §2.1;status 101 = 曾成功升級) */
+export function wsSessionLog(o: {
+  startedAt: number;
+  endedAt: number;
+  requestId: string;
+  deviceId: string;
+  computerName: string;
+  ip: string | null;
+  code: number;
+  messages: number;
+  online: number;
+}): MonitorLog {
+  return {
+    ts: new Date(o.startedAt).toISOString(),
+    level: NORMAL_CLOSE.has(o.code) ? 'info' : 'warn',
+    kind: 'http',
+    traceId: o.requestId,
+    request: { method: 'WS', path: WS_PATH, pathTemplate: WS_PATH, query: null, body: null, bodySize: 0, bodyTruncated: false, headers: {}, ip: o.ip, userId: o.computerName },
+    actions: [],
+    response: { status: 101, body: null, bodySize: 0, bodyTruncated: false, durationMs: o.endedAt - o.startedAt },
+    error: null,
+    meta: { deviceId: o.deviceId, closeCode: o.code, messages: o.messages, online: o.online },
+  };
 }
 
 /** 單則 WebSocket 訊息上限 1 MB(指南 §5.5);HTTPS 回報(含軟體清單)上限 5 MB */
@@ -70,6 +106,18 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
   app.addSchema(loadContract('inventory', dir));
   app.addSchema(loadContract('sync', dir));
   await app.register(websocket, { options: { maxPayload: WS_MAX_PAYLOAD } });
+  // 監控需在路由之前註冊;本通道不註冊 OpenAPI(Agent 經 :9443 直達,不經 BFF 路由表)
+  await app.register(setupGateway, {
+    monitor: opts.monitor ?? false,
+    register: false,
+    version: process.env.npm_package_version,
+    userId: (req) => req.device?.computerName ?? null,
+    meta: (req) => (req.device ? { deviceId: req.device.deviceId } : undefined),
+    monitorOptions: {
+      ignorePaths: ['/healthz', WS_PATH],
+      deps: async () => [...((await opts.deps?.()) ?? []), { name: `WebSocket 在線 ${service.onlineCount} 條`, ok: true, latencyMs: null }],
+    },
+  });
 
   const ctxOf = (req: FastifyRequest): Ctx => ({ log: req.log, requestId: req.id });
 
@@ -121,6 +169,8 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
     const ctx = ctxOf(req);
     const conn: AgentConnection = { close: (code, reason) => socket.close(code, reason), terminate: () => socket.terminate() };
     const send = (type: string, id: string, body: object) => socket.send(JSON.stringify({ v: 1, type, id, body }));
+    const startedAt = Date.now();
+    let messages = 0;
 
     const handle = async (raw: Buffer, isBinary: boolean) => {
       if (isBinary) return ctx.log.warn('收到二進位訊息,忽略(只接受 JSON 文字訊息)');
@@ -155,11 +205,30 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
       );
     };
     ctx.log.info('Agent WebSocket 已連線');
-    socket.on('message', (data: Buffer, isBinary: boolean) => run(() => handle(data, isBinary)));
+    socket.on('message', (data: Buffer, isBinary: boolean) => {
+      messages++;
+      run(() => handle(data, isBinary));
+    });
     socket.on('error', (err: Error) => ctx.log.warn({ err }, 'WebSocket 錯誤'));
     socket.on('close', (code: number) => {
       ctx.log.info({ code }, 'Agent WebSocket 已關閉');
-      run(() => service.disconnected(ctx, device, conn));
+      run(async () => {
+        await service.disconnected(ctx, device, conn);
+        app.monitor.push(
+          wsSessionLog({
+            startedAt,
+            endedAt: Date.now(),
+            requestId: req.id,
+            deviceId: device.deviceId,
+            computerName: device.computerName,
+            // Nginx 帶來的電腦來源 IP(只供監控顯示,不作為身分依據)
+            ip: String(req.headers['x-forwarded-for'] ?? '').split(',')[0]?.trim() || null,
+            code,
+            messages,
+            online: service.onlineCount,
+          }),
+        );
+      });
     });
   });
 

@@ -88,6 +88,11 @@ export class DeviceService {
   private readonly touchIntervalMs: number;
   readonly heartbeatIntervalSec: number;
 
+  /** 目前在線的 WebSocket 連線數(本行程;監控心跳回報) */
+  get onlineCount(): number {
+    return this.connections.size;
+  }
+
   constructor(
     private readonly sql: DeviceStore,
     private readonly snapshots: SnapshotStore,

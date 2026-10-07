@@ -4,7 +4,8 @@
 # 產生(已存在的不覆寫;要重建先刪除該檔):
 #   /srv/giganexus/ita-secrets/   ita_db_password、mongo_password、redis_password、mongo_url、redis_url、
 #                                 endpoint_server.crt / .key(:51241,臨時根 CA 簽發,SAN DNS:endpoint-server)、
-#                                 gw_api_key(Gateway CLI client:create --code endpoint-api;已存在則略過,換發請刪檔再執行)
+#                                 gw_api_key(Gateway CLI client:create --code endpoint-api;已存在則略過,換發請刪檔再執行)、
+#                                 monitor_api_key / agent_monitor_api_key(giga-observe ingest Key:endpoint-api / endpoint-agent)
 #   /srv/giganexus/deploy/ita.env  Compose 變數(範本 test.env.example)
 #   C:\Users\user\agentpki\<FQDN>\ 每台裝置的 agent.crt / agent.key + ca.crt(臨時 Agent 中繼 CA 簽發,一年;取走後請刪除)
 set -eu
@@ -64,6 +65,18 @@ if [ ! -f "$D/gw_api_key" ]; then
   grep -v '"key"' /tmp/ita-key.json; rm -f /tmp/ita-key.json
   [ -s "$D/gw_api_key" ] || { echo "取不到 API Key,請檢查上方輸出" >&2; rm -f "$D/gw_api_key"; exit 1; }
 fi
+
+# ---------- giga-observe 監控 Key(ingest;serviceId 即架構圖的服務 id;已存在則略過) ----------
+observe_key() { # $1 檔名 $2 serviceId $3 說明
+  [ -f "$D/$1" ] && return
+  (cd /srv/giganexus/giga-observe && docker compose --env-file deploy/test.env exec -T gno-backend \
+    node src/scripts/createApiKey.js --service "$2" --scope ingest --label "$3") > /tmp/ita-obs.txt
+  sed -n 's/^  key *: *//p' /tmp/ita-obs.txt | tr -d '\r\n' > "$D/$1"; rm -f /tmp/ita-obs.txt
+  [ -s "$D/$1" ] || { echo "取不到 $2 的監控 Key" >&2; rm -f "$D/$1"; exit 1; }
+  echo "已建立監控 Key:$2"
+}
+observe_key monitor_api_key endpoint-api "RustIt ItAgentBack 管理 API"
+observe_key agent_monitor_api_key endpoint-agent "RustIt ItAgentBack Agent 通道"
 
 # ---------- Compose 變數 ----------
 if [ ! -f /srv/giganexus/deploy/ita.env ]; then

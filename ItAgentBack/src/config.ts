@@ -10,6 +10,8 @@
  *   AGENT_TRUSTED_PROXIES     可送 x-client-cert-* 標頭的來源(Nginx 所在網段,逗號分隔 IP 或 CIDR;test / prod 必填)
  *   DEV_TRUST_CLIENT_HEADERS  dev 專用:任何來源送的 x-client-cert-* 都採信(本機 Agent 直連,不經 Nginx)
  *   DEV_SKIP_TOKEN            dev 專用:管理 API 不驗證 X-Internal-Token(本機 GigaItApp proxy 直連)
+ *   MONITOR_URL + MONITOR_API_KEY_FILE        管理 API 的監控(giga-observe 服務 endpoint-api)
+ *   AGENT_MONITOR_API_KEY_FILE(或 _KEY)      Agent 通道的監控(服務 endpoint-agent,另一把 Key;同一個 MONITOR_URL)
  */
 import { readFileSync } from 'node:fs';
 import { isGatewayPort, loadGatewayEnv, loadMonitorEnv, type GatewayEnv, type MonitorEnv } from '@giganexus/backend-sdk';
@@ -26,6 +28,8 @@ export interface Config {
   gateway: GatewayEnv;
   host: string;
   monitor: MonitorEnv;
+  /** Agent 通道 :51241 的監控(giga-observe 服務 endpoint-agent) */
+  agentMonitor: MonitorEnv;
   /** 管理 API(:51240) */
   port: number;
   /** Agent 通道(:51241) */
@@ -120,6 +124,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd?: string): 
   return {
     gateway,
     monitor: loadMonitorEnv(gateway.gwEnv, env),
+    agentMonitor: loadMonitorEnv(gateway.gwEnv, { ...env, MONITOR_API_KEY: env.AGENT_MONITOR_API_KEY, MONITOR_API_KEY_FILE: env.AGENT_MONITOR_API_KEY_FILE }),
     host: env.HOST ?? (isDev ? '127.0.0.1' : '0.0.0.0'),
     port: port('PORT', env.PORT, 51240),
     agentPort: port('AGENT_PORT', env.AGENT_PORT, 51241),

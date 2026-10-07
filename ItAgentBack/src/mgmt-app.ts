@@ -7,7 +7,7 @@
  *   結構沿用 Gateway samples/node-backend 的 app.ts。
  */
 import swagger from '@fastify/swagger';
-import { createTokenVerifier, errorBody, INTERNAL_TOKEN_HEADER, type GatewayIdentity } from '@giganexus/backend-sdk';
+import { createTokenVerifier, errorBody, INTERNAL_TOKEN_HEADER, type DepStatus, type GatewayIdentity } from '@giganexus/backend-sdk';
 import { setupGateway } from '@giganexus/backend-sdk/fastify';
 import Fastify, { type FastifyInstance } from 'fastify';
 import type { Config } from './config.js';
@@ -34,6 +34,8 @@ export interface MgmtAppOptions {
   service: DeviceService;
   /** 就緒檢查:SQL Server 可用(唯一真相);Mongo / Redis 只回報狀態,不影響就緒 */
   readiness?: () => Promise<{ ok: boolean; checks: Record<string, string> }>;
+  /** 監控心跳附帶的相依服務狀態(SQL Server / Mongo / Redis) */
+  deps?: () => Promise<DepStatus[]>;
 }
 
 export async function buildMgmtApp(opts: MgmtAppOptions): Promise<FastifyInstance> {
@@ -47,7 +49,12 @@ export async function buildMgmtApp(opts: MgmtAppOptions): Promise<FastifyInstanc
 
   await app.register(swagger, swaggerOptions(config.gateway.serviceCode, config.gateway.project));
   // 監控 + 自動註冊;需在路由之前註冊
-  await app.register(setupGateway, { env: config.gateway, monitor: config.monitor, version: process.env.npm_package_version });
+  await app.register(setupGateway, {
+    env: config.gateway,
+    monitor: config.monitor,
+    version: process.env.npm_package_version,
+    monitorOptions: { deps: opts.deps ?? null },
+  });
 
   app.decorateRequest('identity', null);
   app.addHook('onRequest', async (req) => {

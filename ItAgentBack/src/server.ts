@@ -4,6 +4,7 @@
  *   :51241 Agent 通道(Nginx 的 x-client-cert-*;test / prod 為 HTTPS)
  * SQL Server / Mongo / Redis 連不上時仍啟動:回報由 service 回 503 或降級,/readyz 回報狀態。
  */
+import type { DepStatus } from '@giganexus/backend-sdk';
 import { loadConfig } from './config.js';
 import { buildAgentApp } from './agent-app.js';
 import { buildMgmtApp } from './mgmt-app.js';
@@ -31,8 +32,22 @@ const readiness = async () => {
   return { ok: checks.sql === 'ok', checks };
 };
 
-const mgmt = await buildMgmtApp({ config, service, readiness });
-const agent = await buildAgentApp({ config, service });
+// 監控心跳附帶三種儲存的狀態(giga-observe 詳情面板顯示相依服務)
+const deps = (): Promise<DepStatus[]> =>
+  Promise.all(
+    ([['mssql', sql], ['mongo', mongo], ['redis', redis]] as const).map(async ([name, store]) => {
+      const t = Date.now();
+      try {
+        await store.ping();
+        return { name, ok: true, latencyMs: Date.now() - t };
+      } catch {
+        return { name, ok: false, latencyMs: null };
+      }
+    }),
+  );
+
+const mgmt = await buildMgmtApp({ config, service, readiness, deps });
+const agent = await buildAgentApp({ config, service, monitor: config.agentMonitor, deps });
 
 await mgmt.listen({ host: config.host, port: config.port });
 await agent.listen({ host: config.host, port: config.agentPort });
@@ -45,6 +60,7 @@ mgmt.log.info(
     devTrustClientHeaders: config.trustedProxies === null,
     devSkipToken: config.devSkipToken,
     monitor: config.monitor.enabled,
+    agentMonitor: config.agentMonitor.enabled,
   },
   '服務已啟動',
 );

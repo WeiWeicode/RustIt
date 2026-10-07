@@ -8,7 +8,8 @@
 #     BFF → http://endpoint-server:51240(管理 API,X-Internal-Token;路由由啟動時自動註冊的草稿發佈後生效)
 #   ita-mongo / ita-redis 只在本專案內部網路,不宣告 ports(AGENT.md §7.2)
 # 機密(ITA_SECRETS_DIR,uid 1000 可讀):ita_db_password、mongo_url、redis_url、mongo_password、redis_password、
-#   gw_api_key(Gateway CLI client:create --code endpoint-api)、endpoint_server.crt / .key
+#   gw_api_key(Gateway CLI client:create --code endpoint-api)、endpoint_server.crt / .key、
+#   monitor_api_key / agent_monitor_api_key(giga-observe 服務 endpoint-api / endpoint-agent 的 ingest Key)
 name: giganexus-ita-${GW_ENV:?GW_ENV 必須設定(test / prod)}
 
 services:
@@ -38,9 +39,12 @@ services:
       AGENT_TRUSTED_PROXIES: ${AGENT_TRUSTED_PROXIES:?AGENT_TRUSTED_PROXIES 必須設定(Gateway Docker 網段)}
       AGENT_TLS_CERT_FILE: /run/secrets/endpoint_server_crt
       AGENT_TLS_KEY_FILE: /run/secrets/endpoint_server_key
-      MONITOR_URL: ${MONITOR_URL:-}
+      # 監控(giga-observe,同一 Gateway 網路的 observe-api):管理 API 與 Agent 通道各一把 Key,架構圖上是兩個服務
+      MONITOR_URL: ${MONITOR_URL:-http://observe-api:51202}
+      MONITOR_API_KEY_FILE: /run/secrets/monitor_api_key
+      AGENT_MONITOR_API_KEY_FILE: /run/secrets/agent_monitor_api_key
       RELEASE_SHA: ${RELEASE_SHA:-dev}
-    secrets: [gw_api_key, ita_db_password, mongo_url, redis_url, endpoint_server_crt, endpoint_server_key]
+    secrets: [gw_api_key, ita_db_password, mongo_url, redis_url, endpoint_server_crt, endpoint_server_key, monitor_api_key, agent_monitor_api_key]
     depends_on: [ita-mongo, ita-redis]
     networks:
       default:
@@ -84,6 +88,10 @@ secrets:
     file: ${ITA_SECRETS_DIR}/endpoint_server.crt
   endpoint_server_key:
     file: ${ITA_SECRETS_DIR}/endpoint_server.key
+  monitor_api_key:
+    file: ${ITA_SECRETS_DIR}/monitor_api_key
+  agent_monitor_api_key:
+    file: ${ITA_SECRETS_DIR}/agent_monitor_api_key
   # 建置用:GitLab npm Registry 讀取 Token(環境變數 GITLAB_NPM_TOKEN;CI 由主機機密檔讀入)
   npm_token:
     environment: GITLAB_NPM_TOKEN
