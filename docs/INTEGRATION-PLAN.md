@@ -1,6 +1,6 @@
 # 整合計畫:RustAgent → ItAgentBack(Node.js)→ GigaItApp 電腦清單
 
-> **狀態**:計畫 v0.3(2026-10-06;決策 D1–D10 中 D1–D6、D8 已由需求方確認,見 §8)。**尚未開工**;跨 repo 文件(Gateway、根目錄、`workspace.json`)已同步。
+> **狀態**:計畫 v0.4(2026-10-07)。**M0–M4 完成,基本階段的 1、3 已在測試區達成**(我的電腦經 `:9443` 回報、測試區 GigaItApp 電腦清單看得到);2 的「本機加密暫存與補傳」屬 M5,需求方決定延後。進度與每個 commit 見 `DevelopmentProcess/NewFeatures.md`。
 > **時程以 NexusPlan 甘特圖為準**:基本階段 M0–M5 已登記為 W6-7 ~ W6-12(2026-10-06 ~ 10-07,需求方要求兩天內完成基礎功能);W6 原有的高階工作(W6-1 ~ W6-M)維持原排程,**進階功能待員工入口網與 GigaItApp 功能完善後再做**。本文只列順序與完成條件,不列日期。
 > **上位規範**:`../../giga-api-gateway-bff/docs/ENDPOINT-AGENT-GUIDE.md`(通道、權限、API 草案)、`BACKEND-GUIDE.md`(port、內部 Token、OpenAPI 註冊)、`DATABASE.md` §0(SQL Server 2012 限制)。
 > **相關決策**:[0004 Endpoint Server 改用 Node.js(`ItAgentBack`)](decisions/0004-node-endpoint-server.md)。
@@ -23,15 +23,17 @@
 
 **不在基本階段**:下指令(`/basic-commands`、`/admin-commands`)、軟體派送、遠端畫面、USB / 網路控管、報修與公告、Watchdog、托盤、Windows 服務安裝(MSI)、Windows 憑證存放區、CRL 更新、200 台壓測。見 §7 路線圖。
 
-### 現況(2026-10-06)
+### 現況(2026-10-07)
 
 | 項目 | 狀態 |
 | --- | --- |
 | `collector`(蒐集 `ComputerInfo`) | ✅ 已完成 |
-| `RustAgent` 的 agent、`ItAgentBack` | ❌ 不存在 |
-| Gateway `:9443`(`agent.conf`) | ⚠ 仍是 gRPC 版,待改 HTTPS / WebSocket(Gateway 指南 §10 G0) |
-| BFF 路由 `/api/endpoint/*` | ❌ 尚未註冊 |
-| GigaItApp 電腦清單頁 | ✅ 已有,只顯示名稱 / 狀態 / 憑證 DN / 指紋 / 時間 |
+| `RustAgent/crates/agent`(`rustit-agent`) | ✅ 前景執行;HTTPS 回報、WebSocket hello / 心跳、退避重連、PEM 憑證 |
+| `ItAgentBack`(endpoint-server) | ✅ 測試區(主機 2,容器 `endpoint-server` + `ita-mongo` / `ita-redis`,CI `develop` 部署) |
+| Gateway `:9443`(`agent.conf`) | ✅ HTTPS / WebSocket(Gateway d9890dd、5f5b989);主機 2 防火牆暫時只開放 10.10.112.13 |
+| BFF 路由 `/api/endpoint/*` | ✅ 自動註冊、IT 已發佈(2026-10-07);`endpoint.device.read` 由 GigaItApp `gateway-rbac.yaml` 綁到電腦清單 |
+| GigaItApp 電腦清單頁 | ✅ 名稱 / 狀態 / 使用者 / IP / 作業系統 / CPU / 記憶體 / 最後回報,點列看詳情 |
+| Agent 本機加密暫存、`/sync` | ⏸ M5,延後 |
 
 ---
 
@@ -176,47 +178,51 @@ flowchart LR
 
 ### M0 目錄重整與資料契約(本 repo)
 
-- [ ] 建立 `RustAgent/`、`ItAgentBack/`,以 `git mv` 搬移 Rust 檔案(§2),**單獨一個 commit**;修正 `.gitignore`、`scripts/bench.ps1`、README 路徑;`cargo build` / `cargo test -p rustit-collector` 搬移後仍通過。
-- [ ] 更新 `AGENT.md`、`docs/PROJECT-MAP.md`、`README.md` 路徑;外層根目錄 `PROJECT-MAP.md` 中指向 `RustIt/docs/ui-performance-comparison.md` 的連結改為 `RustIt/RustAgent/docs/ui-performance-comparison.md`(其餘 Gateway / 根目錄 / `workspace.json` 已於 2026-10-06 同步)。
-- [ ] `docs/contracts/`:`inventory.schema.json`、`sync.schema.json`、`ws-envelope.schema.json`、去識別化 `examples/inventory.sample.json`(以 `dump` 產生後把使用者、序號、MAC、IP 換成假值)。
+- [x] 建立 `RustAgent/`、`ItAgentBack/`,以 `git mv` 搬移 Rust 檔案(§2),**單獨一個 commit**;修正 `.gitignore`、`scripts/bench.ps1`、README 路徑;`cargo build` / `cargo test -p rustit-collector` 搬移後仍通過。
+- [x] 更新 `AGENT.md`、`docs/PROJECT-MAP.md`、`README.md` 路徑;外層根目錄 `PROJECT-MAP.md` 中指向 `RustIt/docs/ui-performance-comparison.md` 的連結改為 `RustIt/RustAgent/docs/ui-performance-comparison.md`(其餘 Gateway / 根目錄 / `workspace.json` 已於 2026-10-06 同步)。
+- [x] `docs/contracts/`:`inventory.schema.json`、`sync.schema.json`、`ws-envelope.schema.json`、去識別化 `examples/inventory.sample.json`(以 `dump` 產生後把使用者、序號、MAC、IP 換成假值)。
 
 ### M1 ItAgentBack 骨架與資料層
 
-- [ ] 複製 `../giga-api-gateway-bff/samples/node-backend` 為 `ItAgentBack/`;`gateway.project = RustIt`;`SERVICE_CODE` 區分 `endpoint-api`(51240)/`endpoint-agent`(51241);兩個 listener(dev 的 51241 可用 HTTP)。
-- [ ] **(你執行)** 建立 SQL Server 資料庫與帳號(§3.2,確認 D2 後我提供 T-SQL)。
-- [ ] `db/migrations/`:schema `ita` 與四張表(§3.1);簡單 migration runner(`npm run db:migrate`);`docs/DB_SCHEMA.md`。
-- [ ] `docker-compose`(開發用)啟動 `ita-mongo`、`ita-redis`(不宣告 ports,密碼 / 資料目錄分環境)。
-- [ ] service 層(§3.1 寫入順序、hash 比對、降級行為)與三個 store 介面;Agent 通道 `Device` 身分 hook、`/inventory`、`/ws`(`hello` / `heartbeat` / 離線)。
-- [ ] 管理 API 兩支,驗證 `X-Internal-Token`,OpenAPI 帶 `x-permission`、`x-gateway.project: RustIt`,test / prod 啟動時自動註冊草稿。
-- [ ] dev 旁路:`DEV_TRUST_CLIENT_HEADERS=1`、`DEV_SKIP_TOKEN=1`;**`GW_ENV` 非 `dev` 有任一旗標就啟動失敗**。
+- [x] 複製 `../giga-api-gateway-bff/samples/node-backend` 為 `ItAgentBack/`;`gateway.project = RustIt`;`SERVICE_CODE` 區分 `endpoint-api`(51240)/`endpoint-agent`(51241);兩個 listener(dev 的 51241 可用 HTTP)。
+- [x] **(你執行)** 建立 SQL Server 資料庫與帳號(§3.2,確認 D2 後我提供 T-SQL)。
+- [x] `db/migrations/`:schema `ita` 與四張表(§3.1);簡單 migration runner(`npm run db:migrate`);`docs/DB_SCHEMA.md`。
+- [x] `docker-compose`(開發用)啟動 `ita-mongo`、`ita-redis`(不宣告 ports,密碼 / 資料目錄分環境)。
+- [x] service 層(§3.1 寫入順序、hash 比對、降級行為)與三個 store 介面;Agent 通道 `Device` 身分 hook、`/inventory`、`/ws`(`hello` / `heartbeat` / 離線)。
+- [x] 管理 API 兩支,驗證 `X-Internal-Token`,OpenAPI 帶 `x-permission`、`x-gateway.project: RustIt`,test / prod 啟動時自動註冊草稿。
+- [x] dev 旁路:`DEV_TRUST_CLIENT_HEADERS=1`、`DEV_SKIP_TOKEN=1`;**`GW_ENV` 非 `dev` 有任一旗標就啟動失敗**。
 - 測試(`tsx --test`):契約範例解析、hash 沒變不寫庫、SQL 失敗回 503 且 Mongo / Redis 不寫、Mongo / Redis 失敗不影響成功、心跳逾時變離線、未帶憑證標頭 401、Token 缺少 / `aud` 不符被拒。整合測試用 `giganexus_It_Agent_poc_test` 與 compose 內的 Mongo / Redis。
 
 ### M2 RustAgent MVP(`RustAgent/crates/agent`)
 
-- [ ] 新增 `rustit-agent`;`main.rs` 只組裝,邏輯分 config / transport / heartbeat / cert source 模組。
-- [ ] 前景執行 `rustit-agent run`(Windows 服務化屬後續);設定檔 `agent.toml`(`server_url`、`ca_file`、PEM 憑證路徑、`inventory_interval`)。
-- [ ] 蒐集 → `POST /agent/v1/inventory`(`reqwest` + rustls);失敗指數退避;啟動隨機延遲 0–30 秒。
-- [ ] WebSocket `hello` + 30 秒 `heartbeat`;斷線依指南 §6.3 退避(1 秒起、上限 2 分鐘、±20%)。
-- [ ] 憑證來源 trait:本階段只做 PEM 檔。
+- [x] 新增 `rustit-agent`;`main.rs` 只組裝,邏輯分 config / transport / heartbeat / cert source 模組。
+- [x] 前景執行 `rustit-agent run`(Windows 服務化屬後續);設定檔 `agent.toml`(`server_url`、`ca_file`、PEM 憑證路徑、`inventory_interval`)。
+- [x] 蒐集 → `POST /agent/v1/inventory`(`reqwest` + rustls);失敗指數退避;啟動隨機延遲 0–30 秒。
+- [x] WebSocket `hello` + 30 秒 `heartbeat`;斷線依指南 §6.3 退避(1 秒起、上限 2 分鐘、±20%)。
+- [x] 憑證來源 trait:本階段只做 PEM 檔。
 - 測試:`cargo test -p rustit-agent`(inventory JSON 通過契約 schema、退避範圍、設定解析)。
 - 完成:本機同時跑 M1 與 M2(dev 旁路)→ SQL Server 有資料、Redis 有在線 key、Mongo 有快照;關掉 Agent 90 秒後 `online=false`。
 
 ### M3 GigaItApp 顯示(GigaItApp repo,**需同意**)
 
-- [ ] `types.ts` 加摘要欄位與 `EndpointDeviceDetail`;`Devices.vue` 欄位改為 名稱 / 狀態 / 使用者 / IP / 作業系統 / CPU / 記憶體 / 最後回報;點列開詳情(沿用 `ui/` 元件與 `docs/UI-GUIDE.md`);既有錯誤提示不變。
-- [ ] 本機驗證:`vite.config.ts` 開發設定把 `/api/endpoint` proxy 到本機 ItAgentBack:51240(僅 dev,不進 test / prod)。
+- [x] `types.ts` 加摘要欄位與 `EndpointDeviceDetail`;`Devices.vue` 欄位改為 名稱 / 狀態 / 使用者 / IP / 作業系統 / CPU / 記憶體 / 最後回報;點列開詳情(沿用 `ui/` 元件與 `docs/UI-GUIDE.md`);既有錯誤提示不變。
+- [x] 本機驗證:`vite.config.ts` 開發設定把 `/api/endpoint` proxy 到本機 ItAgentBack:51240(僅 dev,不進 test / prod)。
 - **→ 完成基本階段的 1、2、3(本機閉環)。**
 
 ### M4 測試區接通(Gateway、GigaItApp、主機 2,**需同意**)
 
-- [ ] Gateway `agent.conf` 改 HTTPS / WebSocket(指南 §4、§10 G0;`ENDPOINT_GRPC_UPSTREAM` → `ENDPOINT_AGENT_UPSTREAM`;E2E `06-websocket-agent` 與 `tools/mock-upstream/endpoint.js` 同步)。先改 mock 與 E2E,`nginx -t` 與 E2E 全綠才合併。
-- [ ] ItAgentBack 容器化並由 CI `develop` 部署到測試區(加入 Gateway Docker 網路,容器名 `endpoint-server`;`:51241` 伺服器憑證 SAN 含該名稱;主機 2 建置加 `--pull`);測試區 Mongo / Redis 一套。
-- [ ] 上游與路由登記(`endpoint-api`、`endpoint-agent`),OpenAPI 註冊後由 IT 發佈。
-- [ ] 臨時 PKI(`deploy/gen-temp-pki.sh`)簽發我電腦的裝置憑證,Agent 連 `https://10.10.130.124:9443`。先 `Test-NetConnection 10.10.130.124 -Port 9443`,不通就回報、不改防火牆。
-- [ ] **權限綁定(GigaItApp `deploy/gateway-rbac.yaml`,D9)**:`it.endpoint-device.read`(選單)與 `it.endpoint-device.list`(Tab)目前**沒有 `includes`**,與其他端點以外的節點不同(例:`it.gw-service.read` 的 `includes: [gw.admin.upstream.read, …]`),所以授予選單時不會一併取得 Gateway 的 `endpoint.device.read`,畫面才 403。改為 `includes: [endpoint.device.read]`。**順序**:先讓 ItAgentBack 的 OpenAPI 註冊進測試區 Gateway(`x-permission: endpoint.device.read`,新權限代碼隨註冊建立,BACKEND-GUIDE §7.5),再套用本檔(同 `observe.*` 的做法:先匯入再 apply)。S112009 已有 `it-admin`(含選單),綁定後自動取得,**不需另外用 SQL 指派**。
-- [ ] GigaItApp 移除開發 proxy,改用測試區 Gateway(`dev:gw`)驗證 `endpoint/devices.feature`。
+- [x] Gateway `agent.conf` 改 HTTPS / WebSocket(指南 §4、§10 G0;`ENDPOINT_GRPC_UPSTREAM` → `ENDPOINT_AGENT_UPSTREAM`;E2E `06-websocket-agent` 與 `tools/mock-upstream/endpoint.js` 同步)。先改 mock 與 E2E,`nginx -t` 與 E2E 全綠才合併。
+- [x] ItAgentBack 容器化並由 CI `develop` 部署到測試區(加入 Gateway Docker 網路,容器名 `endpoint-server`;`:51241` 伺服器憑證 SAN 含該名稱;主機 2 建置加 `--pull`);測試區 Mongo / Redis 一套。
+- [x] 上游與路由登記(`endpoint-api`、`endpoint-agent`),OpenAPI 註冊後由 IT 發佈。
+- [x] 臨時 PKI(`deploy/gen-temp-pki.sh`)簽發我電腦的裝置憑證,Agent 連 `https://10.10.130.124:9443`。先 `Test-NetConnection 10.10.130.124 -Port 9443`,不通就回報、不改防火牆。
+- [x] **權限綁定(GigaItApp `deploy/gateway-rbac.yaml`,D9)**:`it.endpoint-device.read`(選單)與 `it.endpoint-device.list`(Tab)目前**沒有 `includes`**,與其他端點以外的節點不同(例:`it.gw-service.read` 的 `includes: [gw.admin.upstream.read, …]`),所以授予選單時不會一併取得 Gateway 的 `endpoint.device.read`,畫面才 403。改為 `includes: [endpoint.device.read]`。**順序**:先讓 ItAgentBack 的 OpenAPI 註冊進測試區 Gateway(`x-permission: endpoint.device.read`,新權限代碼隨註冊建立,BACKEND-GUIDE §7.5),再套用本檔(同 `observe.*` 的做法:先匯入再 apply)。S112009 已有 `it-admin`(含選單),綁定後自動取得,**不需另外用 SQL 指派**。
+- [x] GigaItApp 改用測試區 Gateway 驗證(開發 proxy `ENDPOINT_LOCAL` 只在設定時生效,保留給本機開發)。
+- 實際做法與計畫的差異(2026-10-07):Gateway 沒有 `06-websocket-agent` E2E 與 `tools/mock-upstream/endpoint.js`,改在 `01-nginx-entry` 以一次性容器現場簽發憑證驗證(Agent CA 轉送 200、非 Agent CA 403、無憑證 400);主機 2 機密與憑證由需求方執行 `ItAgentBack/deploy/host2-set-secrets.sh`;測試區 Mongo 密碼檔改由 root 讀入、Mongo 第一次連線失敗後自動換新 client(容器同時啟動)。
+- **→ 基本階段 1、3 在測試區達成(2026-10-07)。**
 
 ### M5 離線暫存與比對(RustAgent、ItAgentBack)
+
+> 2026-10-07 需求方決定延後(甘特圖 W6-12 暫停):先完成測試區接通。
 
 - [ ] RustAgent 本機加密 store(§4.1)、outbox、`/sync` 流程。
 - [ ] ItAgentBack `/sync`、`(device, agent_seq)` 冪等、較舊快照只進歷史。
@@ -224,8 +230,8 @@ flowchart LR
 
 ### M6 收尾
 
-- [ ] 更新各 repo 的 `docs/PROJECT-MAP.md`、`docs/DevelopmentProcess/`;同步 `../GigaNexusAIPlan/architecture/*.json` 並 `npm run arch:check`(根 `AGENT.md` §4.4)。
-- [ ] 完成的項目經 API 更新 NexusPlan 甘特圖。
+- [x] 更新各 repo 的 `docs/PROJECT-MAP.md`、`docs/DevelopmentProcess/`;同步 `../GigaNexusAIPlan/architecture/*.json` 並 `npm run arch:check`(根 `AGENT.md` §4.4)。
+- [x] 完成的項目經 API 更新 NexusPlan 甘特圖。
 
 ---
 

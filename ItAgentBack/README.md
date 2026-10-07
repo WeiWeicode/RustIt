@@ -23,6 +23,15 @@ npm run dev                     # dev 預設只聽 127.0.0.1
 - Windows 若保留了 51176–51275(`netsh int ipv4 show excludedportrange protocol=tcp`),本機 `.env` 改 `PORT=51296`、`AGENT_PORT=51297`;測試區 / 正式區固定 51240 / 51241。
 - Agent:`cd ../RustAgent && cargo run -p rustit-agent -- run --config crates/agent/agent.dev.toml`。
 
+## 測試區部署(主機 2)
+
+1. 第一次:需求方在主機 2 WSL 執行 `sudo sh host2-set-secrets.sh <裝置 FQDN ...>`(本目錄 `deploy/`),產生 `/srv/giganexus/ita-secrets/`、`/srv/giganexus/deploy/ita.env`、Gateway API Key(`endpoint-api`)與裝置憑證(`C:\Users\user\agentpki\<FQDN>\`,取走後刪除)。
+2. 推 `gitlab main:develop`:CI `check:itagentback` → `deploy-test`(`deploy/docker-compose.yml`:`endpoint-server` + `ita-mongo` / `ita-redis`,`/readyz` 冒煙)。
+3. 啟動時自動把管理 API 註冊為 Gateway 草稿 → IT 在 GigaItApp「服務與路由 › 發佈版本」發佈 → GigaItApp `gateway-rbac.yaml` 綁定 `endpoint.device.read`。
+4. Agent:`RustAgent/dist/rustit-agent-test/`(exe + `agent.toml` + `pki/`),PowerShell 執行 `.\rustit-agent.exe run --config agent.toml`。
+
+migration:測試區與開發共用 `giganexus_It_Agent_test`,由開發者電腦 `npm run db:migrate` 套用(容器不自動執行)。
+
 ## 指令
 
 | 指令 | 說明 |

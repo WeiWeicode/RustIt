@@ -48,7 +48,7 @@
 | 項目 | 內容 |
 | --- | --- |
 | 做什麼 | Windows 端點電腦的資產蒐集與控管:Agent 蒐集硬體 / 軟體 / 資安狀態並回報,IT 在 GigaItApp「端點管理」檢視與管理(產品規格 `docs/PRD.md`) |
-| 元件 | **Rust**(端點):`RustAgent/crates/collector`(蒐集函式庫)、`RustAgent/crates/agent`(規劃中,見整合計畫)、`native`(egui 示範)、`demo`(Tauri 示範)。**Node.js**(後端):`ItAgentBack/`(規劃中)= Endpoint Server,**取代原規劃的 Rust Axum**(`docs/decisions/0004-node-endpoint-server.md`) |
+| 元件 | **Rust**(端點):`RustAgent/crates/collector`(蒐集函式庫)、`RustAgent/crates/agent`(`rustit-agent`,前景執行;測試區已上線)、`native`(egui 示範)、`demo`(Tauri 示範)。**Node.js**(後端):`ItAgentBack/`(規劃中)= Endpoint Server,**取代原規劃的 Rust Axum**(`docs/decisions/0004-node-endpoint-server.md`) |
 | 通道 | Agent → Gateway `:9443`(mTLS、HTTP/1.1)→ `endpoint-agent`(51241,HTTPS 回報 + WebSocket 指令);**不使用 gRPC**(`docs/decisions/0001`) |
 | 管理 API | IT 前端 → `/api/endpoint/*` → BFF(權限 `endpoint.*`)→ `endpoint-api`(51240)。**權限以 BFF 為準**(Gateway PRD Q27、ENDPOINT-AGENT-GUIDE §8);`itapp-api` 不轉送端點 API |
 | 服務代碼與 port | `endpoint-api` 51240、`endpoint-agent` 51241(Gateway BACKEND-GUIDE §3.3 已登記);**不可自行換 port**。`x-gateway.project` = `RustIt` |
@@ -121,6 +121,7 @@ Agent 與 Server 之間只透過 **資料契約**(`docs/contracts/`,JSON Schema 
 - 部署區只有這三個值;缺少必要設定時**啟動失敗**,不要加預設值繞過檢查。
 - Agent 的 Gateway 位址以 IP 設定(`<gateway-ip>:9443`),不用主機名稱(Gateway PRD Q1)。
 - `:51241` 防火牆**只允許 Gateway 主機**連入;`ItAgentBack/` 不可信任任何不是 Nginx 帶來的身分標頭。
+- **測試區(2026-10-07 起)**:CI 推 `gitlab main:develop` → `deploy-test` 在主機 2 建置 `endpoint-server`(加入 `giganexus-gw_default`)與 `ita-mongo` / `ita-redis`;Compose 變數 `/srv/giganexus/deploy/ita.env`、機密 `/srv/giganexus/ita-secrets/`,由需求方執行 `ItAgentBack/deploy/host2-set-secrets.sh` 產生(SQL 密碼隱藏輸入;AI 不經手密碼)。主機 2 的 `:9443` 防火牆暫時只開放 10.10.112.13,上線前改為端點網段。
 
 ---
 

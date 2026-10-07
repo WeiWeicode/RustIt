@@ -1,6 +1,6 @@
 # 專案地圖 — RustIt (企業端點資產管理與控管平台)
 
-> **最後更新**：2026-10-06(M0 目錄拆分與資料契約;M1 ItAgentBack;M2 rustit-agent)  
+> **最後更新**：2026-10-07(M4 測試區接通:ItAgentBack 容器化與 CI 部署、Agent 經 Gateway :9443 回報)  
 > **目前階段**：階段 1 MVP·資產蒐集與效能評估驗證（`collector`、`demo` [Tauri]、`native` [egui] 已實作完成）。  
 > **上位規範**：全專案總圖 [PROJECT-MAP.md](../../PROJECT-MAP.md)、Gateway 規範 [giga-api-gateway-bff/docs/](../../giga-api-gateway-bff/docs/)。
 
@@ -12,6 +12,8 @@
 RustIt/
 ├─ README.md                        專案簡介與快速上手
 ├─ AGENT.md                         AI 協作準則(分工、部署區、Rust / Node.js 規則、修正紀錄)
+├─ .gitlab-ci.yml                   check:itagentback(所有分支)、deploy-test(develop → 主機 2)
+├─ .dockerignore                    ItAgentBack 映像檔建置 context 白名單
 ├─ docs/                            兩個子專案共用的文件(Gateway 等其他專案以 ../RustIt/docs/... 參照,不搬動)
 │  ├─ PRD.md                        產品需求說明 (對標 IP-guard/SmartIT，四階段里程碑)
 │  ├─ INTEGRATION-PLAN.md           整合計畫:Agent → Node.js Endpoint Server → GigaItApp 電腦清單(目標、階段、待決)
@@ -31,7 +33,7 @@ RustIt/
 ├─ RustAgent/                       Rust:端點電腦上的程式(Cargo workspace)
 │  ├─ Cargo.toml                    Workspace 設定 (collector, demo, native)
 │  ├─ Cargo.lock
-│  ├─ dist/                         編譯成品存放目錄 (RustIt-Demo.exe, RustIt-Native.exe,不進版控)
+│  ├─ dist/                         編譯成品存放目錄 (RustIt-Demo.exe, RustIt-Native.exe, rustit-agent-test/ 測試區 Agent 套件,不進版控)
 │  ├─ scripts/
 │  │  └─ bench.ps1                  效能取樣腳本 (量測記憶體、CPU、行程與執行緒)
 │  ├─ docs/
@@ -74,6 +76,9 @@ RustIt/
    ├─ db/dba/                       建庫 T-SQL(DBA 以 sa 執行,AI 不執行)
    ├─ db/migrations/                0001_init.sql:ita.device、device_inventory、device_nic、device_event
    ├─ deploy/docker-compose.dev.yml 本機 Mongo 7 / Redis 7(只綁 127.0.0.1)
+   ├─ deploy/docker-compose.yml     測試區:endpoint-server(Gateway 網路)+ ita-mongo / ita-redis(內部網路)
+   ├─ deploy/host2-set-secrets.sh   主機 2 機密、臨時憑證、Gateway API Key、ita.env(需求方執行)
+   ├─ Dockerfile                    建置 context 為 RustIt 根目錄(含 docs/contracts;根目錄 .dockerignore 白名單)
    ├─ test/                         單元與契約測試(記憶體儲存);test/int/ 整合測試(真實三種儲存)
    └─ docs/DB_SCHEMA.md             資料結構與寫入順序
 ```
@@ -86,7 +91,7 @@ RustIt/
 | :--- | :--- | :--- |
 | **資料蒐集層 (Collector)** | `RustAgent/crates/collector` | 呼叫 Win32 API、WMI (`root\cimv2`) 與 Registry，產出結構化資產物件 (`SystemInfo`)。不依賴任何 UI。 |
 | **端點展現層 (Presentation)** | `RustAgent/crates/native` (egui)<br/>`RustAgent/crates/demo` (WebView2)<br/>`RustAgent/crates/tray` (托盤) | • `native`：極低記憶體 (<90MB)、超快啟動的原生介面，供工程師快速檢測。<br/>• `demo`：驗證複雜動畫與 Web 玻璃擬態體驗。<br/>• `tray`：常駐工作列，提供員工自助報修與重要公告。 |
-| **端點後台服務 (Service)** | `RustAgent/crates/agent`(M2:前景執行,服務化規劃中) | 註冊為 Windows Service，具備 LocalSystem 權限，負責 USBSTOR 封鎖、軟體背景安裝、RustDesk 守護。 |
+| **端點後台服務 (Service)** | `RustAgent/crates/agent`(前景執行,測試區已上線;服務化規劃中) | 註冊為 Windows Service，具備 LocalSystem 權限，負責 USBSTOR 封鎖、軟體背景安裝、RustDesk 守護。 |
 | **通訊與傳輸層 (Transport)** | `agent` ➔ Gateway | 以 X.509 裝置憑證透過 Gateway `:9443` (mTLS) 以 HTTPS 回報資產、維持一條 WebSocket 接收指令與心跳（2026-10-01 決定，不用 gRPC；ADR 0001）。 |
 
 ---
