@@ -52,7 +52,9 @@ services:
     restart: unless-stopped
     environment:
       MONGO_INITDB_ROOT_USERNAME: ita
-      MONGO_INITDB_ROOT_PASSWORD_FILE: /run/secrets/mongo_password
+    # 機密檔為 uid 1000 / 400(endpoint-server 讀取);官方 entrypoint 會先切換成 mongodb 使用者才讀 *_FILE 而被拒,
+    # 改以 root 讀入後再交給官方 entrypoint
+    entrypoint: ['sh', '-c', 'MONGO_INITDB_ROOT_PASSWORD="$$(cat /run/secrets/mongo_password)" exec docker-entrypoint.sh mongod']
     secrets: [mongo_password]
     volumes:
       - ita_mongo:/data/db
