@@ -20,7 +20,7 @@ npm run dev                     # dev 預設只聽 127.0.0.1
 ```
 
 - dev 旁路:`DEV_TRUST_CLIENT_HEADERS=1`(本機 Agent 直連,自帶憑證標頭)、`DEV_SKIP_TOKEN=1`(本機 GigaItApp 直連);`GW_ENV` 非 `dev` 時有設定就啟動失敗。
-- Windows 若保留了 51176–51275(`netsh int ipv4 show excludedportrange protocol=tcp`),本機 `.env` 改 `PORT=51290`、`AGENT_PORT=51291`;測試區 / 正式區固定 51240 / 51241。
+- Windows 若保留了 51176–51275(`netsh int ipv4 show excludedportrange protocol=tcp`),本機 `.env` 改 `PORT=51296`、`AGENT_PORT=51297`;測試區 / 正式區固定 51240 / 51241。
 - Agent:`cd ../RustAgent && cargo run -p rustit-agent -- run --config crates/agent/agent.dev.toml`。
 
 ## 指令

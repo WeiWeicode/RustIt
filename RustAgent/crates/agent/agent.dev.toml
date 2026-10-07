@@ -1,7 +1,7 @@
 # 本機開發:直連本機 ItAgentBack(.env 設 DEV_TRUST_CLIENT_HEADERS=1),Agent 自己帶 x-client-cert-* 標頭模擬 Nginx。
 #   cd RustAgent && cargo run -p rustit-agent -- run --config crates/agent/agent.dev.toml
-# ItAgentBack 的 AGENT_PORT 預設 51241;本機被 Windows 保留時改用 51291(見 ItAgentBack/.env.example)。
-server_url = "http://127.0.0.1:51291"
+# ItAgentBack 的 AGENT_PORT 預設 51241;本機被 Windows 保留時改用 51297(見 ItAgentBack/.env.example)。
+server_url = "http://127.0.0.1:51297"
 inventory_interval_sec = 300
 startup_jitter_sec = 0
 
