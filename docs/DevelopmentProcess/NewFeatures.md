@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-07 ItAgentBack 接 giga-observe 架構觀測(含 WebSocket)
+- 內容:管理 API(`endpoint-api`)與 Agent 通道(`endpoint-agent`)各一把 giga-observe ingest Key,架構圖上是兩個服務。Agent 通道以 `setupGateway`(`register: false`)記錄 HTTPS 回報(userId = 電腦名稱、meta.deviceId);WebSocket 每條連線關閉時推一筆 `method: WS`、status 101 的紀錄(持續時間、關閉碼、訊息數、在線數、來源 IP 取 Nginx 的 `X-Forwarded-For`;非 1000 / 1001 為 warn);兩邊的心跳附 mssql / mongo / redis 狀態,Agent 通道另附「WebSocket 在線 N 條」。`DeviceService.onlineCount`;設定 `AGENT_MONITOR_API_KEY(_FILE)`;測試區 compose `MONITOR_URL=http://observe-api:51202` 與兩個 secret;`host2-set-secrets.sh` 建立兩把 Key。配合 giga-observe 624c120(拓樸)、Gateway 40d633a(`agent.conf` 轉送 `X-Forwarded-For`,只供顯示)。
+- 檔案:`ItAgentBack/src/{agent-app,mgmt-app,server,config}.ts`、`src/services/device-service.ts`、`test/agent-monitor.test.ts`、`deploy/docker-compose.yml`、`deploy/host2-set-secrets.sh`、`.env.example`、`README.md`
+- 驗證:`npm test` 39 項(新增 4 項:回報逐筆、WS 關閉紀錄、心跳在線數、關閉碼等級)、typecheck 通過;測試區部署 0ebf47a 後 giga-observe 兩個服務皆 healthy,`endpoint-agent` 心跳顯示「WebSocket 在線 1 條」,收到 `POST /agent/v1/inventory 200`(來源 10.10.112.13)。
+
 ## 2026-10-07 M4 測試區接通(Gateway :9443、ItAgentBack 部署、權限綁定)
 - 內容:需求方同意 M4 全部項目並決定 M5 延後。Gateway(d9890dd、5f5b989、220ae66):`agent.conf` 改 HTTPS / WebSocket、`ENDPOINT_AGENT_UPSTREAM`、測試區信任臨時 Agent CA(DN 順序須與 `openssl -nameopt RFC2253` 一致)、`map_hash_bucket_size 256`、E2E;主機 2 Traefik 加 `agent` 入口、防火牆「GigaNexus Agent 9443」只開放 10.10.112.13。本 repo:`ItAgentBack/Dockerfile`(context 為 RustIt 根目錄,含 `docs/contracts`)、`deploy/docker-compose.yml`(`endpoint-server` 加入 Gateway 網路;`ita-mongo` / `ita-redis` 不宣告 ports)、`.gitlab-ci.yml`、`deploy/host2-set-secrets.sh`(需求方執行:SQL 密碼隱藏輸入、Mongo / Redis 密碼、`endpoint-server` 與裝置憑證、Gateway API Key `endpoint-api`、`ita.env`)。部署後修正:`ita-mongo` 改由 root 讀密碼檔(0f08e43;官方 entrypoint 切換使用者後讀 `_FILE` 被拒)、Mongo 第一次連線失敗後換新 client 並補建索引(5103251;容器同時啟動時 `Topology is closed`)。GigaItApp(6d89cca):`it.endpoint-device.read` / `.list` 加 `includes: [endpoint.device.read]`、前端 `requires`。IT 發佈 `endpoint-api` 路由(2026-10-07)。Agent 套件 `RustAgent/dist/rustit-agent-test/`(release exe + `agent.toml` + `pki/`,不進版控);主機 2 上的裝置私鑰副本已刪除。
 - 檔案:`.gitlab-ci.yml`、`.dockerignore`、`ItAgentBack/Dockerfile`、`ItAgentBack/deploy/`、`ItAgentBack/src/stores/mongo-store.ts`、`ItAgentBack/README.md`、`AGENT.md` §6、`docs/INTEGRATION-PLAN.md`(v0.4)、`docs/PROJECT-MAP.md`

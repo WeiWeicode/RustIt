@@ -30,6 +30,8 @@ npm run dev                     # dev 預設只聽 127.0.0.1
 3. 啟動時自動把管理 API 註冊為 Gateway 草稿 → IT 在 GigaItApp「服務與路由 › 發佈版本」發佈 → GigaItApp `gateway-rbac.yaml` 綁定 `endpoint.device.read`。
 4. Agent:`RustAgent/dist/rustit-agent-test/`(exe + `agent.toml` + `pki/`),PowerShell 執行 `.\rustit-agent.exe run --config agent.toml`。
 
+監控(giga-observe 架構觀測):管理 API 為服務 `endpoint-api`、Agent 通道為服務 `endpoint-agent`,各一把 ingest Key(`monitor_api_key`、`agent_monitor_api_key`)。Agent 通道的 HTTPS 回報逐筆記錄;WebSocket 每條連線**關閉時**記一筆(`method: WS`,`meta`:closeCode、messages、online;非 1000 / 1001 為 warn);Agent 的 heartbeat 訊息不逐筆記錄;心跳的相依服務附 mssql / mongo / redis 與「WebSocket 在線 N 條」。
+
 migration:測試區與開發共用 `giganexus_It_Agent_test`,由開發者電腦 `npm run db:migrate` 套用(容器不自動執行)。
 
 ## 指令
