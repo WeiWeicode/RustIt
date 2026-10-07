@@ -1,0 +1,96 @@
+# ItAgentBack 部署到測試區(主機 2,與 Gateway 同一台;INTEGRATION-PLAN M4)。CI deploy-test 於 develop 執行:
+#   docker compose --env-file <主機受保護目錄>/ita.env -f ItAgentBack/deploy/docker-compose.yml build --pull endpoint-server
+#   docker compose --env-file <主機受保護目錄>/ita.env -f ItAgentBack/deploy/docker-compose.yml up -d --wait
+#
+# 網路:
+#   endpoint-server 加入 Gateway 的 Docker 網路(GW_NETWORK),容器名稱 / 別名 endpoint-server:
+#     Nginx :9443 → https://endpoint-server:51241(Agent 通道,TLS;伺服器憑證 SAN 含 endpoint-server,由 pki/ca.crt 簽發)
+#     BFF → http://endpoint-server:51240(管理 API,X-Internal-Token;路由由啟動時自動註冊的草稿發佈後生效)
+#   ita-mongo / ita-redis 只在本專案內部網路,不宣告 ports(AGENT.md §7.2)
+# 機密(ITA_SECRETS_DIR,uid 1000 可讀):ita_db_password、mongo_url、redis_url、mongo_password、redis_password、
+#   gw_api_key(Gateway CLI client:create --code endpoint-api)、endpoint_server.crt / .key
+name: giganexus-ita-${GW_ENV:?GW_ENV 必須設定(test / prod)}
+
+services:
+  endpoint-server:
+    image: giganexus/it-agent-back:${IMAGE_TAG:-dev}
+    build:
+      context: ../..
+      dockerfile: ItAgentBack/Dockerfile
+      secrets: [npm_token]
+    restart: unless-stopped
+    environment:
+      GW_ENV: ${GW_ENV}
+      SERVICE_CODE: endpoint-api
+      GW_BASE_URL: ${GW_BASE_URL:?GW_BASE_URL 必須設定}
+      # 同一 Docker 網路直連 bff-1 取 JWKS(不經 Nginx 的內網白名單;同 GigaItApp itapp-api)
+      GW_JWKS_URL: ${GW_JWKS_URL:-http://bff-1:3000/.well-known/jwks.json}
+      GW_API_KEY_FILE: /run/secrets/gw_api_key
+      SERVICE_ADVERTISE_URL: http://endpoint-server:51240
+      ITA_DB_HOST: ${ITA_DB_HOST:?ITA_DB_HOST 必須設定}
+      ITA_DB_PORT: ${ITA_DB_PORT:-1433}
+      ITA_DB_NAME: ${ITA_DB_NAME:?ITA_DB_NAME 必須設定}
+      ITA_DB_USER: ${ITA_DB_USER:?ITA_DB_USER 必須設定}
+      ITA_DB_PASSWORD_FILE: /run/secrets/ita_db_password
+      MONGO_URL_FILE: /run/secrets/mongo_url
+      REDIS_URL_FILE: /run/secrets/redis_url
+      # 只採信 Gateway 網路(Nginx)送來的 x-client-cert-* 標頭
+      AGENT_TRUSTED_PROXIES: ${AGENT_TRUSTED_PROXIES:?AGENT_TRUSTED_PROXIES 必須設定(Gateway Docker 網段)}
+      AGENT_TLS_CERT_FILE: /run/secrets/endpoint_server_crt
+      AGENT_TLS_KEY_FILE: /run/secrets/endpoint_server_key
+      MONITOR_URL: ${MONITOR_URL:-}
+      RELEASE_SHA: ${RELEASE_SHA:-dev}
+    secrets: [gw_api_key, ita_db_password, mongo_url, redis_url, endpoint_server_crt, endpoint_server_key]
+    depends_on: [ita-mongo, ita-redis]
+    networks:
+      default:
+      gateway:
+        aliases: [endpoint-server]
+
+  ita-mongo:
+    image: mongo:7
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ita
+      MONGO_INITDB_ROOT_PASSWORD_FILE: /run/secrets/mongo_password
+    secrets: [mongo_password]
+    volumes:
+      - ita_mongo:/data/db
+
+  ita-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ['sh', '-c', 'exec redis-server --appendonly yes --requirepass "$$(cat /run/secrets/redis_password)"']
+    secrets: [redis_password]
+    volumes:
+      - ita_redis:/data
+
+secrets:
+  gw_api_key:
+    file: ${ITA_SECRETS_DIR:?ITA_SECRETS_DIR 必須設定}/gw_api_key
+  ita_db_password:
+    file: ${ITA_SECRETS_DIR}/ita_db_password
+  mongo_url:
+    file: ${ITA_SECRETS_DIR}/mongo_url
+  redis_url:
+    file: ${ITA_SECRETS_DIR}/redis_url
+  mongo_password:
+    file: ${ITA_SECRETS_DIR}/mongo_password
+  redis_password:
+    file: ${ITA_SECRETS_DIR}/redis_password
+  endpoint_server_crt:
+    file: ${ITA_SECRETS_DIR}/endpoint_server.crt
+  endpoint_server_key:
+    file: ${ITA_SECRETS_DIR}/endpoint_server.key
+  # 建置用:GitLab npm Registry 讀取 Token(環境變數 GITLAB_NPM_TOKEN;CI 由主機機密檔讀入)
+  npm_token:
+    environment: GITLAB_NPM_TOKEN
+
+volumes:
+  ita_mongo:
+  ita_redis:
+
+networks:
+  gateway:
+    external: true
+    name: ${GW_NETWORK:-giganexus-gw_default}

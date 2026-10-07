@@ -1,0 +1,10 @@
+# ItAgentBack 映像檔建置 context 為本目錄(ItAgentBack/Dockerfile):只需要 ItAgentBack/ 與 docs/contracts/
+**
+!ItAgentBack/package.json
+!ItAgentBack/package-lock.json
+!ItAgentBack/.npmrc
+!ItAgentBack/tsconfig.json
+!ItAgentBack/tsconfig.build.json
+!ItAgentBack/src/**
+!ItAgentBack/db/migrations/**
+!docs/contracts/*.schema.json

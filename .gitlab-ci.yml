@@ -1,0 +1,41 @@
+# RustIt Pipeline(Runner:主機 2 WSL shell executor,tag windows-runner;與 Gateway 同一台主機)
+#   check        所有分支:ItAgentBack 型別檢查與單元測試(RustAgent 為 Windows 程式,於開發者電腦 cargo test)
+#   deploy-test  develop:在主機 2 建置並更新 ItAgentBack(endpoint-server,加入 Gateway 網路)與其 Mongo / Redis
+# 主機需有:${ITA_ENV_FILE}(範本 ItAgentBack/deploy/test.env.example)、ITA_SECRETS_DIR 內的機密檔;
+#           Gateway 已部署(giganexus-gw_default 網路);npm Registry Token 同 GigaItApp(${NPM_TOKEN_FILE})
+stages: [check, deploy-test]
+
+variables:
+  ITA_ENV_FILE: /srv/giganexus/deploy/ita.env
+  NPM_TOKEN_FILE: /srv/giganexus/deploy/secrets/gitlab_npm_token
+
+.runner: &runner
+  tags: [windows-runner]
+
+check:itagentback:
+  <<: *runner
+  stage: check
+  script:
+    - export GITLAB_NPM_TOKEN="$(cat "$NPM_TOKEN_FILE")"
+    - cd ItAgentBack
+    - npm ci --no-audit --no-fund
+    - npm run typecheck
+    - npm test
+
+deploy-test:
+  <<: *runner
+  stage: deploy-test
+  rules:
+    - if: $CI_COMMIT_BRANCH == "develop"
+  environment: { name: test }
+  script:
+    - test -f "$ITA_ENV_FILE" || { echo "缺少 $ITA_ENV_FILE" >&2; exit 1; }
+    - export IMAGE_TAG=$CI_COMMIT_SHORT_SHA RELEASE_SHA=$CI_COMMIT_SHORT_SHA COMPOSE_ENV_FILES="$ITA_ENV_FILE"
+    - export GITLAB_NPM_TOKEN="$(cat "$NPM_TOKEN_FILE")"
+    - C="docker compose -f ItAgentBack/deploy/docker-compose.yml"
+    # --pull:主機上的 node:22-alpine 可能被其他專案覆寫(同 Gateway 2026-10-02)
+    - $C build --pull endpoint-server
+    - $C up -d --wait
+    # 冒煙測試:SQL / Mongo / Redis 皆可連線;管理 API 無內部 Token → 401
+    - $C exec -T endpoint-server wget -qO- http://127.0.0.1:51240/readyz
+    - '$C exec -T endpoint-server node -e "fetch(\"http://127.0.0.1:51240/v1/devices\").then((r) => process.exit(r.status === 401 ? 0 : 1))" && echo "OK   /v1/devices 無內部 Token → 401"'
