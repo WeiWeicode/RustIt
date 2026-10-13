@@ -6,10 +6,11 @@
 //! startup_jitter_sec = 30                     # 選用,啟動隨機延遲上限(指南 §6.3 第 1 步)
 //! log_level = "info"                          # 選用,服務模式的檔案日誌等級(error / warn / info / debug / trace);前景執行用 RUST_LOG
 //!
-//! [tls]                                       # https 必填:本階段只支援 PEM 檔(憑證來源 trait,見 tls.rs)
+//! [tls]                                       # https 必填;裝置憑證二選一(憑證來源見 tls.rs)
 //! ca_file = "pki/ca.crt"
-//! cert_file = "pki/agent.crt"
+//! cert_file = "pki/agent.crt"                 # (一)PEM 檔:開發與測試區
 //! key_file = "pki/agent.key"
+//! # store_issuer = "GigaNexus Agent CA"       # (二)Windows LocalMachine\My:簽發者名稱含此字串,每次握手重新挑選(指南 §3.4)
 //!
 //! [dev]                                       # 只允許 http://127.0.0.1 / localhost:直連 ItAgentBack(DEV_TRUST_CLIENT_HEADERS)
 //! simulate_client_cert = true                 # 自行帶 x-client-cert-* 標頭,模擬 Nginx
@@ -32,16 +33,38 @@ pub struct AgentConfig {
     #[serde(default = "default_startup_jitter")]
     pub startup_jitter_sec: u64,
     pub log_level: Option<String>,
-    pub tls: Option<TlsFiles>,
+    pub tls: Option<TlsConfig>,
     pub dev: Option<DevConfig>,
 }
 
+/// `[tls]`:裝置憑證二選一 — PEM 檔(`cert_file` + `key_file`)或 Windows 憑證存放區(`store_issuer`)
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TlsFiles {
+pub struct TlsConfig {
     pub ca_file: PathBuf,
-    pub cert_file: PathBuf,
-    pub key_file: PathBuf,
+    pub cert_file: Option<PathBuf>,
+    pub key_file: Option<PathBuf>,
+    pub store_issuer: Option<String>,
+}
+
+/// 驗證後的 TLS 設定
+#[derive(Debug, Clone, PartialEq)]
+pub struct TlsSettings {
+    /// 信任的根憑證(企業根 CA / 臨時 PKI)
+    pub ca_file: PathBuf,
+    pub client: ClientCert,
+}
+
+/// 裝置憑證來源(指南 §3.4)
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClientCert {
+    /// PEM 檔(開發與測試區)
+    Pem {
+        cert_file: PathBuf,
+        key_file: PathBuf,
+    },
+    /// `LocalMachine\My` 中簽發者名稱含此字串的憑證;每次握手重新挑選
+    Store { issuer: String },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -68,7 +91,7 @@ pub struct Settings {
     pub startup_jitter: Duration,
     /// 服務模式的日誌等級;未設定時 info
     pub log_level: Option<log::LevelFilter>,
-    pub tls: Option<TlsFiles>,
+    pub tls: Option<TlsSettings>,
     /// dev 模擬 Nginx 的憑證標頭(DN, 指紋)
     pub dev_cert_headers: Option<(String, String)>,
 }
@@ -87,7 +110,7 @@ impl AgentConfig {
             Url::parse(&self.server_url).map_err(|e| format!("server_url 不是合法的 URL:{e}"))?;
         let loopback = matches!(server.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"));
         match server.scheme() {
-            "https" if self.tls.is_none() => return Err("server_url 為 https 時必須設定 [tls](ca_file、cert_file、key_file)".into()),
+            "https" if self.tls.is_none() => return Err("server_url 為 https 時必須設定 [tls](ca_file,以及 cert_file + key_file 或 store_issuer)".into()),
             "https" => {}
             "http" if !loopback => return Err("http 只允許本機開發(127.0.0.1 / localhost);連 Gateway 請用 https://<gateway-ip>:9443".into()),
             "http" => {}
@@ -121,11 +144,27 @@ impl AgentConfig {
             }
             _ => None,
         };
-        let tls = self.tls.map(|t| TlsFiles {
-            ca_file: base_dir.join(t.ca_file),
-            cert_file: base_dir.join(t.cert_file),
-            key_file: base_dir.join(t.key_file),
-        });
+        let tls = match self.tls {
+            None => None,
+            Some(t) => {
+                let client = match (t.cert_file, t.key_file, t.store_issuer) {
+                    (Some(cert), Some(key), None) => ClientCert::Pem {
+                        cert_file: base_dir.join(cert),
+                        key_file: base_dir.join(key),
+                    },
+                    (None, None, Some(issuer)) if !issuer.trim().is_empty() => ClientCert::Store {
+                        issuer: issuer.trim().to_string(),
+                    },
+                    _ => {
+                        return Err("[tls] 裝置憑證二選一:cert_file + key_file(PEM 檔),或 store_issuer(Windows 憑證存放區的簽發者名稱)".into());
+                    }
+                };
+                Some(TlsSettings {
+                    ca_file: base_dir.join(t.ca_file),
+                    client,
+                })
+            }
+        };
         Ok(Settings {
             server,
             inventory_interval: Duration::from_secs(self.inventory_interval_sec),
@@ -184,6 +223,43 @@ mod tests {
             Path::new("C:/agent").join("pki/ca.crt")
         );
         assert!(s.dev_cert_headers.is_none());
+    }
+
+    /// 裝置憑證二選一:PEM 檔或憑證存放區;兩者都有、都沒有、只有一半都拒絕
+    #[test]
+    fn client_cert_is_pem_or_store() {
+        let https = "server_url = \"https://10.10.130.124:9443\"\n[tls]\nca_file = \"ca.crt\"\n";
+        let s = parse(&format!("{https}store_issuer = \" GigaNexus Agent CA \"\n")).unwrap();
+        assert_eq!(
+            s.tls.unwrap().client,
+            ClientCert::Store {
+                issuer: "GigaNexus Agent CA".into()
+            }
+        );
+        let s = parse(&format!(
+            "{https}cert_file = \"a.crt\"\nkey_file = \"a.key\"\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            s.tls.unwrap().client,
+            ClientCert::Pem {
+                cert_file: Path::new("C:/agent").join("a.crt"),
+                key_file: Path::new("C:/agent").join("a.key")
+            }
+        );
+        for bad in [
+            "",
+            "cert_file = \"a.crt\"\n",
+            "store_issuer = \"  \"\n",
+            "cert_file = \"a.crt\"\nkey_file = \"a.key\"\nstore_issuer = \"X\"\n",
+        ] {
+            assert!(
+                parse(&format!("{https}{bad}"))
+                    .unwrap_err()
+                    .contains("二選一"),
+                "{bad:?}"
+            );
+        }
     }
 
     /// 拒絕不安全或錯誤的設定
