@@ -1,5 +1,7 @@
 # 介面技術比較：原生（egui）與 WebView2（Tauri）
 
+> **紀錄**:`crates/native` 與 `scripts/bench.ps1` 已於 PLATFORM-PLAN P1 移除;要重現量測請 checkout commit `3ba3827`。本文件保留作為「使用者端程式採 Tauri + WebView2」的決策依據(PLATFORM-PLAN §4.8)。
+
 > 量測日期：2026-09-28
 > 目的：為 [PRD](PRD.md) 第 3 節「托盤程式：`tray-icon` + `egui`（或 Tauri）」的技術選擇提供實測數據。
 

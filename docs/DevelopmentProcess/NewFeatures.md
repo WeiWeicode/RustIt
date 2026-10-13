@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-13 P1:抽出 rustit-common、移除 native
+- 內容:依 PLATFORM-PLAN §3.1 新增 `RustAgent/crates/common`(`rustit-common`),把 Agent 與之後 Watchdog 共用的部分搬出:`config`、`tls`、`backoff`、`logging`、`paths`(`git mv`)與新拆出的 `envelope`(WebSocket 信封)、`stop`(StopSignal、with_grace、wait)。`transport` 通用化:`Transport::new(settings, user_agent)`、`post_json(path, body)`、`connect_ws(path)`,不再寫死 inventory / ws 路徑與 Agent 版本;`logging` 檔名前綴參數化(Agent `agent-`、之後 Watchdog `watchdog-`)。`agent` 只留資產回報、WebSocket 流程、契約型別(`protocol` 改為 re-export `Envelope`,新增 `INVENTORY_PATH`、`WS_PATH`、`user_agent()`)、服務與 `run_blocking`;服務名稱 `SERVICE_NAME` 移回 `service.rs`。agent 移除改由 common 提供的相依(reqwest、rustls、rustls-pki-types、toml、uuid、fastrand、url)。另以單獨 commit 移除 egui `native` 與 `scripts/bench.ps1`(Q1;Cargo.lock 只減少 158 個套件)。行為不變。
+- 檔案:`RustAgent/Cargo.toml`、`RustAgent/crates/common/`、`RustAgent/crates/agent/`、`RustAgent/crates/native/`(刪除)、`RustAgent/scripts/bench.ps1`(刪除)、`README.md`、`AGENT.md`、`docs/PROJECT-MAP.md`、`docs/HANDOFF.md`、`RustAgent/docs/ui-performance-comparison.md`
+- 驗證:`cargo test -p rustit-agent -p rustit-common` 24 項通過(與搬移前相同:common 17、agent 7);`cargo clippy -p rustit-agent -p rustit-common --all-targets` 無新警告;前景模式連測試區(`dist/rustit-agent-test/agent.toml`)WebSocket 已連線、資產回報 `stored`。
+
 ## 2026-10-13 P1 第一批:Agent Windows 服務化與檔案日誌
 - 內容:`rustit-agent` 新增子指令 `service`(由 SCM 啟動,服務 `GigaNexusAgent`、LocalSystem;設定檔取自行程參數 `service --config <檔>`,未指定用 `%ProgramData%\GigaNexus\Agent\agent.toml`;先報啟動中,設定載入、執行環境建立後才報執行中,設定錯誤以服務專屬結束代碼結束)與開發測試用 `install` / `uninstall`(自動啟動、失敗復原 10 / 30 / 60 秒、1 天重設、非當機失敗也套用;設定失敗復原失敗時移除剛建立的服務;移除時服務剛好已停止 / 停止中不算錯誤;正式安裝改用 MSI)。停止收尾:`StopSignal` 帶寬限,一般停止 30 秒、Windows 關機 5 秒,`with_grace` / `run_blocking` 前景與服務共用;訊號來源被丟棄不算結束要求;執行環境關閉最多等 5 秒(WMI 背景執行緒);WebSocket 以 1001 關閉。服務模式檔案日誌(`logging.rs`):每日一檔、保留 14 天、單日 10 MB(超過寫一行說明後停寫至隔天)、第三方套件只收 warn 以上(避免標頭或完整內容進檔案)、開檔失敗 60 秒後重試、鎖中毒仍可用;`agent.toml` 選用 `log_level`。新增相依 `windows-service` 0.8.1(SCM 進入點、服務安裝與失敗復原設定,Windows 限定)、dev 相依 tokio `test-util`(暫停時間測試)。code-reviewer 審查 15 項:除換日清理在持鎖時做(影響小)外皆已處理,開發安裝的目錄 ACL 於註解標明由 MSI 設定。
 - 檔案:`RustAgent/crates/agent/src/{main,lib,service,logging,paths,config,ws}.rs`、`RustAgent/crates/agent/Cargo.toml`、`RustAgent/Cargo.lock`、`README.md`、`AGENT.md`、`docs/PROJECT-MAP.md`、`docs/HANDOFF.md`

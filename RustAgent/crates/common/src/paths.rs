@@ -4,9 +4,6 @@
 
 use std::path::PathBuf;
 
-/// Windows 服務名稱(指南 §6.1)
-pub const SERVICE_NAME: &str = "GigaNexusAgent";
-
 /// `%ProgramData%\GigaNexus\Agent`;環境變數不存在時用 Windows 預設位置
 pub fn data_dir() -> PathBuf {
     let base = std::env::var_os("ProgramData")
@@ -15,7 +12,7 @@ pub fn data_dir() -> PathBuf {
     base.join("GigaNexus").join("Agent")
 }
 
-/// 服務模式預設的設定檔
+/// 服務模式預設的設定檔(Agent 與 Watchdog 共用同一份安裝設定)
 pub fn default_config() -> PathBuf {
     data_dir().join("agent.toml")
 }

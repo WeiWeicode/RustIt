@@ -2,10 +2,11 @@
 //! 成功後等下一個週期(預設 1 小時;內容沒變時 Server 只更新最後回報時間)。
 //! 離線暫存與 `/sync` 在 M5 加入;目前 Agent 重啟前未送出的那一份會遺失(下次啟動會重新蒐集)。
 
-use crate::backoff::Backoff;
-use crate::protocol::{HelloBody, InventoryRequest};
-use crate::transport::Transport;
+use crate::protocol::{HelloBody, INVENTORY_PATH, InventoryRequest, InventoryResponse};
 use log::{error, info, warn};
+use rustit_common::backoff::Backoff;
+use rustit_common::stop::wait;
+use rustit_common::transport::Transport;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -47,7 +48,10 @@ pub async fn run(
         let req = InventoryRequest::new(info, seq, collected_at);
         let mut backoff = Backoff::new();
         loop {
-            match transport.post_inventory(&req).await {
+            match transport
+                .post_json::<_, InventoryResponse>(INVENTORY_PATH, &req)
+                .await
+            {
                 Ok(res) => {
                     info!(
                         "資產回報完成:seq={} 結果={} 裝置={} 蒐集 {collect_ms} ms、軟體 {software} 筆",
@@ -68,16 +72,5 @@ pub async fn run(
         if wait(interval, &mut shutdown).await {
             return;
         }
-    }
-}
-
-/// 等待;收到結束訊號回傳 true
-pub(crate) async fn wait(d: Duration, shutdown: &mut watch::Receiver<bool>) -> bool {
-    if *shutdown.borrow() {
-        return true;
-    }
-    tokio::select! {
-        _ = tokio::time::sleep(d) => false,
-        _ = shutdown.changed() => true,
     }
 }

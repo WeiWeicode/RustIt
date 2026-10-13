@@ -3,9 +3,10 @@
 
 use crate::backoff::{Backoff, CERT_RETRY};
 use crate::config::Settings;
-use crate::protocol::{AGENT_VERSION, InventoryRequest, InventoryResponse};
 use crate::tls::{self, PemFiles};
 use rustls::ClientConfig;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -61,15 +62,16 @@ pub fn classify(status: u16, body: &str) -> SendError {
 
 pub struct Transport {
     http: reqwest::Client,
-    inventory_url: Url,
-    ws_url: Url,
+    server: Url,
+    user_agent: String,
     tls: Option<Arc<ClientConfig>>,
     /// dev 模擬 Nginx 的 x-client-cert-* 標頭
     extra_headers: Vec<(&'static str, String)>,
 }
 
 impl Transport {
-    pub fn new(settings: &Settings) -> Result<Self, String> {
+    /// `user_agent` 例:`giganexus-agent/0.1.0`(指南 §5.6)
+    pub fn new(settings: &Settings, user_agent: &str) -> Result<Self, String> {
         // reqwest 以 rustls-no-provider 建置:先指定行程預設的加密套件(ring),http 開發模式也需要
         let _ = rustls::crypto::ring::default_provider().install_default();
         let tls = match &settings.tls {
@@ -83,7 +85,7 @@ impl Transport {
             None => None,
         };
         let mut builder = reqwest::Client::builder()
-            .user_agent(format!("giganexus-agent/{AGENT_VERSION}"))
+            .user_agent(user_agent)
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(60))
             .pool_idle_timeout(Duration::from_secs(90));
@@ -93,23 +95,6 @@ impl Transport {
         let http = builder
             .build()
             .map_err(|e| format!("無法建立 HTTP 用戶端:{e}"))?;
-
-        let inventory_url = settings
-            .server
-            .join("/agent/v1/inventory")
-            .map_err(|e| e.to_string())?;
-        let mut ws_url = settings
-            .server
-            .join("/agent/v1/ws")
-            .map_err(|e| e.to_string())?;
-        let scheme = if settings.server.scheme() == "https" {
-            "wss"
-        } else {
-            "ws"
-        };
-        ws_url
-            .set_scheme(scheme)
-            .map_err(|_| "無法建立 WebSocket 位址".to_string())?;
 
         let extra_headers = match &settings.dev_cert_headers {
             Some((dn, fp)) => vec![
@@ -121,18 +106,24 @@ impl Transport {
         };
         Ok(Self {
             http,
-            inventory_url,
-            ws_url,
+            server: settings.server.clone(),
+            user_agent: user_agent.to_string(),
             tls,
             extra_headers,
         })
     }
 
-    pub async fn post_inventory(
+    /// `POST <server><path>`(JSON);成功回傳解析後的回應,失敗依 §4.2 分類
+    pub async fn post_json<Req: Serialize + ?Sized, Res: DeserializeOwned>(
         &self,
-        req: &InventoryRequest,
-    ) -> Result<InventoryResponse, SendError> {
-        let mut rb = self.http.post(self.inventory_url.clone()).json(req);
+        path: &str,
+        body: &Req,
+    ) -> Result<Res, SendError> {
+        let url = self
+            .server
+            .join(path)
+            .map_err(|e| SendError::Rejected(format!("路徑錯誤 {path}:{e}")))?;
+        let mut rb = self.http.post(url).json(body);
         for (k, v) in &self.extra_headers {
             rb = rb.header(*k, v);
         }
@@ -143,7 +134,7 @@ impl Transport {
         let status = res.status();
         if status.is_success() {
             return res
-                .json::<InventoryResponse>()
+                .json::<Res>()
                 .await
                 .map_err(|e| SendError::Retry(format!("回應格式錯誤:{e}")));
         }
@@ -151,14 +142,30 @@ impl Transport {
         Err(classify(status.as_u16(), &body))
     }
 
-    pub async fn connect_ws(&self) -> Result<WsStream, SendError> {
+    /// WebSocket 位址:`<server><path>`,https → wss、http → ws
+    fn ws_url(&self, path: &str) -> Result<Url, SendError> {
+        let mut url = self
+            .server
+            .join(path)
+            .map_err(|e| SendError::Rejected(format!("路徑錯誤 {path}:{e}")))?;
+        let scheme = if self.server.scheme() == "https" {
+            "wss"
+        } else {
+            "ws"
+        };
+        url.set_scheme(scheme)
+            .map_err(|_| SendError::Rejected("無法建立 WebSocket 位址".into()))?;
+        Ok(url)
+    }
+
+    pub async fn connect_ws(&self, path: &str) -> Result<WsStream, SendError> {
         let mut request = self
-            .ws_url
+            .ws_url(path)?
             .as_str()
             .into_client_request()
             .map_err(|e| SendError::Rejected(format!("WebSocket 位址錯誤:{e}")))?;
         let headers = request.headers_mut();
-        let ua = HeaderValue::from_str(&format!("giganexus-agent/{AGENT_VERSION}"))
+        let ua = HeaderValue::from_str(&self.user_agent)
             .map_err(|e| SendError::Rejected(e.to_string()))?;
         headers.insert("user-agent", ua);
         for (k, v) in &self.extra_headers {
