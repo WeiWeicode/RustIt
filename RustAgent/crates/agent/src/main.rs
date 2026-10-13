@@ -7,8 +7,8 @@
 //! 日誌不含憑證私鑰、Token 與完整軟體清單(AGENT.md §7.1)。
 
 use log::{error, info, warn};
-use rustit_agent::config::AgentConfig;
-use rustit_agent::{STOP_GRACE, StopSignal};
+use rustit_common::config::AgentConfig;
+use rustit_common::stop::{STOP_GRACE, StopSignal};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -37,7 +37,7 @@ fn parse_args(args: &[String]) -> Result<Command, String> {
             config(rest)?.unwrap_or_else(|| PathBuf::from("agent.toml")),
         )),
         [cmd, rest @ ..] if cmd == "service" => Ok(Command::Service(
-            config(rest)?.unwrap_or_else(rustit_agent::paths::default_config),
+            config(rest)?.unwrap_or_else(rustit_common::paths::default_config),
         )),
         [cmd, rest @ ..] if cmd == "install" => Ok(Command::Install(config(rest)?)),
         [cmd] if cmd == "uninstall" => Ok(Command::Uninstall),
@@ -167,7 +167,7 @@ mod tests {
         );
         assert_eq!(
             parse(&["service"]).unwrap(),
-            Command::Service(rustit_agent::paths::default_config())
+            Command::Service(rustit_common::paths::default_config())
         );
         assert_eq!(
             parse(&["service", "--config", r"D:\a\agent.toml"]).unwrap(),

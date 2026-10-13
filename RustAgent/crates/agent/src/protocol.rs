@@ -5,7 +5,17 @@ use rustit_collector::ComputerInfo;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub use rustit_common::envelope::Envelope;
+
 pub const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// HTTPS / WebSocket 的 User-Agent(指南 §5.6)
+pub fn user_agent() -> String {
+    format!("giganexus-agent/{AGENT_VERSION}")
+}
+
+/// Agent 通道路徑(契約 `/agent/v1`)
+pub const INVENTORY_PATH: &str = "/agent/v1/inventory";
+pub const WS_PATH: &str = "/agent/v1/ws";
 
 /// `POST /agent/v1/inventory` 請求(inventory.schema.json)
 #[derive(Debug, Serialize)]
@@ -50,38 +60,6 @@ pub struct InventoryResponse {
     pub agent_seq: u64,
     /// stored / unchanged / archived
     pub result: String,
-}
-
-/// WebSocket 信封 `{v, type, id, body}`(ws-envelope.schema.json)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Envelope {
-    pub v: u32,
-    #[serde(rename = "type")]
-    pub kind: String,
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub body: Option<serde_json::Value>,
-}
-
-impl Envelope {
-    pub fn new(kind: &str, body: serde_json::Value) -> Self {
-        Self {
-            v: 1,
-            kind: kind.to_string(),
-            id: uuid::Uuid::new_v4().to_string(),
-            body: Some(body),
-        }
-    }
-
-    /// 回覆類訊息沿用被回覆訊息的 id
-    pub fn reply(to: &Envelope, kind: &str, body: serde_json::Value) -> Self {
-        Self {
-            v: 1,
-            kind: kind.to_string(),
-            id: to.id.clone(),
-            body: Some(body),
-        }
-    }
 }
 
 /// `hello` 內容:連線後第一則(指南 §6.3 第 2 步)
@@ -133,13 +111,5 @@ mod tests {
         assert_eq!(content_hash(&a).len(), 64);
         b.memory_total = 1;
         assert_ne!(content_hash(&a), content_hash(&b));
-    }
-
-    #[test]
-    fn reply_reuses_message_id() {
-        let hb = Envelope::new("heartbeat", serde_json::json!({}));
-        let ack = Envelope::reply(&hb, "unsupported", serde_json::json!({ "type": "x" }));
-        assert_eq!(ack.id, hb.id);
-        assert_eq!(serde_json::to_value(&ack).unwrap()["type"], "unsupported");
     }
 }

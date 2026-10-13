@@ -1,6 +1,6 @@
 # 專案地圖 — RustIt (企業端點資產管理與控管平台)
 
-> **最後更新**：2026-10-13(P1 第一批:Agent Windows 服務化 `service` / `install` / `uninstall`、檔案日誌;第二階段計畫 PLATFORM-PLAN v0.4:監控服務與使用者端程式分開、本機持久化;交接文件改寫;Demo 將改造為 desktop、native 將移除)。2026-10-07(M4 測試區接通:ItAgentBack 容器化與 CI 部署、Agent 經 Gateway :9443 回報)  
+> **最後更新**：2026-10-13(P1:抽出 `rustit-common`、移除 `native`;P1 第一批:Agent Windows 服務化 `service` / `install` / `uninstall`、檔案日誌;第二階段計畫 PLATFORM-PLAN v0.4:監控服務與使用者端程式分開、本機持久化;交接文件改寫;Demo 將改造為 desktop、native 將移除)。2026-10-07(M4 測試區接通:ItAgentBack 容器化與 CI 部署、Agent 經 Gateway :9443 回報)  
 > **目前階段**：基本階段完成(Agent 前景執行 → `:9443` → ItAgentBack → GigaItApp 電腦清單,測試區運作);第二階段 [PLATFORM-PLAN.md](PLATFORM-PLAN.md) P0 框架定案中(常駐服務、監測、指令、升級、軟體派送,畫面集中到 GigaItApp)。  
 > **上位規範**：全專案總圖 [PROJECT-MAP.md](../../PROJECT-MAP.md)、Gateway 規範 [giga-api-gateway-bff/docs/](../../giga-api-gateway-bff/docs/)。
 
@@ -32,7 +32,7 @@ RustIt/
 │     ├─ 0003-code-signing-pki.md   程式碼簽章與 PKI
 │     └─ 0004-node-endpoint-server.md Endpoint Server 改用 Node.js(Rust 只做端點)
 ├─ RustAgent/                       Rust:端點電腦上的程式(Cargo workspace)
-│  ├─ Cargo.toml                    Workspace 設定 (agent, collector, demo)
+│  ├─ Cargo.toml                    Workspace 設定 (agent, collector, common, demo)
 │  ├─ Cargo.lock
 │  ├─ dist/                         編譯成品存放目錄 (RustIt-Demo.exe, rustit-agent-test/、rustit-agent-service-test/ 測試區 Agent 套件,不進版控)
 │  ├─ docs/
@@ -51,19 +51,21 @@ RustIt/
 │     ├─ agent/                     端點 Agent:rustit-agent run(前景,開發)/ service(Windows 服務 GigaNexusAgent)/ install、uninstall(開發測試,正式用 MSI)
 │     │  ├─ agent.dev.toml / agent.example.toml  本機直連 ItAgentBack / 測試區經 :9443 的設定範本
 │     │  ├─ src/main.rs             只組裝:子指令、日誌、Ctrl+C
-│     │  ├─ src/lib.rs              啟動隨機延遲 → 資產回報與 WebSocket 兩個工作;StopSignal / with_grace(停止 30 秒、關機 5 秒收尾)、run_blocking
+│     │  ├─ src/lib.rs              啟動隨機延遲 → 資產回報與 WebSocket 兩個工作;run_blocking(前景與服務共用的執行環境)
 │     │  ├─ src/service.rs          Windows 服務:SCM 進入點、狀態回報(啟動中 / 執行中 / 停止中)、開發用 install / uninstall 與失敗復原 10/30/60 秒
-│     │  ├─ src/logging.rs          服務模式檔案日誌:%ProgramData%\GigaNexus\Agent\logs,每日一檔、保留 14 天、單日 10 MB;第三方套件只收 warn 以上
-│     │  ├─ src/paths.rs            服務名稱與 %ProgramData%\GigaNexus\Agent 路徑
+│     │  ├─ src/inventory.rs        蒐集 → POST /agent/v1/inventory 迴圈
+│     │  ├─ src/ws.rs               hello / 30 秒 heartbeat / unsupported、斷線重連、停止時 close 1001
+│     │  ├─ src/protocol.rs         Agent 契約型別(inventory、hello)、content_hash、通道路徑與 User-Agent
+│     │  └─ tests/contract.rs       以 docs/contracts 的 JSON Schema 驗證送出的 JSON
+│     ├─ common/                    rustit-common:Agent 與 Watchdog 共用(PLATFORM-PLAN §3.1;P2 加入本機持久化、P5 加入具名管道)
 │     │  ├─ src/config.rs           agent.toml 解析與檢查(http 只允許本機、dev 模擬憑證標頭、選用 log_level)
 │     │  ├─ src/tls.rs              rustls ClientConfig(ring)、憑證來源 trait CertSource(本階段 PEM 檔)
-│     │  ├─ src/transport.rs        HTTPS 回報與 WebSocket 連線,錯誤分類(被拒 10 分鐘 / 其他指數退避)
-│     │  ├─ src/inventory.rs        蒐集 → POST /agent/v1/inventory 迴圈
-│     │  ├─ src/ws.rs               hello / 30 秒 heartbeat / unsupported、斷線重連
-│     │  ├─ src/protocol.rs         契約型別、content_hash
+│     │  ├─ src/transport.rs        post_json(path)/ connect_ws(path),User-Agent 由呼叫端提供;錯誤分類(被拒 10 分鐘 / 其他指數退避)
 │     │  ├─ src/backoff.rs          1 秒起、上限 2 分鐘、±20%;啟動延遲
-│     │  └─ tests/contract.rs       以 docs/contracts 的 JSON Schema 驗證送出的 JSON
-│     ├─ common/ (規劃,P1)          Agent 與 Watchdog 共用:設定、CertSource、連線與退避、信封、具名管道、本機持久化(P2)
+│     │  ├─ src/envelope.rs         WebSocket 信封 {v, type, id, body}
+│     │  ├─ src/stop.rs             StopSignal / with_grace / wait(停止 30 秒、關機 5 秒收尾)
+│     │  ├─ src/logging.rs          服務模式檔案日誌 <前綴>-YYYY-MM-DD.log:每日一檔、保留 14 天、單日 10 MB;第三方套件只收 warn 以上
+│     │  └─ src/paths.rs            %ProgramData%\GigaNexus\Agent(agent.toml、logs\)
 │     ├─ watchdog/ (規劃,P5)        GigaNexusWatchdog 服務:看守 Agent、上報、升級與還原
 │     └─ desktop/ (規劃,P8)         使用者端程式(由 demo 改名):托盤 + 視窗,我的電腦(電腦名稱、IP、登入人員)、公告通知、嵌入 Gateway 網頁應用;登入者身分,與監控服務分開
 │  (installer/ 規劃,P1 / P8:WiX MSI,監控與使用者端各一個)
@@ -161,7 +163,7 @@ flowchart LR
 | **改回報寫入順序、降級、在線判斷** | `ItAgentBack/src/services/device-service.ts` | 路由與 store 不放業務邏輯 |
 | **改資料表** | 新增 `ItAgentBack/db/migrations/000N_*.sql`(SQL Server 2012 語法)、`ItAgentBack/docs/DB_SCHEMA.md` | 已套用的 migration 不可修改 |
 | **新增管理 API** | `ItAgentBack/src/routes/`、`src/openapi.ts`(`x-permission`、`x-gherkin`) | 需配合 GigaItApp `gateway-rbac.yaml` 的 `includes` |
-| **改 Agent 連線、心跳、重試** | `RustAgent/crates/agent/src/ws.rs`、`transport.rs`、`backoff.rs` | 規範 ENDPOINT-AGENT-GUIDE §4.2、§6 |
+| **改 Agent 連線、心跳、重試** | `RustAgent/crates/agent/src/ws.rs`;共用的 `RustAgent/crates/common/src/transport.rs`、`backoff.rs`(Watchdog 也會用) | 規範 ENDPOINT-AGENT-GUIDE §4.2、§6 |
 
 ---
 

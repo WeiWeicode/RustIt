@@ -7,11 +7,11 @@
 //! 失敗復原:第 1、2、後續失敗分別 10 / 30 / 60 秒後重新啟動,1 天後重設計數;設定錯誤等「非當機」的失敗也套用。
 //! 停止:一般停止收尾 [`crate::STOP_GRACE`],Windows 關機只給 [`crate::SHUTDOWN_GRACE`](系統給服務的時間很短)。
 
-use crate::config::{AgentConfig, Settings};
-use crate::logging::FileLogger;
-use crate::paths::{self, SERVICE_NAME};
-use crate::{RUNTIME_SHUTDOWN, SHUTDOWN_GRACE, STOP_GRACE, StopSignal};
 use log::{LevelFilter, error, info, warn};
+use rustit_common::config::{AgentConfig, Settings};
+use rustit_common::logging::FileLogger;
+use rustit_common::paths;
+use rustit_common::stop::{RUNTIME_SHUTDOWN, SHUTDOWN_GRACE, STOP_GRACE, StopSignal};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -28,7 +28,11 @@ use windows_service::service_control_handler::{
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use windows_service::{define_windows_service, service_dispatcher};
 
+/// Windows 服務名稱(指南 §6.1)
+pub const SERVICE_NAME: &str = "GigaNexusAgent";
 const DISPLAY_NAME: &str = "GigaNexus Agent";
+/// 檔案日誌檔名前綴:`agent-YYYY-MM-DD.log`
+const LOG_PREFIX: &str = "agent";
 const DESCRIPTION: &str = "GigaNexus 端點 Agent:蒐集本機資產並經 Gateway 回報 IT 管理系統(RustIt)";
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 /// 設定檔錯誤(服務專屬結束代碼,SCM 依失敗復原設定重試)
@@ -58,7 +62,7 @@ pub fn dispatch(config: PathBuf) -> Result<(), String> {
 }
 
 fn service_main(_args: Vec<OsString>) {
-    if let Err(e) = FileLogger::install(paths::logs_dir(), LevelFilter::Info) {
+    if let Err(e) = FileLogger::install(paths::logs_dir(), LOG_PREFIX, LevelFilter::Info) {
         // 沒有日誌可寫時仍照常執行;SCM 事件記錄會留下服務狀態
         eprintln!("{e}");
     }

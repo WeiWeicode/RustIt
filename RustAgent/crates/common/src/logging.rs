@@ -1,4 +1,4 @@
-//! 服務模式的檔案日誌(PLATFORM-PLAN §3.2):每日一檔 `agent-YYYY-MM-DD.log`、保留 14 天、單檔上限 10 MB。
+//! 服務模式的檔案日誌(PLATFORM-PLAN §3.2):每日一檔 `<前綴>-YYYY-MM-DD.log`(Agent `agent-`、Watchdog `watchdog-`)、保留 14 天、單檔上限 10 MB。
 //!
 //! 服務沒有主控台,日誌只能寫檔。超過當日上限時寫一行說明後停止寫入到隔天(不輪替,避免磁碟被單日異常塞滿)。
 //! 日誌不可含憑證私鑰、Token、完整軟體清單(AGENT.md §7.1),由呼叫端負責。
@@ -15,13 +15,13 @@ use std::time::{Duration, Instant};
 
 pub const KEEP_DAYS: i64 = 14;
 pub const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
-const PREFIX: &str = "agent-";
 const SUFFIX: &str = ".log";
 /// 開檔失敗(目錄被刪、防毒暫時鎖檔)後,隔多久再試
 const REOPEN_AFTER: Duration = Duration::from_secs(60);
 
 pub struct FileLogger {
     dir: PathBuf,
+    prefix: &'static str,
     max_bytes: u64,
     state: Mutex<State>,
 }
@@ -36,18 +36,19 @@ struct State {
 }
 
 impl FileLogger {
-    pub fn new(dir: PathBuf, max_bytes: u64) -> Self {
+    pub fn new(dir: PathBuf, prefix: &'static str, max_bytes: u64) -> Self {
         Self {
             dir,
+            prefix,
             max_bytes,
             state: Mutex::new(State::default()),
         }
     }
 
     /// 安裝為全域 logger;等級之後可用 `log::set_max_level` 依設定檔調整
-    pub fn install(dir: PathBuf, level: LevelFilter) -> Result<(), String> {
+    pub fn install(dir: PathBuf, prefix: &'static str, level: LevelFilter) -> Result<(), String> {
         fs::create_dir_all(&dir).map_err(|e| format!("無法建立日誌目錄 {}:{e}", dir.display()))?;
-        log::set_boxed_logger(Box::new(Self::new(dir, MAX_FILE_BYTES)))
+        log::set_boxed_logger(Box::new(Self::new(dir, prefix, MAX_FILE_BYTES)))
             .map_err(|e| format!("日誌已初始化:{e}"))?;
         log::set_max_level(level);
         Ok(())
@@ -61,8 +62,8 @@ impl FileLogger {
     fn write_line(&self, date: NaiveDate, line: &str) {
         let mut st = self.state();
         if st.date != Some(date) && st.retry_at.is_none_or(|t| Instant::now() >= t) {
-            remove_expired(&self.dir, date);
-            let path = self.dir.join(file_name(date));
+            remove_expired(&self.dir, self.prefix, date);
+            let path = self.dir.join(file_name(self.prefix, date));
             match OpenOptions::new().create(true).append(true).open(&path) {
                 Ok(f) => {
                     st.size = f.metadata().map_or(0, |m| m.len());
@@ -134,14 +135,15 @@ impl Log for FileLogger {
     }
 }
 
-pub fn file_name(date: NaiveDate) -> String {
-    format!("{PREFIX}{}{SUFFIX}", date.format("%Y-%m-%d"))
+pub fn file_name(prefix: &str, date: NaiveDate) -> String {
+    format!("{prefix}-{}{SUFFIX}", date.format("%Y-%m-%d"))
 }
 
 /// 檔名的日期早於保留期限就算過期;不是本程式的檔名一律不動
-pub fn is_expired(name: &str, today: NaiveDate) -> bool {
+pub fn is_expired(prefix: &str, name: &str, today: NaiveDate) -> bool {
     let Some(date) = name
-        .strip_prefix(PREFIX)
+        .strip_prefix(prefix)
+        .and_then(|s| s.strip_prefix('-'))
         .and_then(|s| s.strip_suffix(SUFFIX))
     else {
         return false;
@@ -149,7 +151,7 @@ pub fn is_expired(name: &str, today: NaiveDate) -> bool {
     NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok_and(|d| (today - d).num_days() >= KEEP_DAYS)
 }
 
-fn remove_expired(dir: &Path, today: NaiveDate) {
+fn remove_expired(dir: &Path, prefix: &str, today: NaiveDate) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -157,7 +159,7 @@ fn remove_expired(dir: &Path, today: NaiveDate) {
         if entry
             .file_name()
             .to_str()
-            .is_some_and(|n| is_expired(n, today))
+            .is_some_and(|n| is_expired(prefix, n, today))
         {
             let _ = fs::remove_file(entry.path());
         }
@@ -183,11 +185,11 @@ mod tests {
     #[test]
     fn expiry_by_file_name() {
         let today = d("2026-10-20");
-        assert!(!is_expired("agent-2026-10-07.log", today));
-        assert!(is_expired("agent-2026-10-06.log", today));
-        assert!(!is_expired("agent.toml", today));
-        assert!(!is_expired("agent-bad.log", today));
-        assert_eq!(file_name(today), "agent-2026-10-20.log");
+        assert!(!is_expired("agent", "agent-2026-10-07.log", today));
+        assert!(is_expired("agent", "agent-2026-10-06.log", today));
+        assert!(!is_expired("agent", "agent.toml", today));
+        assert!(!is_expired("agent", "agent-bad.log", today));
+        assert_eq!(file_name("agent", today), "agent-2026-10-20.log");
     }
 
     /// 換日時開新檔並清掉過期檔
@@ -196,7 +198,7 @@ mod tests {
         let dir = temp_dir("rotate");
         fs::write(dir.join("agent-2026-09-01.log"), "old").unwrap();
         fs::write(dir.join("other.txt"), "keep").unwrap();
-        let logger = FileLogger::new(dir.clone(), MAX_FILE_BYTES);
+        let logger = FileLogger::new(dir.clone(), "agent", MAX_FILE_BYTES);
         logger.write_line(d("2026-10-19"), "a\n");
         logger.write_line(d("2026-10-20"), "b\n");
         assert_eq!(
@@ -216,7 +218,7 @@ mod tests {
     #[test]
     fn stops_at_daily_limit() {
         let dir = temp_dir("limit");
-        let logger = FileLogger::new(dir.clone(), 10);
+        let logger = FileLogger::new(dir.clone(), "agent", 10);
         logger.write_line(d("2026-10-20"), "12345\n");
         logger.write_line(d("2026-10-20"), "67890\n");
         logger.write_line(d("2026-10-20"), "x\n");
@@ -235,7 +237,7 @@ mod tests {
     /// 第三方套件只收 warn 以上;本程式依 max_level
     #[test]
     fn third_party_capped_at_warn() {
-        let logger = FileLogger::new(std::env::temp_dir(), MAX_FILE_BYTES);
+        let logger = FileLogger::new(std::env::temp_dir(), "agent", MAX_FILE_BYTES);
         log::set_max_level(LevelFilter::Debug);
         let meta = |target, level| Metadata::builder().target(target).level(level).build();
         assert!(logger.enabled(&meta("rustit_agent::ws", log::Level::Debug)));
@@ -249,7 +251,7 @@ mod tests {
     fn full_file_stays_full_after_restart() {
         let dir = temp_dir("restart");
         fs::write(dir.join("agent-2026-10-20.log"), "0123456789").unwrap();
-        let logger = FileLogger::new(dir.clone(), 10);
+        let logger = FileLogger::new(dir.clone(), "agent", 10);
         logger.write_line(d("2026-10-20"), "x\n");
         assert_eq!(
             fs::read_to_string(dir.join("agent-2026-10-20.log")).unwrap(),
@@ -262,7 +264,7 @@ mod tests {
     #[test]
     fn retries_after_open_failure() {
         let dir = temp_dir("retry").join("missing");
-        let logger = FileLogger::new(dir.clone(), MAX_FILE_BYTES);
+        let logger = FileLogger::new(dir.clone(), "agent", MAX_FILE_BYTES);
         logger.write_line(d("2026-10-20"), "lost\n");
         assert!(logger.state().date.is_none());
         fs::create_dir_all(&dir).unwrap();

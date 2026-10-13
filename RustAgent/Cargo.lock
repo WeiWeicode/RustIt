@@ -3169,23 +3169,17 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "env_logger",
- "fastrand",
  "futures-util",
  "hex",
  "jsonschema",
  "log",
- "reqwest",
  "rustit-collector",
- "rustls",
- "rustls-pki-types",
+ "rustit-common",
  "serde",
  "serde_json",
  "sha2",
  "tokio",
  "tokio-tungstenite",
- "toml 1.1.6+spec-1.1.0",
- "url",
- "uuid",
  "windows-service",
 ]
 
@@ -3198,6 +3192,27 @@ dependencies = [
  "sysinfo",
  "winreg 0.56.0",
  "wmi",
+]
+
+[[package]]
+name = "rustit-common"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "fastrand",
+ "hex",
+ "log",
+ "reqwest",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-tungstenite",
+ "toml 1.1.6+spec-1.1.0",
+ "url",
+ "uuid",
 ]
 
 [[package]]

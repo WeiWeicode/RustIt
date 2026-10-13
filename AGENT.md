@@ -190,6 +190,7 @@ Agent 與 Server 之間只透過 **資料契約**(`docs/contracts/`,JSON Schema 
 
 - 語言版本 edition 2024,`resolver = "3"`;`lib.rs` 放邏輯、`main.rs` 只組裝;平台相依 `#[cfg(windows)]`(Gateway `AGENT.md` §10.7.2 Rust 列)。
 - 蒐集一律經 `rustit-collector`,Agent 不自己呼叫 WMI / 登錄檔;新增蒐集項目改 `collector`(並更新契約)。
+- Agent 與 Watchdog 共用的設定、憑證與連線、退避、信封、停止訊號、日誌、路徑放 `rustit-common`(`RustAgent/crates/common`);只屬於 Agent 的流程與契約型別留在 `agent`。`rustit-common` 不和 ItAgentBack 共用程式碼。
 - 非同步用 `tokio`;HTTP 用 `reqwest`(rustls)、WebSocket 用 `tokio-tungstenite`,**兩者共用同一個 `rustls::ClientConfig`**(指南 §3.4、§6.2)。**不使用 `native-tls`**(私鑰必須可匯出)。
 - Agent 整個程式只維持**一條** WebSocket;心跳 30 秒;重連退避 1 秒起、上限 2 分鐘、±20% 隨機;憑證類錯誤(HTTP 400 / 403)每 10 分鐘重試,不快速重試(指南 §4.2、§6.3)。
 - 日誌不可含憑證私鑰、Token、完整軟體清單。

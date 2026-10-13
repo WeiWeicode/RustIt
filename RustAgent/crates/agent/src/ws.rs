@@ -1,12 +1,12 @@
 //! WebSocket 長連線(指南 §5.3、§6.3):整個程式只維持**一條**;連線後先送 `hello`,之後每 30 秒(以 `hello_ack` 為準)送 `heartbeat`。
 //! 超過 3 個心跳間隔沒收到 Server 任何訊息視為斷線;斷線依 §4.2 判斷原因後退避重連(1 秒起、上限 2 分鐘、±20%;被拒 10 分鐘)。
 
-use crate::backoff::Backoff;
-use crate::inventory::wait;
-use crate::protocol::{Envelope, HelloAck, HelloBody};
-use crate::transport::{SendError, Transport, WsStream};
+use crate::protocol::{Envelope, HelloAck, HelloBody, WS_PATH};
 use futures_util::{SinkExt, StreamExt};
 use log::{debug, info, warn};
+use rustit_common::backoff::Backoff;
+use rustit_common::stop::wait;
+use rustit_common::transport::{SendError, Transport, WsStream};
 use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -84,7 +84,7 @@ async fn session(
     shutdown: &mut watch::Receiver<bool>,
     backoff: &mut Backoff,
 ) -> Result<End, SendError> {
-    let mut ws = transport.connect_ws().await?;
+    let mut ws = transport.connect_ws(WS_PATH).await?;
     backoff.reset();
     info!("WebSocket 已連線");
     let body = hello.borrow().clone().unwrap_or_default();

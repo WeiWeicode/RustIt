@@ -1,0 +1,27 @@
+[package]
+name = "rustit-common"
+version = "0.1.0"
+edition = "2024"
+description = "RustIt 端點服務共用(Agent、Watchdog):設定、憑證與連線、退避、信封、停止訊號、檔案日誌、路徑(PLATFORM-PLAN §3.1)"
+
+[dependencies]
+tokio = { version = "1.53", features = ["rt", "macros", "time", "sync"] }
+# HTTP 與 WebSocket 共用同一個 rustls::ClientConfig(ENDPOINT-AGENT-GUIDE §3.4、§6.2);不使用 native-tls(私鑰必須可匯出)
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls-no-provider"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
+rustls-pki-types = { version = "1.15", features = ["std"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "1.1"
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1.26", features = ["v4"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+fastrand = "2.5"
+url = "2.5"
+log = "0.4"
+
+[dev-dependencies]
+# 暫停時間的測試(結束寬限)
+tokio = { version = "1.53", features = ["test-util", "rt-multi-thread"] }
