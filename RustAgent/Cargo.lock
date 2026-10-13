@@ -3305,6 +3305,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sysinfo",
+ "windows-sys 0.61.2",
  "winreg 0.56.0",
  "wmi",
 ]

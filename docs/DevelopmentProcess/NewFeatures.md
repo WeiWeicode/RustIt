@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-13 P1:WMI 查詢逾時與蒐集背景優先權(A6)
+- 內容:依 PLATFORM-PLAN §4.10 A6 修改 `rustit-collector`。WMI 是同步 COM 呼叫、卡住時無法取消:每項查詢改在獨立執行緒以新連線執行(wmi crate 每個執行緒自行初始化 COM),主流程最多等 15 秒(`QUERY_TIMEOUT`);逾時寫入 `warnings` 並判定 WMI 無回應、略過其餘 WMI 項目(整次蒐集最多多等一個逾時),登錄檔與 sysinfo 照常蒐集;查詢執行緒 panic 也只記警告。防毒(SecurityCenter2)沿用原行為:失敗不列警告,只有逾時列入。`collect()` 期間呼叫端與查詢執行緒進入 Windows 背景模式(`THREAD_MODE_BACKGROUND_BEGIN`,CPU 與 I/O 低優先權),離開時恢復(tokio spawn_blocking 執行緒會重複使用);WMI 實際查詢在 WmiPrvSE.exe,不受影響。新增相依 `windows-sys` 0.61(`Win32_System_Threading`;版本已在 Cargo.lock)。collector 既有程式未照預設 rustfmt 寬度排版,本次不執行 `cargo fmt`,只動必要的行。
+- 檔案:`RustAgent/crates/collector/src/{lib,wmi_query,background}.rs`、`RustAgent/crates/collector/Cargo.toml`、`RustAgent/Cargo.lock`、`docs/PROJECT-MAP.md`
+- 驗證:`cargo test -p rustit-collector` 3 項通過(逾時不等卡住的工作、工作 panic 回錯誤、判定無回應後略過其餘查詢);clippy 無警告(原本防毒區塊的 collapsible_if 一併消除);`rustit-agent`、`rustit-demo` 編譯通過。在需求方電腦以 `--example dump` 比對修改前後:各項筆數完全相同(硬體、網卡 3、修補 8、防毒 2、軟體 112),無警告,耗時 3.8 → 4.2 秒(每項另開連線與背景優先權的代價)。
+
 ## 2026-10-13 P1:Windows 憑證存放區取用裝置憑證(PoC)
 - 內容:依指南 §3.4 新增 `WindowsStore` 憑證來源:從 `LocalMachine\My` 以簽發者名稱篩選(`find_by_issuer_str`),再以 `pick_device_cert` 挑出在效期內、EKU 含用戶端驗證、`NotAfter` 最晚的一張;私鑰以 `rustls-cng` 留在 CNG 內簽章(silent,不可匯出也能用);**每次 TLS 握手重新挑選**(實作 rustls `ResolvesClientCert`),自動續約後不需重啟;找不到憑證時記警告、握手不出示憑證,由 Gateway 拒絕後照「憑證被拒每 10 分鐘重試」處理,不讓 Agent 結束。`CertSource` 改為回傳挑選器,PEM 也走同一條路(啟動時檢查憑證與私鑰相符)。`agent.toml` 的 `[tls]` 新增 `store_issuer`,與 `cert_file` + `key_file` 二選一(設定錯誤即啟動失敗)。新增相依:`rustls-cng` 0.7.1(Windows 限定,改用 ring、不用預設的 aws-lc-rs)、`x509-parser` 0.18(解析效期與 EKU);dev 相依 `rcgen` 0.14(測試時產生假憑證,不提交任何真實憑證)。
 - 檔案:`RustAgent/crates/common/src/{tls,config,transport}.rs`、`RustAgent/crates/common/Cargo.toml`、`RustAgent/Cargo.lock`、`RustAgent/crates/agent/agent.example.toml`、`docs/PROJECT-MAP.md`、`docs/HANDOFF.md`、`docs/PLATFORM-PLAN.md` §4.1
