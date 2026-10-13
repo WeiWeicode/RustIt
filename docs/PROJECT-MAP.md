@@ -32,13 +32,11 @@ RustIt/
 │     ├─ 0003-code-signing-pki.md   程式碼簽章與 PKI
 │     └─ 0004-node-endpoint-server.md Endpoint Server 改用 Node.js(Rust 只做端點)
 ├─ RustAgent/                       Rust:端點電腦上的程式(Cargo workspace)
-│  ├─ Cargo.toml                    Workspace 設定 (collector, demo, native)
+│  ├─ Cargo.toml                    Workspace 設定 (agent, collector, demo)
 │  ├─ Cargo.lock
-│  ├─ dist/                         編譯成品存放目錄 (RustIt-Demo.exe, RustIt-Native.exe, rustit-agent-test/ 測試區 Agent 套件,不進版控)
-│  ├─ scripts/
-│  │  └─ bench.ps1                  效能取樣腳本 (量測記憶體、CPU、行程與執行緒)
+│  ├─ dist/                         編譯成品存放目錄 (RustIt-Demo.exe, rustit-agent-test/、rustit-agent-service-test/ 測試區 Agent 套件,不進版控)
 │  ├─ docs/
-│  │  ├─ ui-performance-comparison.md egui 原生 vs WebView2 效能實測比較報告
+│  │  ├─ ui-performance-comparison.md egui 原生 vs WebView2 效能實測比較(紀錄;native 已於 P1 移除)
 │  │  └─ images/                    介面截圖
 │  └─ crates/
 │     ├─ collector/                 端點資料蒐集核心庫 (Library)
@@ -50,7 +48,6 @@ RustIt/
 │     ├─ demo/                      WebView2 概念驗證版 (Tauri;P8 改名為 desktop 作為使用者端程式,PLATFORM-PLAN §3.3)
 │     │  ├─ src/ main.rs、deploy.rs Tauri 啟動與指令綁定;軟體派送模擬與雜湊校驗
 │     │  └─ ui/                     前端 HTML/CSS/JS (Liquid Glass 玻璃擬態)
-│     ├─ native/                    原生高效能 GUI 版 (egui;P1 移除;main / app / data / theme / widgets / pages / perf)
 │     ├─ agent/                     端點 Agent:rustit-agent run(前景,開發)/ service(Windows 服務 GigaNexusAgent)/ install、uninstall(開發測試,正式用 MSI)
 │     │  ├─ agent.dev.toml / agent.example.toml  本機直連 ItAgentBack / 測試區經 :9443 的設定範本
 │     │  ├─ src/main.rs             只組裝:子指令、日誌、Ctrl+C
@@ -158,11 +155,8 @@ flowchart LR
 | 開發任務 | 主要修改目錄與檔案 | 備註 |
 | :--- | :--- | :--- |
 | **新增硬體/軟體蒐集項目** | `RustAgent/crates/collector/src/wmi_query.rs`、`registry.rs`、`lib.rs` | 擴充結構體欄位，注意相容 Windows 10/11 |
-| **調整 egui 原生介面版面** | `RustAgent/crates/native/src/pages.rs` | 調整各分頁 layout、文字與圖表排版 |
-| **微調原生版玻璃擬態與色彩** | `RustAgent/crates/native/src/theme.rs`、`widgets.rs` | 調整透明度、邊框、高光與陰影數值 |
 | **調整 WebView2 Demo 介面** | `RustAgent/crates/demo/ui/` (`index.html`, `style.css`, `app.js`) | 免編譯，可用 `python -m http.server` 即時預覽 |
 | **軟體靜默派送規則** | 參考實作 `RustAgent/crates/demo/src/deploy.rs`(P7 移植到 `agent`),參照 [0002 號架構決策](decisions/0002-software-deployment.md) | 支援 MSI, Inno Setup, NSIS 等靜默參數 |
-| **效能評估取樣** | `RustAgent/scripts/bench.ps1` | `powershell -File scripts/bench.ps1 -Runs 3` |
 | **改 Agent ↔ Server 訊息格式** | `docs/contracts/`(schema + 範例)→ `RustAgent/crates/agent/src/protocol.rs` → `ItAgentBack/src/contracts.ts` | 只新增欄位;兩端契約測試一起更新(AGENT.md §7.3) |
 | **改回報寫入順序、降級、在線判斷** | `ItAgentBack/src/services/device-service.ts` | 路由與 store 不放業務邏輯 |
 | **改資料表** | 新增 `ItAgentBack/db/migrations/000N_*.sql`(SQL Server 2012 語法)、`ItAgentBack/docs/DB_SCHEMA.md` | 已套用的 migration 不可修改 |
@@ -182,12 +176,5 @@ flowchart LR
 - **執行測試**：
   ```bash
   cd RustAgent
-  cargo run -p rustit-native    # 原生 egui 高效能版
   cargo run -p rustit-demo      # WebView2 完整特效版
-  ```
-- **效能並排量測 (Benchmark)**：
-  ```bash
-  cd RustAgent
-  cargo build --release -p rustit-native -p rustit-demo
-  powershell -ExecutionPolicy Bypass -File scripts/bench.ps1 -Runs 3
   ```

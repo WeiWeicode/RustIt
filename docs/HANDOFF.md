@@ -10,7 +10,7 @@
 | `RustAgent/crates/collector` | ✅ 硬體、軟體、網路、防毒、USB 儲存、RustDesk 狀態 |
 | `RustAgent/crates/agent`(`rustit-agent`) | ✅ 前景執行(`run`)與 **Windows 服務**(`service`;開發用 `install` / `uninstall`,P1 第一批);HTTPS 回報、WebSocket hello / 心跳、退避重連、PEM 憑證、服務模式檔案日誌。尚未有 MSI、Windows 憑證存放區、指令執行 |
 | `RustAgent/crates/demo` | 示範介面;**將改造為使用者端程式 `desktop`**(P8),`src/deploy.rs` 是軟體派送的參考實作(P7 移植到 Agent) |
-| `RustAgent/crates/native` | egui 示範;**P1 移除** |
+| `RustAgent/crates/native` | ✅ 已移除(P1;最後版本 `3ba3827`) |
 | `ItAgentBack` | ✅ 測試區(主機 2,`endpoint-server` + `ita-mongo` / `ita-redis`,CI `develop` 部署);管理 API 只有 `GET /v1/devices[/{deviceId}]`;giga-observe 監控已接 |
 | GigaItApp 電腦清單 | ✅ 清單 + 詳情(概要、磁碟、網卡) |
 | INTEGRATION-PLAN M5(離線暫存、`/sync`) | ⏸ 延後,擴充為 PLATFORM-PLAN P2(本機設定與持久化、離線紀錄) |
