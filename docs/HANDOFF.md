@@ -18,9 +18,21 @@
 
 ## 2. 下一步
 
-1. **P0 已完成**。三個 repo 的文件分支(RustIt `docs/platform-plan`、根目錄 `docs/rustit-platform-plan`、Gateway `docs/endpoint-guide-v0.5`)待推送並開 MR。
-2. **P1 常駐**、**P3 資料呈現**、**P8-1 使用者端外殼與我的電腦** 可並行:P1(Agent 服務化、`common` crate、Windows 憑證存放區、MSI)由 Claude 主寫;P3(管理 API 回完整資產 + GigaItApp 詳情分 Tab)只動後端與前端,適合交給同仁。
+1. **P1 剩下:在 Hyper-V 測試 VM 驗證 MSI**(主機 2 已啟用 Hyper-V,VM 由需求方建立)。見下方「P1 收尾:VM 測試」。
+2. **P3 資料呈現**、**P8-1 使用者端外殼與我的電腦** 可並行:P1(Agent 服務化、`common` crate、Windows 憑證存放區、MSI)由 Claude 主寫;P3(管理 API 回完整資產 + GigaItApp 詳情分 Tab)只動後端與前端,適合交給同仁。
 3. P1 之後接 **P2 本機持久化與離線紀錄**,再做 P4 指令通道(升級、派送的共同基礎)。
+
+### P1 收尾:VM 測試(完成標準 PLATFORM-PLAN §4.1、§4.10 A8)
+
+| 項目 | 內容 |
+| --- | --- |
+| VM | 主機 2 Hyper-V;Win10 22H2 與 Win11 各一台(先做一台也可),2 vCPU / 4 GB / 64 GB,網路接得到 `10.10.130.124:9443`(外部虛擬交換器;Default Switch 是 NAT,來源 IP 會變成主機 2,需確認防火牆「GigaNexus Agent 9443」是否允許) |
+| 準備 | 裝好 Windows、加入網域(或先不加)、建立「乾淨」檢查點;測試用裝置憑證:測試區臨時 PKI 為 VM 另簽一張(`giga-api-gateway-bff/deploy/gen-temp-pki.sh`,CN 用 VM 的電腦名稱),PFX 匯入 VM 的 `LocalMachine\My`(不加 `-Exportable`) |
+| MSI | `RustAgent/installer/build-agent-msi.ps1 -Env test …` 產生 `dist/msi/GigaNexusAgent-<版本>-test.msi` |
+| 驗證 | 1. `msiexec /i … /qn /l*v install.log` 成功;2. `sc qfailure GigaNexusAgent` 為 10 / 30 / 60 秒(服務自行套用);3. 重開機後未登入也自動連線(GigaItApp 電腦清單出現 VM);4. 強制結束行程後自動重啟;5. `icacls C:\ProgramData\GigaNexus\Agent` 只有 SYSTEM、Administrators;6. `msiexec /x` 後服務與 `Program Files\GigaNexus\Agent` 移除、日誌保留;7. 還原檢查點重複安裝 |
+| 已知 | 開發機實測(2026-10-13):MSI 安裝 / 解除安裝成功、服務以 `LocalMachine\My` 憑證啟動;當時發現服務自行套用失敗復原少了 `SERVICE_START` 權限(已修,**待 VM 驗證**)。ACL 套用前就存在的舊日誌檔仍保有原權限,新檔案才繼承 |
+
+主機 2 注意:2026-10-13 啟用 Hyper-V 重開機後,開機排程 `WSL-GigaNexus`(以 `user` 執行 `wsl -d Ubuntu -u root --exec /bin/sleep infinity`)失敗(結果 -1),WSL 未常駐,整個測試區 Gateway 停擺;手動 `Start-ScheduledTask -TaskName WSL-GigaNexus` 後恢復。之後主機 2 重開機要確認此排程(建議為開機觸發加 1 分鐘延遲,需同意後設定)。
 
 ## 3. 已決定(不要重新討論)
 

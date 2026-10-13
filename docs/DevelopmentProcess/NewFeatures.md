@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-13 P1:監控 MSI(WiX v5)
+- 內容:新增 `RustAgent/installer/agent.wxs` 與 `build-agent-msi.ps1`。MSI 安裝服務 `GigaNexusAgent`(LocalSystem、自動啟動,參數 `service --config "%ProgramData%\GigaNexus\Agent\agent.toml"`)與 `%ProgramFiles%\GigaNexus\Agent\rustit-agent.exe`;`%ProgramData%\GigaNexus\Agent`(`agent.toml`、`pki\ca.crt`、`logs\`)以 `PermissionEx` SDDL `D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)` 只允許 SYSTEM、Administrators、不繼承;解除安裝保留 `logs\`。與計畫不同之處:設定改為**依部署區建置**(建置腳本產生 agent.toml:server_url、ca_file、store_issuer),不在安裝時傳參數(MSI 無內建 TOML 寫入,避免自訂動作;GPO 不必 transform);失敗復原改由**服務每次啟動自行套用**(`ensure_recovery`,MSI 的 MsiServiceConfig / MsiServiceConfigFailureActions 會出 WIX1149 警告、SDK 標示不可靠;Util ServiceConfig 無法設定不同延遲),被手動改掉也會在下次啟動恢復。WiX 用 **v5.0.2**(dotnet global tool):v6 起企業使用需付 Open Source Maintenance Fee,建置腳本會擋非 v5。開發機實測時發現自行套用失敗復原回「IO error in winapi call」:失敗復原含重新啟動動作需 `SERVICE_START` 權限,已補上並把 Win32 錯誤碼一併寫入日誌(`describe`)。
+- 檔案:`RustAgent/installer/{agent.wxs,build-agent-msi.ps1}`、`RustAgent/crates/agent/src/service.rs`、`README.md`、`AGENT.md`、`docs/PROJECT-MAP.md`、`docs/PLATFORM-PLAN.md` §4.1、`docs/HANDOFF.md`
+- 驗證:`wix build` 無警告;`cargo test -p rustit-agent` 7 項通過、clippy 無新警告。需求方在自己的電腦實測(修正前版本):`msiexec /i` 與 `/x` 皆 completed successfully,服務以 `LocalMachine\My` 憑證啟動、解除安裝後服務與程式目錄移除、資料目錄一般使用者無法列出;當時測試區連不上是主機 2 啟用 Hyper-V 重開機後 WSL 未常駐(見 HANDOFF),與 MSI 無關,手動啟動排程後前景模式回報 `stored`。失敗復原修正與首次安裝待 Hyper-V VM 驗證(P1 完成標準)。
+
 ## 2026-10-13 P1:Windows 憑證存放區取用裝置憑證(PoC)
 - 內容:依指南 §3.4 新增 `WindowsStore` 憑證來源:從 `LocalMachine\My` 以簽發者名稱篩選(`find_by_issuer_str`),再以 `pick_device_cert` 挑出在效期內、EKU 含用戶端驗證、`NotAfter` 最晚的一張;私鑰以 `rustls-cng` 留在 CNG 內簽章(silent,不可匯出也能用);**每次 TLS 握手重新挑選**(實作 rustls `ResolvesClientCert`),自動續約後不需重啟;找不到憑證時記警告、握手不出示憑證,由 Gateway 拒絕後照「憑證被拒每 10 分鐘重試」處理,不讓 Agent 結束。`CertSource` 改為回傳挑選器,PEM 也走同一條路(啟動時檢查憑證與私鑰相符)。`agent.toml` 的 `[tls]` 新增 `store_issuer`,與 `cert_file` + `key_file` 二選一(設定錯誤即啟動失敗)。新增相依:`rustls-cng` 0.7.1(Windows 限定,改用 ring、不用預設的 aws-lc-rs)、`x509-parser` 0.18(解析效期與 EKU);dev 相依 `rcgen` 0.14(測試時產生假憑證,不提交任何真實憑證)。
 - 檔案:`RustAgent/crates/common/src/{tls,config,transport}.rs`、`RustAgent/crates/common/Cargo.toml`、`RustAgent/Cargo.lock`、`RustAgent/crates/agent/agent.example.toml`、`docs/PROJECT-MAP.md`、`docs/HANDOFF.md`、`docs/PLATFORM-PLAN.md` §4.1

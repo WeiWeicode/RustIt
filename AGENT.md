@@ -244,6 +244,7 @@ Agent 與 Server 之間只透過 **資料契約**(`docs/contracts/`,JSON Schema 
 | `RustAgent/` | `cargo run -p rustit-collector --example dump` | 印出這台電腦的蒐集結果(JSON),**含真實個資,不可提交** |
 | `RustAgent/` | `cargo run -p rustit-demo` | 示範介面(Tauri;將改造為使用者端程式) |
 | `RustAgent/` | `cargo build -p rustit-agent --release`、`cargo test -p rustit-agent` | Agent(M2 之後) |
+| `RustAgent/` | `powershell -ExecutionPolicy Bypass -File installer\build-agent-msi.ps1 -Env test -Gateway <ip>:9443 -StoreIssuer <簽發者> -CaFile <根憑證>` | 建置監控 MSI(WiX **v5**;不可升到 v6 以上,企業使用需付費) |
 | 系統管理員 PowerShell | `rustit-agent.exe install --config <agent.toml>` / `uninstall` | 開發測試用安裝 Windows 服務(正式用 MSI);日誌 `%ProgramData%\GigaNexus\Agent\logs\`。**只在自己的電腦**(§5) |
 | `ItAgentBack/` | `npm run dev` / `npm test` / `npm run typecheck` / `npm run build` / `npm run db:migrate` | Endpoint Server(M1 之後;`dev` 讀 `.env`) |
 
