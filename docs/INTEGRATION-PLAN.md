@@ -2,6 +2,7 @@
 
 > **狀態**:計畫 v0.4(2026-10-07)。**M0–M4 完成,基本階段的 1、3 已在測試區達成**(我的電腦經 `:9443` 回報、測試區 GigaItApp 電腦清單看得到);2 的「本機加密暫存與補傳」屬 M5,需求方決定延後。進度與每個 commit 見 `DevelopmentProcess/NewFeatures.md`。
 > **時程以 NexusPlan 甘特圖為準**:基本階段 M0–M5 已登記為 W6-7 ~ W6-12(2026-10-06 ~ 10-07,需求方要求兩天內完成基礎功能);W6 原有的高階工作(W6-1 ~ W6-M)維持原排程,**進階功能待員工入口網與 GigaItApp 功能完善後再做**。本文只列順序與完成條件,不列日期。
+> **後續**:第二階段(常駐服務、本機持久化、監測、指令、升級、軟體派送、使用者端程式)見 [PLATFORM-PLAN.md](PLATFORM-PLAN.md);M5 擴充為其 P2。本文件保留為基本階段的紀錄,§3(儲存分工)、§4(離線比對)仍有效。
 > **上位規範**:`../../giga-api-gateway-bff/docs/ENDPOINT-AGENT-GUIDE.md`(通道、權限、API 草案)、`BACKEND-GUIDE.md`(port、內部 Token、OpenAPI 註冊)、`DATABASE.md` §0(SQL Server 2012 限制)。
 > **相關決策**:[0004 Endpoint Server 改用 Node.js(`ItAgentBack`)](decisions/0004-node-endpoint-server.md)。
 
