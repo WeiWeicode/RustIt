@@ -107,12 +107,12 @@ Claude 把搜尋、審查、資安檢查、除錯、測試、重構交給子代�
 | 項目 | 內容 |
 | --- | --- |
 | 做什麼 | Windows 端點電腦的資產蒐集與控管:Agent 蒐集硬體 / 軟體 / 資安狀態並回報,IT 在 GigaItApp「端點管理」檢視與管理(產品規格 `docs/PRD.md`) |
-| 元件 | **Rust**(端點):`RustAgent/crates/collector`(蒐集函式庫)、`RustAgent/crates/agent`(`rustit-agent`,前景執行;測試區已上線)、`native`(egui 示範)、`demo`(Tauri 示範)。**Node.js**(後端):`ItAgentBack/`(規劃中)= Endpoint Server,**取代原規劃的 Rust Axum**(`docs/decisions/0004-node-endpoint-server.md`) |
+| 元件 | **Rust**(端點):`RustAgent/crates/collector`(蒐集函式庫)、`RustAgent/crates/agent`(`rustit-agent`,前景執行;測試區已上線)、`demo`(Tauri;將改造為使用者端程式 `desktop`)、`native`(egui 示範;將移除)。**Node.js**(後端):`ItAgentBack/`(測試區運作中)= Endpoint Server,**取代原規劃的 Rust Axum**(`docs/decisions/0004-node-endpoint-server.md`) |
 | 通道 | Agent → Gateway `:9443`(mTLS、HTTP/1.1)→ `endpoint-agent`(51241,HTTPS 回報 + WebSocket 指令);**不使用 gRPC**(`docs/decisions/0001`) |
 | 管理 API | IT 前端 → `/api/endpoint/*` → BFF(權限 `endpoint.*`)→ `endpoint-api`(51240)。**權限以 BFF 為準**(Gateway PRD Q27、ENDPOINT-AGENT-GUIDE §8);`itapp-api` 不轉送端點 API |
 | 服務代碼與 port | `endpoint-api` 51240、`endpoint-agent` 51241(Gateway BACKEND-GUIDE §3.3 已登記);**不可自行換 port**。`x-gateway.project` = `RustIt` |
 | 工作區 | 與 `../giga-api-gateway-bff/`(上位規範、`@giganexus/backend-sdk`、開發用 PKI)、`../GigaItApp/`(電腦清單頁)同層;規則見 Gateway `AGENT.md` §10 |
-| 進行中 | **整合計畫 `docs/INTEGRATION-PLAN.md`**:Agent → Node.js Endpoint Server → GigaItApp 電腦清單。開工前先讀,並對照其階段與完成標準 |
+| 進行中 | **端點平台框架計畫 `docs/PLATFORM-PLAN.md`**(P0–P8):常駐服務、本機持久化與離線紀錄、監測、指令、升級、軟體派送、使用者端程式(與監控服務分開)。開工前先讀,並對照其階段與完成標準。基本階段 `docs/INTEGRATION-PLAN.md`(M0–M4)已完成 |
 | 儲存 | SQL Server `giganexus_It_Agent*`(永久、**唯一真相**)、MongoDB(快照歷史)、Redis(在線狀態、快取);Agent 端本機加密暫存(離線不遺失,連線後與後端比對)。分工見整合計畫 §3–§4 |
 | 目錄 | `RustAgent/`、`ItAgentBack/`、`docs/`(共用文件);**各目錄與檔案職責見專案地圖 `docs/PROJECT-MAP.md`** |
 
@@ -124,7 +124,7 @@ Agent 與 Server 之間只透過 **資料契約**(`docs/contracts/`,JSON Schema 
 
 - **動手之前,先說明你的理解與假設**:用 1–3 句話摘要打算做什麼、為什麼這樣做。
 - **有疑問先問,不要猜**;需求有多種解讀時,列出選項讓人類選擇。
-- 規格以 Gateway `docs/`、本文件與 `docs/INTEGRATION-PLAN.md` 為準;程式與規格不一致時先指出差異。
+- 規格以 Gateway `docs/`、本文件與 `docs/PLATFORM-PLAN.md` 為準;程式與規格不一致時先指出差異。
 
 ```
 ❌ 直接把 gRPC 版的 agent.conf 改成 WebSocket
@@ -153,7 +153,7 @@ Agent 與 Server 之間只透過 **資料契約**(`docs/contracts/`,JSON Schema 
 
 ## 4. 目標導向執行
 
-- 先定義成功標準,**對應 `docs/INTEGRATION-PLAN.md` 的階段與完成標準**,以及 `docs/PRD.md` 的需求;自己迭代到達成為止,遇到阻塞(缺資訊、權限不足、Gateway 尚未提供)才停下來回報。
+- 先定義成功標準,**對應 `docs/PLATFORM-PLAN.md` 的階段與完成標準**,以及 `docs/PRD.md` 的需求;自己迭代到達成為止,遇到阻塞(缺資訊、權限不足、Gateway 尚未提供)才停下來回報。
 - 行為變更時同步更新:契約(`docs/contracts/`)→ 兩端的契約測試 → ENDPOINT-AGENT-GUIDE(上位規範,需同意)→ 專案地圖(§9.1)。
 - 完成時簡要說明:做了什麼、執行了哪些指令、結果如何;**能在本機跑起來驗證的就實際跑**(`cargo test`、`npm test`、Agent 連本機 Server),不要只說「應該可以」。
 
@@ -252,8 +252,9 @@ Agent 與 Server 之間只透過 **資料契約**(`docs/contracts/`,JSON Schema 
 
 | 文件 | 路徑 | 說明 |
 | --- | --- | --- |
-| **整合計畫** | `docs/INTEGRATION-PLAN.md` | Agent → Node.js Server → GigaItApp:目標、架構、階段、待決事項、跨 repo 變更 |
-| **交接文件** | `docs/HANDOFF.md` | 目前做到哪、已決定事項、需使用者親自執行的事、需先同意的跨 repo 動作、開工前必讀清單 |
+| **平台框架計畫** | `docs/PLATFORM-PLAN.md` | 第二階段:常駐服務、本機持久化、監測、指令、升級、派送、使用者端程式;階段 P0–P8、決定事項、與指南的差異 |
+| 整合計畫(已完成) | `docs/INTEGRATION-PLAN.md` | 基本階段 M0–M4:Agent → Node.js Server → GigaItApp;儲存分工(§3)、離線比對(§4,PLATFORM-PLAN P2 沿用並擴充) |
+| **交接文件** | `docs/HANDOFF.md` | 目前做到哪、下一步、已決定事項、需使用者親自執行的事、開工前必讀清單 |
 | **專案地圖** | `docs/PROJECT-MAP.md` | 目錄與檔案職責、分層、跨專案對應;**開發新功能後必須更新**(§8.1) |
 | 產品需求 | `docs/PRD.md` | 功能需求、非功能需求、里程碑 |
 | 架構決策 | `docs/decisions/` | 0001 Nginx 與通訊(Agent 改 HTTPS + WebSocket)、0002 軟體派送、0003 程式碼簽章與 PKI、0004 Endpoint Server 改 Node.js |

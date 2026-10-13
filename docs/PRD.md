@@ -4,6 +4,8 @@
 
 > 線上版（可留言協作）：https://claude.ai/code/artifact/4ae6c43f-d8a8-4911-9c1d-5d57710662c8
 
+> **架構已更新**:本文件的需求仍有效,但 §3 的架構建議(Rust Axum 後端、PostgreSQL、React 前端)已由後續決定取代:Endpoint Server 改 Node.js(ADR 0004)、IT 畫面在 GigaItApp;托盤程式保留,改為與監控服務分開的使用者端程式(嵌入公告、報修、入口網等網頁應用),公告後端用 BFF 通知中心。現行架構與階段見 [PLATFORM-PLAN.md](PLATFORM-PLAN.md)。
+
 ## 1. 產品概述
 
 RustIt 是公司內部自建的 IT 資產管理與服務平台，對標 IP-guard、SmartIT，服務加入 AD 網域的 Windows 電腦與使用者。

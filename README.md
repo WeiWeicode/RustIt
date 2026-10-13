@@ -1,6 +1,6 @@
 # RustIt
 
-公司內部 IT 資產管理平台（對標 IP-guard、SmartIT）。需求見 [docs/PRD.md](docs/PRD.md)，架構與跨專案對應見 [docs/PROJECT-MAP.md](docs/PROJECT-MAP.md)。進行中的整合工作(Agent → Node.js Endpoint Server → GigaItApp)見 [docs/INTEGRATION-PLAN.md](docs/INTEGRATION-PLAN.md);AI 協作準則見 [AGENT.md](AGENT.md)。
+公司內部 IT 資產管理平台（對標 IP-guard、SmartIT）。需求見 [docs/PRD.md](docs/PRD.md)，架構與跨專案對應見 [docs/PROJECT-MAP.md](docs/PROJECT-MAP.md)。基本階段(Agent → Node.js Endpoint Server → GigaItApp 電腦清單)已在測試區運作([docs/INTEGRATION-PLAN.md](docs/INTEGRATION-PLAN.md));第二階段(常駐服務、監測、指令、升級、軟體派送)見 [docs/PLATFORM-PLAN.md](docs/PLATFORM-PLAN.md),目前進度見 [docs/HANDOFF.md](docs/HANDOFF.md);AI 協作準則見 [AGENT.md](AGENT.md)。
 
 ## 專案結構
 
@@ -8,17 +8,30 @@
 RustAgent/        Rust:端點電腦上的程式(Cargo workspace,以下指令都在此目錄執行)
 ├─ crates/
 │  ├─ collector/  端點資料蒐集函式庫(WMI、登錄檔、sysinfo),Demo 與 Agent 共用
-│  ├─ demo/       單機 Demo(Tauri),不連伺服器、不寫資料庫
+│  ├─ agent/      端點 Agent(rustit-agent):HTTPS 回報 + WebSocket 心跳,經 Gateway :9443(目前前景執行,服務化見 PLATFORM-PLAN P1)
+│  ├─ demo/       單機 Demo(Tauri),不連伺服器、不寫資料庫(將改造為使用者端程式 desktop,PLATFORM-PLAN P8)
 │  │  ├─ src/     Rust 後端:蒐集、即時使用率、匯出 JSON、開啟 RustDesk
 │  │  └─ ui/      介面(HTML/CSS/JS,Liquid Glass 風格),編譯時嵌入 exe
-│  └─ native/     同一個 Demo 的原生介面版(egui),用來和 WebView2 版比較效能
+│  └─ native/     同一個 Demo 的原生介面版(egui),用來和 WebView2 版比較效能(PLATFORM-PLAN P1 移除)
 ├─ docs/          介面技術比較(ui-performance-comparison.md)與截圖
 └─ scripts/       bench.ps1:並排量測兩個版本的記憶體、CPU、行程數
-ItAgentBack/      Node.js(Fastify + TypeScript):Endpoint Server(建置中,INTEGRATION-PLAN M1)
+ItAgentBack/      Node.js(Fastify + TypeScript):Endpoint Server(測試區運作中;開發與部署見 ItAgentBack/README.md)
 docs/             共用文件:PRD、專案地圖、整合計畫、架構決策、資料契約(contracts/)、修正紀錄
 ```
 
-## Demo
+## Agent
+
+本機連 ItAgentBack(dev):先依 [ItAgentBack/README.md](ItAgentBack/README.md) 啟動後端,再在 `RustAgent/` 執行:
+
+```bash
+cargo run -p rustit-agent -- run --config crates/agent/agent.dev.toml
+```
+
+測試 / 建置:`cargo test -p rustit-agent`、`cargo build -p rustit-agent --release`。測試區套件放 `RustAgent/dist/rustit-agent-test/`(含裝置私鑰,不進版控)。
+
+## Demo(將改造為使用者端程式)
+
+> Demo 保留使用者會用的頁面(我的電腦、公告、報修、遠端協助),改造為使用者端程式 `desktop`;軟體派送頁移除、IT 畫面改到 GigaItApp;原生版(egui)將移除(PLATFORM-PLAN §3.3)。
 
 以下 `cargo` 與 `scripts/` 指令都在 `RustAgent/` 目錄執行。
 
