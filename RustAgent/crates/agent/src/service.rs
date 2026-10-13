@@ -98,6 +98,11 @@ fn run_service(config: &Path) -> Result<(), String> {
         ServiceExitCode::Win32(0),
         START_WAIT_HINT,
     )?;
+    // 每次啟動都套用失敗復原:MSI 的 MsiServiceConfig 表 SDK 標示不可靠(WIX1149),由服務自己設定;
+    // 被手動改掉的設定也會在下次啟動恢復(PLATFORM-PLAN §4.1、§4.10 A5)
+    if let Err(e) = ensure_recovery() {
+        warn!("無法套用失敗復原設定:{}", describe(&e));
+    }
 
     let exit = match AgentConfig::load(config) {
         Err(e) => {
@@ -176,6 +181,14 @@ fn set_state(
         .map_err(|e| format!("無法回報服務狀態:{e}"))
 }
 
+/// windows-service 的錯誤訊息不含底層 Win32 錯誤,補上(例:存取被拒 os error 5)
+fn describe(e: &windows_service::Error) -> String {
+    match e {
+        windows_service::Error::Winapi(io) => format!("{e}:{io}"),
+        _ => e.to_string(),
+    }
+}
+
 fn win32_code(e: &windows_service::Error) -> Option<i32> {
     match e {
         windows_service::Error::Winapi(io) => io.raw_os_error(),
@@ -231,7 +244,10 @@ pub fn install(config: Option<&Path>) -> Result<(), String> {
     // 失敗復原是指南 §6.1 的要求:設定失敗就移除剛建立的服務,不留下半成品
     if let Err(e) = configure_recovery(&service) {
         let _ = service.delete();
-        return Err(format!("無法設定失敗復原,已移除剛建立的服務:{e}"));
+        return Err(format!(
+            "無法設定失敗復原,已移除剛建立的服務:{}",
+            describe(&e)
+        ));
     }
     service.start::<&OsStr>(&[]).map_err(|e| {
         format!(
@@ -254,6 +270,17 @@ fn configure_recovery(service: &Service) -> Result<(), windows_service::Error> {
         actions: Some(vec![restart(10), restart(30), restart(60)]),
     })?;
     service.set_failure_actions_on_non_crash_failures(true)
+}
+
+/// 服務啟動時對自己套用失敗復原(LocalSystem 可修改自己的服務設定)
+fn ensure_recovery() -> Result<(), windows_service::Error> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+    // 失敗復原含「重新啟動」動作時,除了 CHANGE_CONFIG 還需要 START 權限(ChangeServiceConfig2 SERVICE_CONFIG_FAILURE_ACTIONS)
+    let service = manager.open_service(
+        SERVICE_NAME,
+        ServiceAccess::CHANGE_CONFIG | ServiceAccess::START,
+    )?;
+    configure_recovery(&service)
 }
 
 /// 開發測試用移除:先停止(等到停止為止,上限為停止等待提示 + 10 秒)再刪除

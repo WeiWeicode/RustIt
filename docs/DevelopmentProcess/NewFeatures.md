@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-13 P1:監控 MSI(WiX v5)
+- 內容:新增 `RustAgent/installer/agent.wxs` 與 `build-agent-msi.ps1`。MSI 安裝服務 `GigaNexusAgent`(LocalSystem、自動啟動,參數 `service --config "%ProgramData%\GigaNexus\Agent\agent.toml"`)與 `%ProgramFiles%\GigaNexus\Agent\rustit-agent.exe`;`%ProgramData%\GigaNexus\Agent`(`agent.toml`、`pki\ca.crt`、`logs\`)以 `PermissionEx` SDDL `D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)` 只允許 SYSTEM、Administrators、不繼承;解除安裝保留 `logs\`。與計畫不同之處:設定改為**依部署區建置**(建置腳本產生 agent.toml:server_url、ca_file、store_issuer),不在安裝時傳參數(MSI 無內建 TOML 寫入,避免自訂動作;GPO 不必 transform);失敗復原改由**服務每次啟動自行套用**(`ensure_recovery`,MSI 的 MsiServiceConfig / MsiServiceConfigFailureActions 會出 WIX1149 警告、SDK 標示不可靠;Util ServiceConfig 無法設定不同延遲),被手動改掉也會在下次啟動恢復。WiX 用 **v5.0.2**(dotnet global tool):v6 起企業使用需付 Open Source Maintenance Fee,建置腳本會擋非 v5。開發機實測時發現自行套用失敗復原回「IO error in winapi call」:失敗復原含重新啟動動作需 `SERVICE_START` 權限,已補上並把 Win32 錯誤碼一併寫入日誌(`describe`)。
+- 檔案:`RustAgent/installer/{agent.wxs,build-agent-msi.ps1}`、`RustAgent/crates/agent/src/service.rs`、`README.md`、`AGENT.md`、`docs/PROJECT-MAP.md`、`docs/PLATFORM-PLAN.md` §4.1、`docs/HANDOFF.md`
+- 驗證:`wix build` 無警告;`cargo test -p rustit-agent` 7 項通過、clippy 無新警告。需求方在自己的電腦實測(修正前版本):`msiexec /i` 與 `/x` 皆 completed successfully,服務以 `LocalMachine\My` 憑證啟動、解除安裝後服務與程式目錄移除、資料目錄一般使用者無法列出;當時測試區連不上是主機 2 啟用 Hyper-V 重開機後 WSL 未常駐(見 HANDOFF),與 MSI 無關,手動啟動排程後前景模式回報 `stored`。失敗復原修正與首次安裝待 Hyper-V VM 驗證(P1 完成標準)。
+
 ## 2026-10-13 P1:WMI 查詢逾時與蒐集背景優先權(A6)
 - 內容:依 PLATFORM-PLAN §4.10 A6 修改 `rustit-collector`。WMI 是同步 COM 呼叫、卡住時無法取消:每項查詢改在獨立執行緒以新連線執行(wmi crate 每個執行緒自行初始化 COM),主流程最多等 15 秒(`QUERY_TIMEOUT`);逾時寫入 `warnings` 並判定 WMI 無回應、略過其餘 WMI 項目(整次蒐集最多多等一個逾時),登錄檔與 sysinfo 照常蒐集;查詢執行緒 panic 也只記警告。防毒(SecurityCenter2)沿用原行為:失敗不列警告,只有逾時列入。`collect()` 期間呼叫端與查詢執行緒進入 Windows 背景模式(`THREAD_MODE_BACKGROUND_BEGIN`,CPU 與 I/O 低優先權),離開時恢復(tokio spawn_blocking 執行緒會重複使用);WMI 實際查詢在 WmiPrvSE.exe,不受影響。新增相依 `windows-sys` 0.61(`Win32_System_Threading`;版本已在 Cargo.lock)。collector 既有程式未照預設 rustfmt 寬度排版,本次不執行 `cargo fmt`,只動必要的行。
 - 檔案:`RustAgent/crates/collector/src/{lib,wmi_query,background}.rs`、`RustAgent/crates/collector/Cargo.toml`、`RustAgent/Cargo.lock`、`docs/PROJECT-MAP.md`

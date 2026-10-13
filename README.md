@@ -27,6 +27,14 @@ cargo run -p rustit-agent -- run --config crates/agent/agent.dev.toml
 
 測試 / 建置:`cargo test -p rustit-agent`、`cargo build -p rustit-agent --release`。測試區套件放 `RustAgent/dist/rustit-agent-test/`(含裝置私鑰,不進版控)。
 
+建置監控 MSI(需 WiX v5:`dotnet tool install --global wix --version 5.0.2`;v6 起企業使用需付費,不使用)。依部署區各建一個,輸出到 `dist/msi/`:
+
+```bash
+powershell -ExecutionPolicy Bypass -File installer\build-agent-msi.ps1 -Env test -Gateway 10.10.130.124:9443 -StoreIssuer "GigaNexus Temporary Agent CA (test)" -CaFile dist\rustit-agent-test\pki\ca.crt
+```
+
+MSI 安裝後裝置憑證一律讀 `LocalMachine\My`(`store_issuer`),設定在 `%ProgramData%\GigaNexus\Agent\agent.toml`。
+
 以 Windows 服務執行(開發測試用,需系統管理員 PowerShell;正式安裝改用 MSI,PLATFORM-PLAN P1):
 
 ```bash

@@ -1,6 +1,6 @@
 # 專案地圖 — RustIt (企業端點資產管理與控管平台)
 
-> **最後更新**：2026-10-13(P1:WMI 查詢逾時與蒐集背景優先權;Windows 憑證存放區 `store_issuer`(PoC 實測通過);抽出 `rustit-common`、移除 `native`;P1 第一批:Agent Windows 服務化 `service` / `install` / `uninstall`、檔案日誌;第二階段計畫 PLATFORM-PLAN v0.4:監控服務與使用者端程式分開、本機持久化;交接文件改寫;Demo 將改造為 desktop、native 將移除)。2026-10-07(M4 測試區接通:ItAgentBack 容器化與 CI 部署、Agent 經 Gateway :9443 回報)  
+> **最後更新**：2026-10-13(P1:監控 MSI(WiX v5,installer/);WMI 查詢逾時與蒐集背景優先權;Windows 憑證存放區 `store_issuer`(PoC 實測通過);抽出 `rustit-common`、移除 `native`;P1 第一批:Agent Windows 服務化 `service` / `install` / `uninstall`、檔案日誌;第二階段計畫 PLATFORM-PLAN v0.4:監控服務與使用者端程式分開、本機持久化;交接文件改寫;Demo 將改造為 desktop、native 將移除)。2026-10-07(M4 測試區接通:ItAgentBack 容器化與 CI 部署、Agent 經 Gateway :9443 回報)  
 > **目前階段**：基本階段完成(Agent 前景執行 → `:9443` → ItAgentBack → GigaItApp 電腦清單,測試區運作);第二階段 [PLATFORM-PLAN.md](PLATFORM-PLAN.md) P0 框架定案中(常駐服務、監測、指令、升級、軟體派送,畫面集中到 GigaItApp)。  
 > **上位規範**：全專案總圖 [PROJECT-MAP.md](../../PROJECT-MAP.md)、Gateway 規範 [giga-api-gateway-bff/docs/](../../giga-api-gateway-bff/docs/)。
 
@@ -34,7 +34,8 @@ RustIt/
 ├─ RustAgent/                       Rust:端點電腦上的程式(Cargo workspace)
 │  ├─ Cargo.toml                    Workspace 設定 (agent, collector, common, demo)
 │  ├─ Cargo.lock
-│  ├─ dist/                         編譯成品存放目錄 (RustIt-Demo.exe, rustit-agent-test/、rustit-agent-service-test/ 測試區 Agent 套件,不進版控)
+│  ├─ dist/                         編譯成品存放目錄 (RustIt-Demo.exe, rustit-agent-test/ 等測試區 Agent 套件、msi/ 建置的 MSI,不進版控)
+│  ├─ installer/                    監控 MSI(WiX v5):agent.wxs(服務、程式與 ProgramData 目錄 ACL)、build-agent-msi.ps1(依部署區建置,設定在建置時寫入)
 │  ├─ docs/
 │  │  ├─ ui-performance-comparison.md egui 原生 vs WebView2 效能實測比較(紀錄;native 已於 P1 移除)
 │  │  └─ images/                    介面截圖
@@ -53,7 +54,7 @@ RustIt/
 │     │  ├─ agent.dev.toml / agent.example.toml  本機直連 ItAgentBack / 測試區經 :9443 的設定範本
 │     │  ├─ src/main.rs             只組裝:子指令、日誌、Ctrl+C
 │     │  ├─ src/lib.rs              啟動隨機延遲 → 資產回報與 WebSocket 兩個工作;run_blocking(前景與服務共用的執行環境)
-│     │  ├─ src/service.rs          Windows 服務:SCM 進入點、狀態回報(啟動中 / 執行中 / 停止中)、開發用 install / uninstall 與失敗復原 10/30/60 秒
+│     │  ├─ src/service.rs          Windows 服務:SCM 進入點、狀態回報(啟動中 / 執行中 / 停止中)、每次啟動自行套用失敗復原 10/30/60 秒、開發用 install / uninstall
 │     │  ├─ src/inventory.rs        蒐集 → POST /agent/v1/inventory 迴圈
 │     │  ├─ src/ws.rs               hello / 30 秒 heartbeat / unsupported、斷線重連、停止時 close 1001
 │     │  ├─ src/protocol.rs         Agent 契約型別(inventory、hello)、content_hash、通道路徑與 User-Agent
@@ -69,7 +70,6 @@ RustIt/
 │     │  └─ src/paths.rs            %ProgramData%\GigaNexus\Agent(agent.toml、logs\)
 │     ├─ watchdog/ (規劃,P5)        GigaNexusWatchdog 服務:看守 Agent、上報、升級與還原
 │     └─ desktop/ (規劃,P8)         使用者端程式(由 demo 改名):托盤 + 視窗,我的電腦(電腦名稱、IP、登入人員)、公告通知、嵌入 Gateway 網頁應用;登入者身分,與監控服務分開
-│  (installer/ 規劃,P1 / P8:WiX MSI,監控與使用者端各一個)
 └─ ItAgentBack/                     Node.js(Fastify + TypeScript):Endpoint Server(ADR 0004);gateway.project = RustIt
    ├─ src/server.ts                 啟動兩個 listener:51240 管理 API、51241 Agent 通道
    ├─ src/config.ts                 部署區設定;dev 旁路(非 dev 設定即失敗)、test / prod 機密只收 _FILE
