@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-13 P1:WMI 查詢逾時與蒐集背景優先權(A6)
+- 內容:依 PLATFORM-PLAN §4.10 A6 修改 `rustit-collector`。WMI 是同步 COM 呼叫、卡住時無法取消:每項查詢改在獨立執行緒以新連線執行(wmi crate 每個執行緒自行初始化 COM),主流程最多等 15 秒(`QUERY_TIMEOUT`);逾時寫入 `warnings` 並判定 WMI 無回應、略過其餘 WMI 項目(整次蒐集最多多等一個逾時),登錄檔與 sysinfo 照常蒐集;查詢執行緒 panic 也只記警告。防毒(SecurityCenter2)沿用原行為:失敗不列警告,只有逾時列入。`collect()` 期間呼叫端與查詢執行緒進入 Windows 背景模式(`THREAD_MODE_BACKGROUND_BEGIN`,CPU 與 I/O 低優先權),離開時恢復(tokio spawn_blocking 執行緒會重複使用);WMI 實際查詢在 WmiPrvSE.exe,不受影響。新增相依 `windows-sys` 0.61(`Win32_System_Threading`;版本已在 Cargo.lock)。collector 既有程式未照預設 rustfmt 寬度排版,本次不執行 `cargo fmt`,只動必要的行。
+- 檔案:`RustAgent/crates/collector/src/{lib,wmi_query,background}.rs`、`RustAgent/crates/collector/Cargo.toml`、`RustAgent/Cargo.lock`、`docs/PROJECT-MAP.md`
+- 驗證:`cargo test -p rustit-collector` 3 項通過(逾時不等卡住的工作、工作 panic 回錯誤、判定無回應後略過其餘查詢);clippy 無警告(原本防毒區塊的 collapsible_if 一併消除);`rustit-agent`、`rustit-demo` 編譯通過。在需求方電腦以 `--example dump` 比對修改前後:各項筆數完全相同(硬體、網卡 3、修補 8、防毒 2、軟體 112),無警告,耗時 3.8 → 4.2 秒(每項另開連線與背景優先權的代價)。
+
 ## 2026-10-13 P1:抽出 rustit-common、移除 native
 - 內容:依 PLATFORM-PLAN §3.1 新增 `RustAgent/crates/common`(`rustit-common`),把 Agent 與之後 Watchdog 共用的部分搬出:`config`、`tls`、`backoff`、`logging`、`paths`(`git mv`)與新拆出的 `envelope`(WebSocket 信封)、`stop`(StopSignal、with_grace、wait)。`transport` 通用化:`Transport::new(settings, user_agent)`、`post_json(path, body)`、`connect_ws(path)`,不再寫死 inventory / ws 路徑與 Agent 版本;`logging` 檔名前綴參數化(Agent `agent-`、之後 Watchdog `watchdog-`)。`agent` 只留資產回報、WebSocket 流程、契約型別(`protocol` 改為 re-export `Envelope`,新增 `INVENTORY_PATH`、`WS_PATH`、`user_agent()`)、服務與 `run_blocking`;服務名稱 `SERVICE_NAME` 移回 `service.rs`。agent 移除改由 common 提供的相依(reqwest、rustls、rustls-pki-types、toml、uuid、fastrand、url)。另以單獨 commit 移除 egui `native` 與 `scripts/bench.ps1`(Q1;Cargo.lock 只減少 158 個套件)。行為不變。
 - 檔案:`RustAgent/Cargo.toml`、`RustAgent/crates/common/`、`RustAgent/crates/agent/`、`RustAgent/crates/native/`(刪除)、`RustAgent/scripts/bench.ps1`(刪除)、`README.md`、`AGENT.md`、`docs/PROJECT-MAP.md`、`docs/HANDOFF.md`、`RustAgent/docs/ui-performance-comparison.md`
