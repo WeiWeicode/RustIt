@@ -148,7 +148,7 @@ Demo(Tauri)改造為使用者端程式 `desktop`:使用者會用的頁面保留(
 ### 4.1 常駐(Agent 服務化)— P1
 
 - `windows-service` crate;服務主迴圈收到 Stop / Shutdown 時:關閉 WebSocket(close 1001)、等待執行中的指令最多 30 秒、把未送出的資料留在本機持久化、寫日誌後結束。
-- `CertSource` 新增 Windows 憑證存放區實作:依指南 §3.4 從 `LocalMachine\My` 挑選「簽發者為 Agent 中繼 CA、EKU 含用戶端驗證、在效期內、`NotAfter` 最晚」的憑證,以 `rustls-cng` 讓私鑰留在 CNG 內簽章(實作 `ResolvesClientCert`,每次握手重新挑選);**指南標示未實測,P1 先做 PoC**。PEM 實作保留給測試區與開發。
+- `CertSource` 新增 Windows 憑證存放區實作:依指南 §3.4 從 `LocalMachine\My` 挑選「簽發者為 Agent 中繼 CA、EKU 含用戶端驗證、在效期內、`NotAfter` 最晚」的憑證,以 `rustls-cng` 讓私鑰留在 CNG 內簽章(實作 `ResolvesClientCert`,每次握手重新挑選);**PoC 已實測通過**(2026-10-13:臨時 PKI 裝置憑證以不可匯出私鑰匯入 `LocalMachine\My`,服務以 LocalSystem 經 `:9443` 連線回報;設定 `[tls] store_issuer`)。PEM 實作保留給測試區與開發。
 - 設定路徑預設 `%ProgramData%\GigaNexus\Agent\agent.toml`(MSI 寫入 Gateway 位址與部署區);`run --config` 仍可指定。設定分層見 §4.2。
 - MSI(WiX):安裝兩個服務、設定失敗復原、建立目錄與 ACL;參數 `GATEWAY=<ip>:9443`、`ENV=test|prod`。網域電腦以 GPO 軟體安裝派送,非網域電腦由 IT 手動安裝並匯入憑證(指南 §3.1、E5)。
 - 簽章:exe 與 MSI 以 AD CS 程式碼簽章憑證簽署(ADR 0003,流程 §4.9);憑證取得前,測試區用未簽章版本,只裝在 IT 電腦。

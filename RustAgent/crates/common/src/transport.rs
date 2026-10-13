@@ -3,7 +3,7 @@
 
 use crate::backoff::{Backoff, CERT_RETRY};
 use crate::config::Settings;
-use crate::tls::{self, PemFiles};
+use crate::tls;
 use rustls::ClientConfig;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -75,13 +75,7 @@ impl Transport {
         // reqwest 以 rustls-no-provider 建置:先指定行程預設的加密套件(ring),http 開發模式也需要
         let _ = rustls::crypto::ring::default_provider().install_default();
         let tls = match &settings.tls {
-            Some(t) => Some(tls::client_config(
-                &t.ca_file,
-                &PemFiles {
-                    cert_file: t.cert_file.clone(),
-                    key_file: t.key_file.clone(),
-                },
-            )?),
+            Some(t) => Some(tls::client_config(t)?),
             None => None,
         };
         let mut builder = reqwest::Client::builder()
