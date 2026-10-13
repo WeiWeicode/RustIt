@@ -8,7 +8,7 @@
 | --- | --- |
 | 基本階段(INTEGRATION-PLAN M0–M4、M6) | ✅ 完成:Agent 經 Gateway `:9443` 回報 ItAgentBack,GigaItApp「電腦清單」看得到 |
 | `RustAgent/crates/collector` | ✅ 硬體、軟體、網路、防毒、USB 儲存、RustDesk 狀態 |
-| `RustAgent/crates/agent`(`rustit-agent`) | ✅ **前景執行**(`run --config`);HTTPS 回報、WebSocket hello / 心跳、退避重連、PEM 憑證。尚未服務化、沒有指令執行 |
+| `RustAgent/crates/agent`(`rustit-agent`) | ✅ 前景執行(`run`)與 **Windows 服務**(`service`;開發用 `install` / `uninstall`,P1 第一批);HTTPS 回報、WebSocket hello / 心跳、退避重連、PEM 憑證、服務模式檔案日誌。尚未有 MSI、Windows 憑證存放區、指令執行 |
 | `RustAgent/crates/demo` | 示範介面;**將改造為使用者端程式 `desktop`**(P8),`src/deploy.rs` 是軟體派送的參考實作(P7 移植到 Agent) |
 | `RustAgent/crates/native` | egui 示範;**P1 移除** |
 | `ItAgentBack` | ✅ 測試區(主機 2,`endpoint-server` + `ita-mongo` / `ita-redis`,CI `develop` 部署);管理 API 只有 `GET /v1/devices[/{deviceId}]`;giga-observe 監控已接 |

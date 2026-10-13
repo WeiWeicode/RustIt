@@ -14,6 +14,8 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::{Instant, Interval, interval_at};
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
 const DEFAULT_HEARTBEAT: Duration = Duration::from_secs(30);
 /// Server 停用裝置時的 close code(指南 §5.4)
@@ -142,7 +144,8 @@ async fn session(
                 }
             }
             _ = shutdown.changed() => {
-                let _ = ws.close(None).await;
+                // 1001 Going Away:Agent 停止(服務停止 / 關機),Server 立即標記離線(PLATFORM-PLAN §4.1)
+                let _ = ws.close(Some(CloseFrame { code: CloseCode::Away, reason: "agent stopping".into() })).await;
                 return Ok(End::Shutdown);
             }
         }

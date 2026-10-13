@@ -1,6 +1,6 @@
 # 專案地圖 — RustIt (企業端點資產管理與控管平台)
 
-> **最後更新**：2026-10-13(第二階段計畫 PLATFORM-PLAN v0.3:監控服務與使用者端程式分開、本機持久化;交接文件改寫;Demo 將改造為 desktop、native 將移除)。2026-10-07(M4 測試區接通:ItAgentBack 容器化與 CI 部署、Agent 經 Gateway :9443 回報)  
+> **最後更新**：2026-10-13(P1 第一批:Agent Windows 服務化 `service` / `install` / `uninstall`、檔案日誌;第二階段計畫 PLATFORM-PLAN v0.4:監控服務與使用者端程式分開、本機持久化;交接文件改寫;Demo 將改造為 desktop、native 將移除)。2026-10-07(M4 測試區接通:ItAgentBack 容器化與 CI 部署、Agent 經 Gateway :9443 回報)  
 > **目前階段**：基本階段完成(Agent 前景執行 → `:9443` → ItAgentBack → GigaItApp 電腦清單,測試區運作);第二階段 [PLATFORM-PLAN.md](PLATFORM-PLAN.md) P0 框架定案中(常駐服務、監測、指令、升級、軟體派送,畫面集中到 GigaItApp)。  
 > **上位規範**：全專案總圖 [PROJECT-MAP.md](../../PROJECT-MAP.md)、Gateway 規範 [giga-api-gateway-bff/docs/](../../giga-api-gateway-bff/docs/)。
 
@@ -51,11 +51,14 @@ RustIt/
 │     │  ├─ src/ main.rs、deploy.rs Tauri 啟動與指令綁定;軟體派送模擬與雜湊校驗
 │     │  └─ ui/                     前端 HTML/CSS/JS (Liquid Glass 玻璃擬態)
 │     ├─ native/                    原生高效能 GUI 版 (egui;P1 移除;main / app / data / theme / widgets / pages / perf)
-│     ├─ agent/                     端點 Agent(rustit-agent run --config agent.toml;前景執行,服務化屬後續)
+│     ├─ agent/                     端點 Agent:rustit-agent run(前景,開發)/ service(Windows 服務 GigaNexusAgent)/ install、uninstall(開發測試,正式用 MSI)
 │     │  ├─ agent.dev.toml / agent.example.toml  本機直連 ItAgentBack / 測試區經 :9443 的設定範本
-│     │  ├─ src/main.rs             只組裝:參數、日誌、Ctrl+C
-│     │  ├─ src/lib.rs              啟動隨機延遲 → 資產回報與 WebSocket 兩個工作
-│     │  ├─ src/config.rs           agent.toml 解析與檢查(http 只允許本機、dev 模擬憑證標頭)
+│     │  ├─ src/main.rs             只組裝:子指令、日誌、Ctrl+C
+│     │  ├─ src/lib.rs              啟動隨機延遲 → 資產回報與 WebSocket 兩個工作;StopSignal / with_grace(停止 30 秒、關機 5 秒收尾)、run_blocking
+│     │  ├─ src/service.rs          Windows 服務:SCM 進入點、狀態回報(啟動中 / 執行中 / 停止中)、開發用 install / uninstall 與失敗復原 10/30/60 秒
+│     │  ├─ src/logging.rs          服務模式檔案日誌:%ProgramData%\GigaNexus\Agent\logs,每日一檔、保留 14 天、單日 10 MB;第三方套件只收 warn 以上
+│     │  ├─ src/paths.rs            服務名稱與 %ProgramData%\GigaNexus\Agent 路徑
+│     │  ├─ src/config.rs           agent.toml 解析與檢查(http 只允許本機、dev 模擬憑證標頭、選用 log_level)
 │     │  ├─ src/tls.rs              rustls ClientConfig(ring)、憑證來源 trait CertSource(本階段 PEM 檔)
 │     │  ├─ src/transport.rs        HTTPS 回報與 WebSocket 連線,錯誤分類(被拒 10 分鐘 / 其他指數退避)
 │     │  ├─ src/inventory.rs        蒐集 → POST /agent/v1/inventory 迴圈

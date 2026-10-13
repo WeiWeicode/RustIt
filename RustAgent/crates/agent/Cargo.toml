@@ -28,3 +28,9 @@ env_logger = { version = "0.11", default-features = false, features = ["auto-col
 [dev-dependencies]
 # 契約測試:以 RustIt/docs/contracts 的 JSON Schema 驗證 Agent 送出的 JSON(AGENT.md §7.3)
 jsonschema = { version = "0.58", default-features = false }
+# 暫停時間的測試(結束寬限)
+tokio = { version = "1.53", features = ["test-util"] }
+
+[target."cfg(windows)".dependencies]
+# Windows 服務:SCM 進入點、安裝與失敗復原設定(PLATFORM-PLAN §4.1、指南 §6.1)
+windows-service = "0.8.1"

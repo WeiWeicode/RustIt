@@ -29,6 +29,18 @@ cargo run -p rustit-agent -- run --config crates/agent/agent.dev.toml
 
 測試 / 建置:`cargo test -p rustit-agent`、`cargo build -p rustit-agent --release`。測試區套件放 `RustAgent/dist/rustit-agent-test/`(含裝置私鑰,不進版控)。
 
+以 Windows 服務執行(開發測試用,需系統管理員 PowerShell;正式安裝改用 MSI,PLATFORM-PLAN P1):
+
+```bash
+.\rustit-agent.exe install --config .\agent.toml
+```
+
+```bash
+.\rustit-agent.exe uninstall
+```
+
+服務名稱 `GigaNexusAgent`(LocalSystem、自動啟動、失敗後 10 / 30 / 60 秒重啟);日誌在 `%ProgramData%\GigaNexus\Agent\logs\agent-YYYY-MM-DD.log`,等級可在 `agent.toml` 設 `log_level`。
+
 ## Demo(將改造為使用者端程式)
 
 > Demo 保留使用者會用的頁面(我的電腦、公告、報修、遠端協助),改造為使用者端程式 `desktop`;軟體派送頁移除、IT 畫面改到 GigaItApp;原生版(egui)將移除(PLATFORM-PLAN §3.3)。

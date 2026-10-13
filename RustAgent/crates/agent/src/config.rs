@@ -4,6 +4,7 @@
 //! server_url = "https://10.10.130.124:9443"   # Gateway 以 IP 設定(Gateway PRD Q1);本機開發 http://127.0.0.1:51291
 //! inventory_interval_sec = 3600               # 選用,預設 1 小時
 //! startup_jitter_sec = 30                     # 選用,啟動隨機延遲上限(指南 §6.3 第 1 步)
+//! log_level = "info"                          # 選用,服務模式的檔案日誌等級(error / warn / info / debug / trace);前景執行用 RUST_LOG
 //!
 //! [tls]                                       # https 必填:本階段只支援 PEM 檔(憑證來源 trait,見 tls.rs)
 //! ca_file = "pki/ca.crt"
@@ -30,6 +31,7 @@ pub struct AgentConfig {
     pub inventory_interval_sec: u64,
     #[serde(default = "default_startup_jitter")]
     pub startup_jitter_sec: u64,
+    pub log_level: Option<String>,
     pub tls: Option<TlsFiles>,
     pub dev: Option<DevConfig>,
 }
@@ -64,6 +66,8 @@ pub struct Settings {
     pub server: Url,
     pub inventory_interval: Duration,
     pub startup_jitter: Duration,
+    /// 服務模式的日誌等級;未設定時 info
+    pub log_level: Option<log::LevelFilter>,
     pub tls: Option<TlsFiles>,
     /// dev 模擬 Nginx 的憑證標頭(DN, 指紋)
     pub dev_cert_headers: Option<(String, String)>,
@@ -89,6 +93,17 @@ impl AgentConfig {
             "http" => {}
             other => return Err(format!("server_url 只接受 http / https:{other}")),
         }
+        let log_level = match self.log_level.as_deref() {
+            None => None,
+            Some(v) => Some(
+                v.parse::<log::LevelFilter>()
+                    .ok()
+                    .filter(|l| *l != log::LevelFilter::Off)
+                    .ok_or_else(|| {
+                        format!("log_level 只接受 error / warn / info / debug / trace:{v}")
+                    })?,
+            ),
+        };
         if self.inventory_interval_sec < 60 {
             return Err("inventory_interval_sec 不可小於 60".into());
         }
@@ -115,6 +130,7 @@ impl AgentConfig {
             server,
             inventory_interval: Duration::from_secs(self.inventory_interval_sec),
             startup_jitter: Duration::from_secs(self.startup_jitter_sec),
+            log_level,
             tls,
             dev_cert_headers,
         })
@@ -182,5 +198,24 @@ mod tests {
         assert!(parse(dev_on_https).unwrap_err().contains("[dev]"));
         assert!(parse("server_url = \"http://127.0.0.1:1\"\ninventory_interval_sec = 5").is_err());
         assert!(parse("server_url = \"http://127.0.0.1:1\"\nunknown_key = 1").is_err());
+        assert!(parse("server_url = \"http://127.0.0.1:1\"\nlog_level = \"off\"").is_err());
+        assert!(parse("server_url = \"http://127.0.0.1:1\"\nlog_level = \"verbose\"").is_err());
+    }
+
+    /// 服務模式日誌等級:選用,預設不設定(info)
+    #[test]
+    fn log_level_is_optional() {
+        assert_eq!(
+            parse("server_url = \"http://127.0.0.1:1\"")
+                .unwrap()
+                .log_level,
+            None
+        );
+        assert_eq!(
+            parse("server_url = \"http://127.0.0.1:1\"\nlog_level = \"debug\"")
+                .unwrap()
+                .log_level,
+            Some(log::LevelFilter::Debug)
+        );
     }
 }
