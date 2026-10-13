@@ -14,11 +14,11 @@
 | `ItAgentBack` | ✅ 測試區(主機 2,`endpoint-server` + `ita-mongo` / `ita-redis`,CI `develop` 部署);管理 API 只有 `GET /v1/devices[/{deviceId}]`;giga-observe 監控已接 |
 | GigaItApp 電腦清單 | ✅ 清單 + 詳情(概要、磁碟、網卡) |
 | INTEGRATION-PLAN M5(離線暫存、`/sync`) | ⏸ 延後,擴充為 PLATFORM-PLAN P2(本機設定與持久化、離線紀錄) |
-| 第二階段計畫 | 📝 `PLATFORM-PLAN.md` v0.4:§11 決定事項 Q1–Q12 已定,基礎建設補強 A1–A8(§4.10)與上線前清單 B1–B10(§8)已納入,**待需求方最後確認**(P0)。定案後才更新根目錄 `PROJECT-MAP.md` / `workspace.json`、甘特圖、Gateway 指南(§10) |
+| 第二階段計畫 | ✅ `PLATFORM-PLAN.md` v0.4 **定案**(P0,2026-10-13):根目錄 `PROJECT-MAP.md` / `workspace.json`(cbf6db9)、Gateway `ENDPOINT-AGENT-GUIDE.md` v0.5(7319e87)已同步;甘特圖 W6-13 ~ W6-24(P0–P8、上線前準備),舊 W6-1 ~ W6-6、W6-12 已由新任務取代 |
 
 ## 2. 下一步
 
-1. **P0**:需求方最後確認 PLATFORM-PLAN v0.3;確認後 commit,更新根目錄文件、甘特圖新增 P1–P8,修訂 Gateway `ENDPOINT-AGENT-GUIDE.md`(§10)。
+1. **P0 已完成**。三個 repo 的文件分支(RustIt `docs/platform-plan`、根目錄 `docs/rustit-platform-plan`、Gateway `docs/endpoint-guide-v0.5`)待推送並開 MR。
 2. **P1 常駐**、**P3 資料呈現**、**P8-1 使用者端外殼與我的電腦** 可並行:P1(Agent 服務化、`common` crate、Windows 憑證存放區、MSI)由 Claude 主寫;P3(管理 API 回完整資產 + GigaItApp 詳情分 Tab)只動後端與前端,適合交給同仁。
 3. P1 之後接 **P2 本機持久化與離線紀錄**,再做 P4 指令通道(升級、派送的共同基礎)。
 
