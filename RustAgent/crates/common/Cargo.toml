@@ -21,7 +21,15 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 fastrand = "2.5"
 url = "2.5"
 log = "0.4"
+# 挑選裝置憑證時解析效期與 EKU(指南 §3.4)
+x509-parser = "0.18.1"
 
 [dev-dependencies]
+# 產生測試用憑證(挑選規則測試;不提交任何真實憑證)
+rcgen = { version = "0.14.10", default-features = false, features = ["ring"] }
 # 暫停時間的測試(結束寬限)
 tokio = { version = "1.53", features = ["test-util", "rt-multi-thread"] }
+
+[target."cfg(windows)".dependencies]
+# Windows 憑證存放區:私鑰留在 CNG 內簽章(不可匯出也能用,指南 §3.4);用 ring 以免建置需要 CMake / NASM
+rustls-cng = { version = "0.7.1", default-features = false, features = ["ring", "tls12", "logging"] }
