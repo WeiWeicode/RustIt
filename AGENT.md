@@ -107,7 +107,7 @@ Claude 把搜尋、審查、資安檢查、除錯、測試、重構交給子代�
 | 項目 | 內容 |
 | --- | --- |
 | 做什麼 | Windows 端點電腦的資產蒐集與控管:Agent 蒐集硬體 / 軟體 / 資安狀態並回報,IT 在 GigaItApp「端點管理」檢視與管理(產品規格 `docs/PRD.md`) |
-| 元件 | **Rust**(端點):`RustAgent/crates/collector`(蒐集函式庫)、`RustAgent/crates/agent`(`rustit-agent`,前景執行;測試區已上線)、`demo`(Tauri;將改造為使用者端程式 `desktop`)、`native`(egui 示範;將移除)。**Node.js**(後端):`ItAgentBack/`(測試區運作中)= Endpoint Server,**取代原規劃的 Rust Axum**(`docs/decisions/0004-node-endpoint-server.md`) |
+| 元件 | **Rust**(端點):`RustAgent/crates/collector`(蒐集函式庫)、`RustAgent/crates/agent`(`rustit-agent`,前景執行或 Windows 服務 `GigaNexusAgent`;測試區已上線)、`demo`(Tauri;將改造為使用者端程式 `desktop`)、`native`(egui 示範;將移除)。**Node.js**(後端):`ItAgentBack/`(測試區運作中)= Endpoint Server,**取代原規劃的 Rust Axum**(`docs/decisions/0004-node-endpoint-server.md`) |
 | 通道 | Agent → Gateway `:9443`(mTLS、HTTP/1.1)→ `endpoint-agent`(51241,HTTPS 回報 + WebSocket 指令);**不使用 gRPC**(`docs/decisions/0001`) |
 | 管理 API | IT 前端 → `/api/endpoint/*` → BFF(權限 `endpoint.*`)→ `endpoint-api`(51240)。**權限以 BFF 為準**(Gateway PRD Q27、ENDPOINT-AGENT-GUIDE §8);`itapp-api` 不轉送端點 API |
 | 服務代碼與 port | `endpoint-api` 51240、`endpoint-agent` 51241(Gateway BACKEND-GUIDE §3.3 已登記);**不可自行換 port**。`x-gateway.project` = `RustIt` |
@@ -243,6 +243,7 @@ Agent 與 Server 之間只透過 **資料契約**(`docs/contracts/`,JSON Schema 
 | `RustAgent/` | `cargo run -p rustit-collector --example dump` | 印出這台電腦的蒐集結果(JSON),**含真實個資,不可提交** |
 | `RustAgent/` | `cargo run -p rustit-native` / `cargo run -p rustit-demo` | 示範介面(egui / Tauri) |
 | `RustAgent/` | `cargo build -p rustit-agent --release`、`cargo test -p rustit-agent` | Agent(M2 之後) |
+| 系統管理員 PowerShell | `rustit-agent.exe install --config <agent.toml>` / `uninstall` | 開發測試用安裝 Windows 服務(正式用 MSI);日誌 `%ProgramData%\GigaNexus\Agent\logs\`。**只在自己的電腦**(§5) |
 | `RustAgent/` | `powershell -ExecutionPolicy Bypass -File scripts/bench.ps1 -Runs 3` | 效能並排量測 |
 | `ItAgentBack/` | `npm run dev` / `npm test` / `npm run typecheck` / `npm run build` / `npm run db:migrate` | Endpoint Server(M1 之後;`dev` 讀 `.env`) |
 
