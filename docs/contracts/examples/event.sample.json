@@ -1,0 +1,34 @@
+{
+  "events": [
+    {
+      "event_id": "3b9d2f5e-7c41-4a8e-9f06-1d2c3b4a5e61",
+      "type": "offline_period",
+      "occurred_at": "2026-10-06T09:00:05.120Z",
+      "data": {
+        "started_at": "2026-10-06T09:00:05.120Z",
+        "ended_at": "2026-10-06T10:02:41.900Z",
+        "reason": "network",
+        "retries": 47,
+        "last_error": "回報連線失敗:error sending request for url (https://192.0.2.1:9443/agent/v1/inventory)"
+      }
+    },
+    {
+      "event_id": "9a4c6e1b-2d3f-4b5a-8c7d-0e1f2a3b4c52",
+      "type": "usb_inserted",
+      "occurred_at": "2026-10-06T09:30:12.004Z",
+      "data": { "drive": "E:", "label": "USB-EXAMPLE", "file_system": "FAT32", "total": 15997075456, "serial": "1A2B3C4D" }
+    },
+    {
+      "event_id": "c7e5a3b1-9f8d-4c6b-a2e0-5d4c3b2a1f03",
+      "type": "usb_removed",
+      "occurred_at": "2026-10-06T09:41:55.730Z",
+      "data": { "drive": "E:", "label": "USB-EXAMPLE", "file_system": "FAT32", "total": 15997075456, "serial": "1A2B3C4D" }
+    },
+    {
+      "event_id": "5f1e2d3c-4b5a-4968-8776-655443322114",
+      "type": "agent_started",
+      "occurred_at": "2026-10-06T09:35:00.000Z",
+      "data": { "agent_version": "0.2.0" }
+    }
+  ]
+}

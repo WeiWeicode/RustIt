@@ -3,6 +3,8 @@
  *   - 只認 Nginx 帶來的 x-client-cert-* 標頭,要求 x-client-verify=SUCCESS,以完整 DN 為裝置鍵(§3.3、§5.2);未通過一律 401
  *   - 標頭只採信來自 AGENT_TRUSTED_PROXIES(Nginx)的連線;dev 以 DEV_TRUST_CLIENT_HEADERS 讓本機 Agent 直連
  *   - POST /agent/v1/inventory(資料契約 inventory.schema.json)、WS GET /agent/v1/ws(信封 ws-envelope.schema.json)
+ *   - POST /agent/v1/sync(離線補傳比對,sync.schema.json)、POST /agent/v1/events(端點事件,event.schema.json)(PLATFORM-PLAN P2)
+ *   - HTTPS 回報同時處理中的請求超過 AGENT_MAX_INFLIGHT 時回 429 ITA_BUSY + Retry-After,在驗證身分前就擋下(A3)
  *   - 與 :51240 是不同的 Fastify 實例,不共用 hook(§5.2);日誌帶 x-request-id、DN、指紋(§5.7)
  *   - 監控(giga-observe 服務 endpoint-agent,與管理 API 分開的 Key):HTTPS 回報逐筆;WebSocket 每條連線關閉時記一筆
  *     (method WS、持續時間、關閉碼、訊息數;非正常關閉為 warn);心跳附上在線連線數。Agent 的 heartbeat 訊息不逐筆記錄(量大)
@@ -13,7 +15,17 @@ import { errorBody, type DepStatus, type MonitorEnv, type MonitorLog } from '@gi
 import { setupGateway } from '@giganexus/backend-sdk/fastify';
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import type { Config } from './config.js';
-import { CONTRACT_IDS, compileWsEnvelope, contractsDir, loadContract, type HelloBody, type InventoryRequest, type WsEnvelope } from './contracts.js';
+import {
+  CONTRACT_IDS,
+  compileWsEnvelope,
+  contractsDir,
+  loadContract,
+  type EventsRequest,
+  type HelloBody,
+  type InventoryRequest,
+  type SyncRequest,
+  type WsEnvelope,
+} from './contracts.js';
 import { AppError } from './errors.js';
 import type { AgentConnection, Ctx, DeviceService } from './services/device-service.js';
 import type { DeviceRecord } from './stores/types.js';
@@ -21,6 +33,8 @@ import type { DeviceRecord } from './stores/types.js';
 declare module 'fastify' {
   interface FastifyRequest {
     device: DeviceRecord | null;
+    /** 已計入同時處理數(A3) */
+    inflight: boolean;
   }
   interface FastifyContextConfig {
     /** false:不驗證裝置身分(健康檢查) */
@@ -29,7 +43,7 @@ declare module 'fastify' {
 }
 
 export interface AgentAppOptions {
-  config: Pick<Config, 'logLevel' | 'agentTls' | 'trustedProxies'>;
+  config: Pick<Config, 'logLevel' | 'agentTls' | 'trustedProxies'> & Partial<Pick<Config, 'agentMaxInflight' | 'busyRetryAfterSec'>>;
   service: DeviceService;
   contractsDir?: string;
   /** 心跳逾時檢查間隔(毫秒) */
@@ -105,6 +119,7 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
   const validateEnvelope = compileWsEnvelope(dir);
   app.addSchema(loadContract('inventory', dir));
   app.addSchema(loadContract('sync', dir));
+  app.addSchema(loadContract('event', dir));
   await app.register(websocket, { options: { maxPayload: WS_MAX_PAYLOAD } });
   // 監控需在路由之前註冊;本通道不註冊 OpenAPI(Agent 經 :9443 直達,不經 BFF 路由表)
   await app.register(setupGateway, {
@@ -122,6 +137,29 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
   const ctxOf = (req: FastifyRequest): Ctx => ({ log: req.log, requestId: req.id });
 
   app.decorateRequest('device', null);
+  app.decorateRequest('inflight', false);
+
+  // 主機忙碌(A3):HTTPS 回報同時處理數超過上限回 429 + Retry-After,在身分驗證(查 SQL)之前擋下;WebSocket 不計
+  const maxInflight = config.agentMaxInflight ?? 32;
+  const retryAfter = String(config.busyRetryAfterSec ?? 30);
+  let inflight = 0;
+  app.addHook('onRequest', async (req, reply) => {
+    if (req.method !== 'POST' || !req.routeOptions.url?.startsWith('/agent/v1/')) return;
+    if (inflight >= maxInflight) {
+      req.log.warn({ inflight }, '同時處理的回報超過上限,回 429');
+      return reply.status(429).header('retry-after', retryAfter).send(errorBody('ITA_BUSY', '主機忙碌,請稍後重試', req.id));
+    }
+    inflight++;
+    req.inflight = true;
+  });
+  const release = async (req: FastifyRequest) => {
+    if (!req.inflight) return;
+    req.inflight = false;
+    inflight--;
+  };
+  app.addHook('onResponse', release);
+  app.addHook('onRequestAbort', release);
+
   // 裝置身分 hook(指南 §5.2):WebSocket 升級請求同樣經過,失敗時升級被拒(HTTP 401 / 403)
   app.addHook('onRequest', async (req) => {
     if (!req.routeOptions.url || req.routeOptions.config.deviceAuth === false) return;
@@ -162,6 +200,14 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
 
   app.post<{ Body: InventoryRequest }>('/agent/v1/inventory', { schema: { body: { $ref: `${CONTRACT_IDS.inventory}#` } } }, async (req) =>
     service.ingestInventory(ctxOf(req), req.device!, req.body),
+  );
+
+  app.post<{ Body: SyncRequest }>('/agent/v1/sync', { schema: { body: { $ref: `${CONTRACT_IDS.sync}#` } } }, async (req) =>
+    service.sync(ctxOf(req), req.device!, req.body),
+  );
+
+  app.post<{ Body: EventsRequest }>('/agent/v1/events', { schema: { body: { $ref: `${CONTRACT_IDS.event}#` } } }, async (req) =>
+    service.ingestEvents(ctxOf(req), req.device!, req.body),
   );
 
   app.get('/agent/v1/ws', { websocket: true }, (socket, req) => {

@@ -12,13 +12,14 @@ export const CONTRACT_IDS = {
   inventory: 'https://giganexus.local/rustit/contracts/inventory.schema.json',
   wsEnvelope: 'https://giganexus.local/rustit/contracts/ws-envelope.schema.json',
   sync: 'https://giganexus.local/rustit/contracts/sync.schema.json',
+  event: 'https://giganexus.local/rustit/contracts/event.schema.json',
 } as const;
 
 export function contractsDir(env: NodeJS.ProcessEnv = process.env): string {
   return env.CONTRACTS_DIR ?? path.resolve(process.cwd(), '../docs/contracts');
 }
 
-export function loadContract(name: 'inventory' | 'ws-envelope' | 'sync', dir = contractsDir()): Record<string, unknown> {
+export function loadContract(name: 'inventory' | 'ws-envelope' | 'sync' | 'event', dir = contractsDir()): Record<string, unknown> {
   const file = path.join(dir, `${name}.schema.json`);
   try {
     return JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
@@ -50,6 +51,49 @@ export interface HelloBody {
   os_version?: string;
   ips?: string[];
   boot_time?: number;
+  /** 端點時間(A2) */
+  agent_time?: string;
+  /** 硬體指紋,空字串 = 無法取得(A1) */
+  hw_fingerprint?: string;
+}
+
+/** 主機下發設定(ws-envelope AgentSettings;PLATFORM-PLAN §4.2) */
+export interface AgentSettings {
+  inventory_interval_sec: number;
+  usb_events: boolean;
+}
+
+export interface HelloAckBody {
+  device_id: string;
+  heartbeat_interval_sec: number;
+  server_time: string;
+  clock_skew_ms?: number;
+  settings_version: number;
+  settings: AgentSettings;
+}
+
+/** POST /agent/v1/sync(sync.schema.json) */
+export interface SyncRequest {
+  last_acked_seq?: number;
+  last_acked_hash?: string;
+  pending: { agent_seq: number; collected_at: string; content_hash: string }[];
+}
+
+export interface SyncResponse {
+  device_id: string;
+  need: number[];
+  skip: number[];
+  server_state: { status: 'active' | 'disabled' | 'retired'; last_hash: string; last_seq?: number };
+}
+
+/** POST /agent/v1/events(event.schema.json) */
+export interface EventsRequest {
+  events: { event_id: string; type: string; occurred_at: string; data?: Record<string, unknown> }[];
+}
+
+export interface EventsResponse {
+  accepted: string[];
+  server_time: string;
 }
 
 export interface InventoryRequest {

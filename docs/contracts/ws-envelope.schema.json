@@ -35,7 +35,13 @@
         "os_name": { "type": "string" },
         "os_version": { "type": "string" },
         "ips": { "type": "array", "items": { "type": "string" } },
-        "boot_time": { "type": "integer", "minimum": 0, "description": "Unix 秒" }
+        "boot_time": { "type": "integer", "minimum": 0, "description": "Unix 秒" },
+        "agent_time": { "type": "string", "format": "date-time", "description": "送出 hello 時的端點時間(UTC);Server 據此記錄時鐘偏差 clock_skew_ms(PLATFORM-PLAN A2)" },
+        "hw_fingerprint": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{64})?$",
+          "description": "硬體指紋:SHA-256(\"rustit-hw-v1|\" + BIOS 序號 + \"|\" + 系統 UUID,兩者先去除前後空白、轉大寫;UTF-8),兩者皆為空白或廠商預設值時為空字串。與既有裝置相同時 Server 標記「疑似同一台」,由 IT 確認合併,不自動合併(A1)"
+        }
       }
     },
     "HelloAckBody": {
@@ -45,14 +51,26 @@
       "properties": {
         "device_id": { "type": "string", "format": "uuid" },
         "heartbeat_interval_sec": { "type": "integer", "minimum": 5 },
-        "server_time": { "type": "string", "format": "date-time" }
+        "server_time": { "type": "string", "format": "date-time" },
+        "clock_skew_ms": { "type": "integer", "description": "agent_time − server_time(毫秒);hello 沒帶 agent_time 時省略" },
+        "settings_version": { "type": "integer", "minimum": 0, "description": "主機下發設定的版本;與 Agent 本機保存的相同時可忽略 settings" },
+        "settings": { "$ref": "#/definitions/AgentSettings" }
+      }
+    },
+    "AgentSettings": {
+      "description": "主機下發設定(PLATFORM-PLAN §4.2「設定分三層」第二層)。Agent 持久化在本機 store,離線或重開機時用最後一次收到的值;從未收過用程式內預設值。不認得的欄位忽略",
+      "type": "object",
+      "properties": {
+        "inventory_interval_sec": { "type": "integer", "minimum": 300, "maximum": 86400, "description": "資產蒐集間隔(秒)" },
+        "usb_events": { "type": "boolean", "description": "是否回報 USB 儲存裝置插拔事件" }
       }
     },
     "HeartbeatBody": {
       "description": "Agent → Server,每 heartbeat_interval_sec(預設 30)秒一則;連續 3 次沒收到判定離線(§5.3)",
       "type": "object",
       "properties": {
-        "outbox_pending": { "type": "integer", "minimum": 0, "description": "本機暫存中尚未被確認的快照數(M5 起有值)" },
+        "outbox_pending": { "type": "integer", "minimum": 0, "description": "本機暫存中尚未被確認的快照數(P2 起有值)" },
+        "events_pending": { "type": "integer", "minimum": 0, "description": "本機暫存中尚未送出的事件數(P2)" },
         "last_inventory_seq": { "type": "integer", "minimum": 0, "description": "最後一次被確認的 agent_seq" }
       }
     },
