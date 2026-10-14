@@ -168,7 +168,7 @@ Demo(Tauri)改造為使用者端程式 `desktop`:使用者會用的頁面保留(
 | 主機下發設定 | 回報間隔、心跳間隔、健康指標開關、所屬發佈環、事件類別開關 | `store.db` 的 `settings`(主機在 `hello_ack` / `watchdog report` 回應帶最新版本號,變更時下載並持久化) | 主機;**離線或重開機時用最後一次收到的設定**,從未收過就用程式內預設值 |
 | 本機狀態 | `device_id`、`agent_seq`、最後確認的 `seq` / `hash`、指令去重表、目前裝置狀態(active / disabled) | `store.db` 的 `state` | Agent 自己 |
 
-**持久化內容**(`%ProgramData%\GigaNexus\Agent\state\store.db`,敏感欄位以 AES-256-GCM 加密,金鑰經 DPAPI 電腦範圍保護)
+**持久化內容**(`%ProgramData%\GigaNexus\Agent\state\store.db`,敏感欄位以 AES-256-GCM 加密,金鑰經 DPAPI 保護;**P2 實作改為執行帳號範圍**(服務為 LocalSystem,只有 SYSTEM 行程能解開,不只依賴目錄 ACL;資安稽核後調整,仍是換電腦無法解密))
 
 | 資料表 | 內容 | 送達後 | 上限 |
 | --- | --- | --- | --- |

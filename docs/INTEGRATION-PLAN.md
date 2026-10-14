@@ -132,7 +132,7 @@ flowchart LR
 | 項目 | 規則 |
 | --- | --- |
 | 位置 | `%ProgramData%\GigaNexus\Agent\store.db`(ACL 只允許 SYSTEM、Administrators,指南 §6.1);dev 用工作目錄 |
-| 引擎 | SQLite(`rusqlite`,bundled)。**欄位內容以 AES-256-GCM 加密**(`aes-gcm`),金鑰由 Windows **DPAPI(電腦範圍)** 保護後存檔;dev 用金鑰檔。**不採 SQLCipher**:在 Windows 建置需編譯 OpenSSL(Perl / NASM),增加部署與 CI 負擔;應用層加密對本需求足夠(D4 已確認) |
+| 引擎 | SQLite(`rusqlite`,bundled)。**欄位內容以 AES-256-GCM 加密**(`aes-gcm`),金鑰由 Windows **DPAPI** 保護(P2 實作為執行帳號範圍,見 PLATFORM-PLAN §4.2) 保護後存檔;dev 用金鑰檔。**不採 SQLCipher**:在 Windows 建置需編譯 OpenSSL(Perl / NASM),增加部署與 CI 負擔;應用層加密對本需求足夠(D4 已確認) |
 | 內容 | `outbox`(尚未被後端確認的快照:`agent_seq`、`collected_at`、`content_hash`、加密 payload)、`state`(`device_id`、最後被確認的 `seq` / `hash`、後端回傳的設定) |
 | 容量 | outbox 上限(例如 50 份或 20 MB),滿了丟最舊;相同 `content_hash` 連續出現只保留一份 |
 | 日誌 | 不寫 payload、金鑰、Token |

@@ -241,6 +241,22 @@ pub fn collect() -> ComputerInfo {
     info
 }
 
+/// 目前的可移除磁碟區(USB 隨身碟等)。只列舉磁碟區、不查 WMI,可頻繁呼叫(PLATFORM-PLAN §4.2 USB 插拔事件)。
+pub fn removable_volumes() -> Vec<Volume> {
+    Disks::new_with_refreshed_list()
+        .iter()
+        .filter(|d| d.is_removable())
+        .map(|d| Volume {
+            mount_point: d.mount_point().to_string_lossy().into_owned(),
+            label: d.name().to_string_lossy().into_owned(),
+            file_system: d.file_system().to_string_lossy().into_owned(),
+            total: d.total_space(),
+            available: d.available_space(),
+            removable: true,
+        })
+        .collect()
+}
+
 fn current_user() -> String {
     let user = std::env::var("USERNAME").unwrap_or_default();
     match std::env::var("USERDOMAIN") {

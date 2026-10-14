@@ -8,19 +8,34 @@
 | --- | --- |
 | 基本階段(INTEGRATION-PLAN M0–M4、M6) | ✅ 完成:Agent 經 Gateway `:9443` 回報 ItAgentBack,GigaItApp「電腦清單」看得到 |
 | `RustAgent/crates/collector` | ✅ 硬體、軟體、網路、防毒、USB 儲存、RustDesk 狀態 |
-| `RustAgent/crates/agent`(`rustit-agent`) | ✅ 前景執行(`run`)與 **Windows 服務**(`service`;開發用 `install` / `uninstall`,P1 第一批);HTTPS 回報、WebSocket hello / 心跳、退避重連、裝置憑證(PEM 檔或 Windows `LocalMachine\My`,P1 PoC 實測通過)、服務模式檔案日誌、監控 MSI(未簽章,P1 VM 驗證通過)。尚未有指令執行 |
+| `RustAgent/crates/agent`(`rustit-agent`) | ✅ 前景執行(`run`)與 **Windows 服務**(`service`;開發用 `install` / `uninstall`,P1 第一批);HTTPS 回報、WebSocket hello / 心跳、退避重連、裝置憑證(PEM 檔或 Windows `LocalMachine\My`,P1 PoC 實測通過)、服務模式檔案日誌、監控 MSI(未簽章,P1 VM 驗證通過)。**P2**:本機加密暫存 `state\store.db`(資產 / 事件 outbox、連線紀錄)、離線照常蒐集與 `/sync` 補傳、`offline_period`、USB 插拔與 `agent_started` 事件、429 依 Retry-After、主機下發設定(本機單元測試與端對端通過,VM 驗證待做)。尚未有指令執行 |
 | `RustAgent/crates/demo` | 示範介面;**將改造為使用者端程式 `desktop`**(P8),`src/deploy.rs` 是軟體派送的參考實作(P7 移植到 Agent) |
 | `RustAgent/crates/native` | ✅ 已移除(P1;最後版本 `3ba3827`) |
-| `ItAgentBack` | ✅ 測試區(主機 2,`endpoint-server` + `ita-mongo` / `ita-redis`,CI `develop` 部署);管理 API 只有 `GET /v1/devices[/{deviceId}]`;giga-observe 監控已接 |
+| `ItAgentBack` | ✅ 測試區(主機 2,`endpoint-server` + `ita-mongo` / `ita-redis`,CI `develop` 部署);管理 API 只有 `GET /v1/devices[/{deviceId}]`;giga-observe 監控已接。**P2 主機端已上測試區**(2026-10-14,MR !10):`/sync`、`/events`、429、時鐘偏差、硬體指紋、主機下發設定;migration 0002 已套用 `giganexus_It_Agent_test` |
 | GigaItApp 電腦清單 | ✅ 清單 + 詳情(概要、磁碟、網卡) |
-| INTEGRATION-PLAN M5(離線暫存、`/sync`) | ⏸ 延後,擴充為 PLATFORM-PLAN P2(本機設定與持久化、離線紀錄) |
+| INTEGRATION-PLAN M5(離線暫存、`/sync`) | 併入 PLATFORM-PLAN P2(進行中) |
 | 第二階段計畫 | ✅ `PLATFORM-PLAN.md` v0.4 **定案**(P0,2026-10-13):根目錄 `PROJECT-MAP.md` / `workspace.json`(cbf6db9)、Gateway `ENDPOINT-AGENT-GUIDE.md` v0.5(7319e87)已同步;甘特圖 W6-13 ~ W6-24(P0–P8、上線前準備),舊 W6-1 ~ W6-6、W6-12 已由新任務取代 |
 
 ## 2. 下一步
 
 1. **P1 已完成**(2026-10-14 Hyper-V VM 驗證 7 項通過,見下方「P1 收尾:VM 測試」)。Win11 VM 可之後補測;VM 保留作 P2 以後的測試機(檢查點「匯入憑證」)。
 2. **P3 資料呈現**、**P8-1 使用者端外殼與我的電腦** 可並行:P3(管理 API 回完整資產 + GigaItApp 詳情分 Tab)只動後端與前端,適合交給同仁。
-3. P1 之後接 **P2 本機持久化與離線紀錄**,再做 P4 指令通道(升級、派送的共同基礎)。
+3. **P2 本機持久化與離線紀錄**:主機端已上測試區;Agent 端分支 `feature/p2-agent-offline` 完成,下一步 **P2-3 VM 驗證**(見下方)。之後做 P4 指令通道(升級、派送的共同基礎)。
+
+### P2-3:VM 驗證(完成標準 PLATFORM-PLAN §4.2)
+
+| 步驟 | 內容 |
+| --- | --- |
+| 準備 | Agent 分支合併後 `build-agent-msi.ps1 -Env test` 重建 MSI;VM 還原「匯入憑證」檢查點後安裝(或直接升級安裝)。確認連線後建立「P2 已安裝」檢查點 |
+| 1. 離線 1 小時 | Hyper-V 中斷 VM 網路介面卡(或 VM 內停用網卡)。期間:插入 / 拔出 USB 隨身碟(Hyper-V 加強工作階段無法直通 USB,改用 VHD 掛成可移除磁碟或主機 USB 直通;做不到時以 `diskmgmt` 附加 VHD 驗證可移除磁碟區事件)、`Restart-Service GigaNexusAgent` 一次 |
+| 2. 恢復 | 接回網路;主機應收到最新資產(多份時經 `/sync`)、USB 事件(occurred_at 為插拔當下)、**一筆** `offline_period`(開始 / 結束 / 原因 network、跨越服務重啟),沒有重複資料 |
+| 3. 離線重開機 | 離線狀態下重開機(停止超過 10 分鐘才開機則該段以最後嘗試結束),持久化資料仍在(`C:\ProgramData\GigaNexus\Agent\state\` 有 store.db / store.key),恢復後補傳 |
+| 4. 換電腦無法解密 | 把 `state\` 複製到另一台電腦(或開發機)以前景模式指向它啟動 → 日誌「本機暫存無法使用…改名保留並重建」,舊資料無法讀出 |
+| 5. 時鐘偏差 | VM 時間調快 10 分鐘(先關閉時間同步)→ 主機寫 `clock_skew` 事件、Agent 日誌警告 |
+| 6. 停用 | 主機將裝置設為 disabled(目前無管理 API,需以 SQL 更新 `ita.device.status`,先取得同意)→ Agent 暫停蒐集;恢復 active 後繼續 |
+| 查詢 | 主機端:`docker logs` 搜尋電腦名稱;`ita.device_event`(event_uid 非 NULL 為端點事件) |
+
+注意:`429` 與 `400` 主機有回應,不算離線;不到 60 秒的中斷不送 `offline_period`;離線期間 Agent 重啟(10 分鐘內)延續同一段。DPAPI 改為執行帳號範圍(SYSTEM),前景模式以登入者身分建立的 `state\` 不能給服務使用(反之亦然)。
 
 ### P1 收尾:VM 測試(完成標準 PLATFORM-PLAN §4.1、§4.10 A8)
 
