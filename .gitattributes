@@ -1,0 +1,2 @@
+# shell 腳本會複製到主機 2(Linux / WSL)以 sh 執行,一律 LF;Windows checkout(core.autocrlf=true)轉成 CRLF 會執行失敗
+*.sh text eol=lf
