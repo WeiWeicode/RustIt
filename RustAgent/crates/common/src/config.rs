@@ -94,6 +94,8 @@ pub struct Settings {
     pub tls: Option<TlsSettings>,
     /// dev 模擬 Nginx 的憑證標頭(DN, 指紋)
     pub dev_cert_headers: Option<(String, String)>,
+    /// 本機持久化目錄(store.db、金鑰):設定檔所在目錄下的 `state`(服務模式為 `%ProgramData%\GigaNexus\Agent\state`,PLATFORM-PLAN §4.2)
+    pub state_dir: PathBuf,
 }
 
 impl AgentConfig {
@@ -108,6 +110,11 @@ impl AgentConfig {
     pub fn validate(self, base_dir: &Path, host: &str) -> Result<Settings, String> {
         let server =
             Url::parse(&self.server_url).map_err(|e| format!("server_url 不是合法的 URL:{e}"))?;
+        // 帳密與查詢參數會出現在日誌與上傳的錯誤訊息裡(資安稽核 L2)
+        if !server.username().is_empty() || server.password().is_some() || server.query().is_some()
+        {
+            return Err("server_url 不可包含帳密或查詢參數".into());
+        }
         let loopback = matches!(server.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"));
         match server.scheme() {
             "https" if self.tls.is_none() => return Err("server_url 為 https 時必須設定 [tls](ca_file,以及 cert_file + key_file 或 store_issuer)".into()),
@@ -172,6 +179,7 @@ impl AgentConfig {
             log_level,
             tls,
             dev_cert_headers,
+            state_dir: base_dir.join("state"),
         })
     }
 }

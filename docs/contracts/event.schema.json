@@ -30,7 +30,7 @@
       ]
     },
     "OfflinePeriod": {
-      "description": "Agent 執行中卻連不上主機的一段期間;重連成功後送出一筆。occurred_at = started_at。Agent 停止(關機、服務停止)的期間不算,由主機以最後心跳判斷",
+      "description": "Agent 連不上主機的一段期間(主機有回應的 429 / 400 不算);恢復後送出一筆,不到 60 秒的短暫中斷不送。occurred_at = started_at。期間內 Agent 重啟(10 分鐘內)視為同一段;停止超過 10 分鐘(關機)則以最後一次嘗試結束,停止的時間不算,由主機以最後心跳判斷",
       "type": "object",
       "required": ["started_at", "ended_at", "reason", "retries"],
       "properties": {
@@ -39,7 +39,7 @@
         "reason": {
           "type": "string",
           "enum": ["network", "dns", "tls", "rejected", "server_busy", "server_error", "unknown"],
-          "description": "期間最主要(次數最多)的原因:network 連不上 / 逾時、dns 名稱解析失敗、tls 握手或憑證驗證失敗、rejected 主機拒絕(HTTP 400 / 401 / 403)、server_busy 429、server_error 5xx"
+          "description": "期間最主要(次數最多)的原因:network 連不上 / 逾時、dns 名稱解析失敗、tls 握手或憑證驗證失敗、rejected 主機拒絕(HTTP 400 / 401 / 403)、server_busy 保留(目前 429 不算離線)、server_error 5xx"
         },
         "retries": { "type": "integer", "minimum": 0, "description": "期間失敗的連線嘗試次數" },
         "last_error": { "type": "string", "maxLength": 300, "description": "最後一次錯誤摘要(不含個資與憑證內容)" }
