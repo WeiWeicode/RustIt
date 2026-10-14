@@ -1,0 +1,4 @@
+# 靜態連結 C 執行階段:乾淨的 Windows 沒有 VCRUNTIME140.dll(VC++ 可轉散發套件),
+# 動態連結時服務無法啟動,MSI 回 1920 並回滾(PLATFORM-PLAN P1 VM 測試)
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
