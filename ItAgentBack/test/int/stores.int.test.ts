@@ -111,4 +111,64 @@ describe('SQL Server + Mongo + Redis', () => {
     await service.disconnected(ctx, device, conn);
     assert.equal((await service.listDevices(ctx))[0]!.online, false);
   });
+
+  it('P2:/sync 以 Mongo 已收過的 seq 去重;端點事件以 event_id 去重(過濾唯一索引)', async () => {
+    const device = await service.identify(ctx, DN, 'c'.repeat(40));
+    const seq = inventoryRequest().agent_seq;
+    const res = await service.sync(ctx, device, {
+      pending: [
+        { agent_seq: 1, collected_at: '2026-10-01T00:00:00Z', content_hash: 'd'.repeat(64) },
+        { agent_seq: seq + 5, collected_at: '2026-10-07T00:00:00Z', content_hash: 'e'.repeat(64) },
+      ],
+    });
+    assert.deepEqual(res.need, [seq + 5]);
+    assert.deepEqual(res.skip, [1]);
+    assert.equal(res.server_state.last_seq, seq);
+
+    const events = {
+      events: [
+        { event_id: '3b9d2f5e-7c41-4a8e-9f06-1d2c3b4a5e61', type: 'usb_inserted', occurred_at: '2026-10-06T09:30:12.004Z', data: { drive: 'E:' } },
+        { event_id: '9a4c6e1b-2d3f-4b5a-8c7d-0e1f2a3b4c52', type: 'agent_started', occurred_at: '2026-10-06T09:35:00Z', data: {} },
+      ],
+    };
+    assert.equal((await service.ingestEvents(ctx, device, events)).accepted.length, 2);
+    await service.ingestEvents(ctx, device, events);
+    const pool = await connect(migrateConfig(env, testDb));
+    try {
+      const r = await pool.request().query(`SELECT event_type, occurred_at, received_at, data FROM ita.device_event WHERE event_uid IS NOT NULL ORDER BY occurred_at`);
+      assert.equal(r.recordset.length, 2, '重送不重複');
+      assert.equal((r.recordset[0].occurred_at as Date).toISOString(), '2026-10-06T09:30:12.004Z');
+      assert.ok(r.recordset[0].received_at instanceof Date);
+      assert.equal(JSON.parse(r.recordset[0].data as string).drive, 'E:');
+    } finally {
+      await pool.close();
+    }
+  });
+
+  it('P2:hello 記錄時鐘偏差與硬體指紋;另一台同指紋時寫 suspected_duplicate', async () => {
+    const device = await service.identify(ctx, DN, 'c'.repeat(40));
+    const hw = 'f'.repeat(64);
+    const ack = await service.hello(ctx, device, { agent_version: '0.2.0', host_name: 'PC-EXAMPLE-01', agent_time: new Date(Date.now() + 600_000).toISOString(), hw_fingerprint: hw });
+    assert.ok(ack.clock_skew_ms! > 590_000);
+    const again = await sql.findByDn(DN);
+    assert.equal(again!.hwFingerprint, hw);
+    assert.ok(again!.clockSkewMs! > 590_000);
+
+    const other = await service.identify(ctx, 'O=GigaNexus Dev,CN=PC-EXAMPLE-NEW', 'd'.repeat(40));
+    await service.hello(ctx, other, { agent_version: '0.2.0', host_name: 'PC-EXAMPLE-NEW', hw_fingerprint: hw });
+    assert.deepEqual(
+      (await sql.findByHwFingerprint(hw, other.id)).map((d) => d.deviceId),
+      [device.deviceId],
+    );
+    const pool = await connect(migrateConfig(env, testDb));
+    try {
+      const r = await pool.request().query(`SELECT event_type FROM ita.device_event WHERE event_type IN ('clock_skew', 'suspected_duplicate') ORDER BY id`);
+      assert.deepEqual(
+        r.recordset.map((x) => x.event_type),
+        ['clock_skew', 'suspected_duplicate'],
+      );
+    } finally {
+      await pool.close();
+    }
+  });
 });

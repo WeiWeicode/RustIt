@@ -102,6 +102,16 @@ export class MongoSnapshotStore implements SnapshotStore {
     await this.run(() => this.heartbeats.insertOne({ device_id: deviceId, at, body }));
   }
 
+  async seenSnapshots(deviceId: string, items: { seq: number; hash: string }[]): Promise<Set<string>> {
+    if (items.length === 0) return new Set();
+    const docs = await this.run(() =>
+      this.snapshots
+        .find({ device_id: deviceId, agent_seq: { $in: items.map((i) => i.seq) } }, { projection: { _id: 0, agent_seq: 1, content_hash: 1 } })
+        .toArray(),
+    );
+    return new Set(docs.map((d) => `${d.agent_seq}:${d.content_hash}`));
+  }
+
   async close(): Promise<void> {
     await this.client.close();
   }

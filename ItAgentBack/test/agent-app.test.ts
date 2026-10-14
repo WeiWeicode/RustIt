@@ -64,6 +64,8 @@ describe('裝置身分(指南 §5.2)', () => {
     const res = await post(inventoryRequest({ content_hash: H2 }));
     assert.equal(res.statusCode, 403);
     assert.equal(res.json().code, 'ITA_DEVICE_DISABLED');
+    env.sql.devices[0]!.status = 'retired';
+    assert.equal((await post(inventoryRequest({ content_hash: H2 }))).json().code, 'ITA_DEVICE_RETIRED');
   });
 });
 

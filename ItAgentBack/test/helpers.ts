@@ -8,6 +8,7 @@ import path from 'node:path';
 import { primaryIpv4, type InventoryRequest } from '../src/contracts.js';
 import { DeviceService } from '../src/services/device-service.js';
 import type {
+  AgentEvent,
   CurrentInventory,
   DeviceEventType,
   DeviceRecord,
@@ -17,6 +18,7 @@ import type {
   OnlineInfo,
   SnapshotStore,
   StateStore,
+  TouchPatch,
 } from '../src/stores/types.js';
 
 export const CONTRACTS_DIR = path.resolve(import.meta.dirname, '../../docs/contracts');
@@ -41,6 +43,7 @@ export class MemoryDeviceStore extends Failable implements DeviceStore {
   devices: DeviceRecord[] = [];
   inventories = new Map<number, InventorySnapshot>();
   events: { deviceRef: number | null; type: DeviceEventType; detail: string }[] = [];
+  agentEvents: (AgentEvent & { deviceRef: number; receivedAt: Date })[] = [];
 
   async ping() {
     this.hit('ping');
@@ -63,6 +66,8 @@ export class MemoryDeviceStore extends Failable implements DeviceStore {
       firstSeenAt: input.at,
       lastSeenAt: input.at,
       lastInventoryAt: null,
+      hwFingerprint: null,
+      clockSkewMs: null,
     };
     this.devices.push(d);
     this.events.push({ deviceRef: d.id, type: 'registered', detail: '' });
@@ -77,12 +82,23 @@ export class MemoryDeviceStore extends Failable implements DeviceStore {
     this.hit('addEvent');
     this.events.push({ deviceRef: device?.id ?? null, type, detail });
   }
-  async touch(deviceRef: number, at: Date, patch: { computerName?: string; agentVersion?: string } = {}) {
+  async addAgentEvents(device: DeviceRecord, events: AgentEvent[], receivedAt: Date) {
+    this.hit('addAgentEvents');
+    for (const e of events)
+      if (!this.agentEvents.some((x) => x.deviceRef === device.id && x.eventUid === e.eventUid)) this.agentEvents.push({ ...e, deviceRef: device.id, receivedAt });
+  }
+  async touch(deviceRef: number, at: Date, patch: TouchPatch = {}) {
     this.hit('touch');
     const d = this.byId(deviceRef);
     if (d.lastSeenAt < at) d.lastSeenAt = at;
     if (patch.computerName) d.computerName = patch.computerName;
     if (patch.agentVersion) d.agentVersion = patch.agentVersion;
+    if (patch.hwFingerprint) d.hwFingerprint = patch.hwFingerprint;
+    if (patch.clockSkewMs !== undefined) d.clockSkewMs = patch.clockSkewMs;
+  }
+  async findByHwFingerprint(hwFingerprint: string, excludeRef: number) {
+    this.hit('findByHwFingerprint');
+    return this.devices.filter((d) => d.hwFingerprint === hwFingerprint && d.id !== excludeRef).map((d) => ({ ...d }));
   }
   async currentInventory(deviceRef: number): Promise<CurrentInventory | null> {
     this.hit('currentInventory');
@@ -153,6 +169,11 @@ export class MemorySnapshotStore extends Failable implements SnapshotStore {
   async recordHeartbeat({ deviceId, at }: { deviceId: string; at: Date }) {
     this.hit('recordHeartbeat');
     this.heartbeats.push({ deviceId, at });
+  }
+  async seenSnapshots(deviceId: string, items: { seq: number; hash: string }[]) {
+    this.hit('seenSnapshots');
+    const keys = new Set(items.map((i) => `${i.seq}:${i.hash}`));
+    return new Set(this.snapshots.filter((x) => x.deviceId === deviceId).map((x) => `${x.agentSeq}:${x.contentHash}`).filter((k) => keys.has(k)));
   }
   async close() {}
 }

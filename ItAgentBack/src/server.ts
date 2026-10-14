@@ -17,7 +17,7 @@ const config = loadConfig();
 const sql = new SqlDeviceStore(config.sql);
 const mongo = new MongoSnapshotStore(config.mongoUrl, config.mongoDb, config.snapshotRetentionDays);
 const redis = new RedisStateStore(config.redisUrl, config.redisPrefix);
-const service = new DeviceService(sql, mongo, redis, { heartbeatIntervalSec: config.heartbeatIntervalSec });
+const service = new DeviceService(sql, mongo, redis, { heartbeatIntervalSec: config.heartbeatIntervalSec, settings: config.agentSettings });
 
 const check = async (fn: () => Promise<void>) => {
   try {
