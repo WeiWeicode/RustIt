@@ -180,7 +180,7 @@ Agent 與 Server 之間只透過 **資料契約**(`docs/contracts/`,JSON Schema 
 - 部署區只有這三個值;缺少必要設定時**啟動失敗**,不要加預設值繞過檢查。
 - Agent 的 Gateway 位址以 IP 設定(`<gateway-ip>:9443`),不用主機名稱(Gateway PRD Q1)。
 - `:51241` 防火牆**只允許 Gateway 主機**連入;`ItAgentBack/` 不可信任任何不是 Nginx 帶來的身分標頭。
-- **測試區(2026-10-07 起)**:CI 推 `gitlab main:develop` → `deploy-test` 在主機 2 建置 `endpoint-server`(加入 `giganexus-gw_default`)與 `ita-mongo` / `ita-redis`;Compose 變數 `/srv/giganexus/deploy/ita.env`、機密 `/srv/giganexus/ita-secrets/`,由需求方執行 `ItAgentBack/deploy/host2-set-secrets.sh` 產生(SQL 密碼隱藏輸入;AI 不經手密碼)。主機 2 的 `:9443` 防火牆暫時只開放 10.10.112.13,上線前改為端點網段。
+- **測試區(2026-10-07 起)**:CI 推 `gitlab main:develop` → `deploy-test` 在主機 2 建置 `endpoint-server`(加入 `giganexus-gw_default`)與 `ita-mongo` / `ita-redis`;Compose 變數 `/srv/giganexus/deploy/ita.env`、機密 `/srv/giganexus/ita-secrets/`,由需求方執行 `ItAgentBack/deploy/host2-set-secrets.sh` 產生(SQL 密碼隱藏輸入;AI 不經手密碼)。主機 2 的 `:9443` 防火牆暫時只開放 10.10.112.13 與 10.10.130.124(主機 2 上 Hyper-V 測試 VM 經 Default Switch NAT 後的來源,HANDOFF「P1 收尾」),上線前改為端點網段。
 
 ---
 
