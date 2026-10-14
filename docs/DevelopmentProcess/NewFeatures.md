@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-14 P1 收尾:測試 VM 裝置憑證腳本
+- 內容:新增 `RustAgent/installer/host2-issue-test-device-cert.sh`:在主機 2 以臨時 Agent CA(`/srv/giganexus/deploy/secrets/pki/agent-ca.*`,Gateway `gen-temp-pki.sh` 產生)為指定電腦名稱簽發 EC P-256 用戶端憑證(EKU clientAuth、365 天,欄位同既有開發機憑證),打包成含 Agent CA 的 PFX(AES-256)與隨機密碼檔,輸出到 `C:\Users\user\agent-certs\<電腦名稱>\`。私鑰只在暫存目錄、密碼不印在畫面、中途失敗清除輸出資料夾;依「主機機密由使用者執行」,由使用者執行,AI 不經手私鑰與密碼。另以最新 `develop`(含 `SERVICE_START` 修正)重建測試區 MSI,放到主機 2 `C:\Users\user\agent-msi\`。
+- 檔案:`RustAgent/installer/host2-issue-test-device-cert.sh`、`docs/HANDOFF.md`、`docs/PROJECT-MAP.md`
+- 驗證:開發機以假 CA 試跑:PFX 含裝置憑證與 Agent CA 兩張、密碼 32 字元無換行、暫存目錄已清除;中途失敗時輸出資料夾被清除、可重跑。`build-agent-msi.ps1 -Env test` 產出 `GigaNexusAgent-0.1.0-test.msi`,主機 2 副本雜湊相符。VM 首次安裝因缺 VC++ 執行階段失敗,改靜態連結後重建(見 BugFix.md 2026-10-14)。Win10 VM `DESKTOP-1TB2UMP` 驗證 7 項全部通過:安裝、失敗復原 10 / 30 / 60 秒、重開機未登入即連線、強制結束後自動重啟(1006 → 28 秒重連)、目錄 ACL、解除安裝(保留日誌、1001 後不再連線)、還原檢查點重裝(同一 deviceId)。Default Switch 的來源 IP 會 NAT 成主機 2 `10.10.130.124`,`:9443` 防火牆需允許此位址。**P1 完成。**
+
 ## 2026-10-13 P1:監控 MSI(WiX v5)
 - 內容:新增 `RustAgent/installer/agent.wxs` 與 `build-agent-msi.ps1`。MSI 安裝服務 `GigaNexusAgent`(LocalSystem、自動啟動,參數 `service --config "%ProgramData%\GigaNexus\Agent\agent.toml"`)與 `%ProgramFiles%\GigaNexus\Agent\rustit-agent.exe`;`%ProgramData%\GigaNexus\Agent`(`agent.toml`、`pki\ca.crt`、`logs\`)以 `PermissionEx` SDDL `D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)` 只允許 SYSTEM、Administrators、不繼承;解除安裝保留 `logs\`。與計畫不同之處:設定改為**依部署區建置**(建置腳本產生 agent.toml:server_url、ca_file、store_issuer),不在安裝時傳參數(MSI 無內建 TOML 寫入,避免自訂動作;GPO 不必 transform);失敗復原改由**服務每次啟動自行套用**(`ensure_recovery`,MSI 的 MsiServiceConfig / MsiServiceConfigFailureActions 會出 WIX1149 警告、SDK 標示不可靠;Util ServiceConfig 無法設定不同延遲),被手動改掉也會在下次啟動恢復。WiX 用 **v5.0.2**(dotnet global tool):v6 起企業使用需付 Open Source Maintenance Fee,建置腳本會擋非 v5。開發機實測時發現自行套用失敗復原回「IO error in winapi call」:失敗復原含重新啟動動作需 `SERVICE_START` 權限,已補上並把 Win32 錯誤碼一併寫入日誌(`describe`)。
 - 檔案:`RustAgent/installer/{agent.wxs,build-agent-msi.ps1}`、`RustAgent/crates/agent/src/service.rs`、`README.md`、`AGENT.md`、`docs/PROJECT-MAP.md`、`docs/PLATFORM-PLAN.md` §4.1、`docs/HANDOFF.md`
