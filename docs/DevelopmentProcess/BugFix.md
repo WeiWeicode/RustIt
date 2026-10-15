@@ -2,6 +2,12 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-15 logs.collect 的 zip 檔案時間為 1980-01-01、瞬間完成的指令沒有 started_at
+- 內容:測試區 VM 驗證時發現兩個小問題。① zip 項目沒有設定修改時間,`zip` 套件未開 time / chrono 功能時預設 1980-01-01;改為日誌檔的修改時間(本機時間,zip 格式無時區),讀不到時用現在時間。② Agent 的 `command_log` 每筆指令只保留最後狀態,瞬間完成的指令(`agent.log_level`、`agent.restart` 重送)running 被 succeeded 覆蓋,主機沒收到 running 而沒有 `started_at`;主機收到終態時,若沒有 started_at 且不是「未開始執行」的失敗(UNSUPPORTED_COMMAND、EXPIRED、INVALID_PARAMS、NOT_RUNNING_AS_SERVICE),以 `acked_at`(沒有則本次時間)補上。
+- 版本:rustit-agent 0.4.1。
+- 檔案:`RustAgent/crates/agent/src/logs.rs`、`Cargo.toml`;`ItAgentBack/src/services/command-dispatcher.ts`、`src/stores/{types,sql-command-store}.ts`、`test/{commands.test,helpers}.ts`、`test/int/stores.int.test.ts`
+- 驗證:`cargo test -p rustit-agent -p rustit-common` 全數通過(zip 項目時間等於日誌檔修改時間),clippy 無警告;`npm test` 92、`npm run test:int` 8 項通過(瞬間完成補 started_at、UNSUPPORTED_COMMAND 不補,SQL 條件更新)。
+
 ## 2026-10-15 指令 API 自動註冊被 Gateway 拒絕(IMPORT_HAS_ERRORS)
 - 內容:P4-1 / P4-2 部署測試區後,endpoint-api 啟動時自動註冊 OpenAPI 失敗(`API 自動註冊失敗,Gateway 路由未更新`),指令與附檔下載路由都沒有進入 Gateway 草稿。原因:① `x-permissions` 沒有宣告 `endpoint.command.basic`(`openapi.ts` 仍是 P4 前「待指令 API 實作時再宣告」);② `endpoint.command.listByDevice` 含大寫,不符 Gateway 的代碼格式 `^[a-z][a-z0-9-]*(\.[a-z0-9-]+){2,}$`。任一路由不符時整批拒絕。既有 OpenAPI 測試只建了不含指令路由的管理 API,沒有抓到。修正:宣告 `endpoint.command.basic`(端點一般指令,指南 §8.2)、operationId 改 `endpoint.command.list-by-device`;新增測試以 Gateway 相同規則檢查全部路由(operationId / x-permission 格式、權限已宣告、summary、description ≤ 1000、x-gherkin);`npm run openapi` 也輸出指令與附檔路由,與自動註冊內容一致。
 - 檔案:`ItAgentBack/src/openapi.ts`、`src/routes/commands.ts`、`src/print-openapi.ts`、`test/command-files.test.ts`

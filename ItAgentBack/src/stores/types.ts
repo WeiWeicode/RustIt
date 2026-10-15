@@ -230,6 +230,8 @@ export interface CommandPatch {
   errorMessage?: string | null;
   /** acked / running 時設定(已有值不覆寫) */
   timeoutAt?: Date;
+  /** 終態但沒收到 running(瞬間完成,Agent 只送最後狀態):started_at 以 acked_at(沒有則本次時間)補上 */
+  markStarted?: boolean;
 }
 
 export interface CommandFilter {

@@ -1,6 +1,6 @@
 [package]
 name = "rustit-agent"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 description = "GigaNexus 端點 Agent:蒐集資產 → HTTPS 回報、一條 WebSocket 心跳;本機加密暫存與離線補傳;固定類型指令;前景或 Windows 服務執行(RustIt PLATFORM-PLAN P1、P2、P4)"
 
