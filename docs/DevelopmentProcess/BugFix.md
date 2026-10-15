@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-15 裝置被停用期間被記成離線期間
+- 內容:P2-3 VM 驗證時,IT 停用裝置 10 分鐘後恢復,主機收到一筆 reason `rejected` 的 `offline_period`。停用是 IT 的操作、主機有回應,主機端本來就知道(`ita.device.status`),再記離線期間是重複且會誤導。`SendError::counts_as_offline` 改為也排除裝置停用 / 退役(403 `ITA_DEVICE_DISABLED` / `ITA_DEVICE_RETIRED`、WebSocket close 4403);其他 403(憑證、身分)仍算離線。另外收到停用回應時結束進行中的離線期間(`ConnTracker::observe_failure`):網路恢復後第一個回應就是停用時,原本那段期間會一直延續到 IT 重新啟用才結束。429、400 的行為不變。rustit-agent 升為 0.2.1。
+- 檔案:`RustAgent/crates/common/src/transport.rs`、`RustAgent/crates/agent/src/{conn,lib}.rs`、`RustAgent/crates/agent/Cargo.toml`、`RustAgent/Cargo.lock`、`docs/contracts/event.schema.json`(reason 說明)、`docs/HANDOFF.md`
+- 驗證:`cargo test -p rustit-agent -p rustit-common` 全數通過(新增 conn 測試:停用不開離線期間、停用回應結束進行中的期間並送出一筆 network 的 offline_period、429 不影響期間;transport 測試:停用 / 退役 / 4403 / 400 / 429 不算離線,其他 403 與網路錯誤算);`cargo clippy --all-targets` 無警告;`cargo fmt --check` 通過。VM 實測待下次重建 MSI。
+
 ## 2026-10-14 shell 腳本在 Windows checkout 後變成 CRLF
 - 內容:開發機 `core.autocrlf=true`,`host2-issue-test-device-cert.sh` 合併後重新 checkout 變成 CRLF,複製到主機 2 以 `sh` 執行會因 `\r` 失敗。新增 `.gitattributes`:`*.sh text eol=lf`,不論 checkout 設定一律 LF。
 - 檔案:`.gitattributes`

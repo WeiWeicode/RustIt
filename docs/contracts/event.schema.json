@@ -39,7 +39,7 @@
         "reason": {
           "type": "string",
           "enum": ["network", "dns", "tls", "rejected", "server_busy", "server_error", "unknown"],
-          "description": "期間最主要(次數最多)的原因:network 連不上 / 逾時、dns 名稱解析失敗、tls 握手或憑證驗證失敗、rejected 主機拒絕(HTTP 400 / 401 / 403)、server_busy 保留(目前 429 不算離線)、server_error 5xx"
+          "description": "期間最主要(次數最多)的原因:network 連不上 / 逾時、dns 名稱解析失敗、tls 握手或憑證驗證失敗、rejected 主機拒絕(HTTP 401 / 403 憑證或身分;400 內容錯誤與裝置停用 / 退役(403 ITA_DEVICE_DISABLED / RETIRED、close 4403)主機有回應,不算離線)、server_busy 保留(目前 429 不算離線)、server_error 5xx"
         },
         "retries": { "type": "integer", "minimum": 0, "description": "期間失敗的連線嘗試次數" },
         "last_error": { "type": "string", "maxLength": 300, "description": "最後一次錯誤摘要(不含個資與憑證內容)" }
