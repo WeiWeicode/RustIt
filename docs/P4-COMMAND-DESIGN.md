@@ -1,7 +1,7 @@
-# P4 指令通道設計(待確認)
+# P4 指令通道設計
 
 > 草案 2026-10-15,分支 `feature/p4-command`(從 `gitlab/develop` e926a2f 開，已合併 316ef31 v0.2.1)。依據:PLATFORM-PLAN §4.4、§5、§6、§8 P4 列;指南 ENDPOINT-AGENT-GUIDE §8.2–§8.5、§5.6、§6.5。
-> **確認後才實作**;確認的結果併入 PLATFORM-PLAN / 契約 / DB_SCHEMA,本檔再刪除或改為實作說明。
+> **2026-10-15 需求方確認**:§7 第 1–3 項照建議(新增 `command_update_ack`、`ita.command_file` 一起建、admin 路徑延到 P6);migration 0003 經需求方看過後由 Claude 套用到 `giganexus_It_Agent_test`。P4-1 已實作,契約以 `docs/contracts/` 為準、資料表以 `ItAgentBack/docs/DB_SCHEMA.md` 為準。
 
 ## 0. 分批
 
@@ -60,7 +60,7 @@ PLATFORM-PLAN §5.2 把它列在 0003,**建議表一起建、程式在 P4-2**(�
 ### 1.3 參數與遮罩
 
 - 指令參數**不得含機密**(密碼、Token):需要機密的動作由主機自己持有(例如 NAS 帳密只在後端,D10),`command-kinds.md` 每個類型列出參數,不列機密欄位。
-- 因此 `params` 原樣保存(重連補送要用);類型定義可標記「遮罩欄位」,寫入 SQL 與日誌時以 `***` 取代 —— P4 第一批沒有需要遮罩的欄位,機制先留一個欄位清單,不另做加密。
+- 因此 `params` 原樣保存(重連補送要用),不另做遮罩(實作時移除了原本預留的遮罩欄位清單:遮罩後就無法重送,與「不含機密」的規則重複)。
 
 ## 2. 狀態機(主機端強制)
 
@@ -153,6 +153,14 @@ stateDiagram-v2
 - ItAgentBack:契約測試(新範例 `ws-command*.sample.json`、`ws-prepare-shutdown.sample.json`)、dispatcher 單元測試(狀態只能前進、裝置不符、斷線退回、補送順序、逾期 / 逾時、批次限流、冪等、取消權限)、管理 API 測試、`test:int` 的 SQL store(`giganexus_It_Agent_poc_test`)。
 - Agent:契約測試、`command_log` 去重與重送、過期不執行、不認得的 kind。
 - 端到端:本機 `npm run dev`(dev,`DEV_SKIP_TOKEN`)+ 自己電腦前景 Agent:`inventory.collect`、`message.show`(會在自己的螢幕跳訊息)、拔線後下指令 → 重連補送、`expiresInSec=60` 離線過期;`agent.restart` 用開發安裝的服務測。**要先套 0003 到 `giganexus_It_Agent_test`(開發與測試區共用,需同意)**。
+
+## 6.1 審查後的修正(code-reviewer、security-auditor 子代理,2026-10-15)
+
+- 卡在 `sent`:被新連線取代 / 半開的舊連線不經斷線處理 → `hello` 時先把 `sent` 改回 `queued` 再補送;斷線先移出連線表再改回 `queued`;對非開啟狀態的 WebSocket 送出視為失敗。
+- Agent 的 ack 對應:改以信封 id 對應(原本以 command_id 只記最後狀態,前一則 ack 會把後一個狀態誤標為已回報);主機沒回 ack 時同一連線 60 秒後重送;無法解密的待送狀態記錄後不再重送。
+- `message.show` 防濫用:標題固定前綴、內文附發送人、拒絕控制 / 雙向文字字元、最多 30 行;每台未結束的 `message.show` ≤ 3、`agent.restart` ≤ 1(`409 ITA_COMMAND_LIMIT`)。
+- 冪等鍵用在不同電腦 / 類型回 `422 ITA_IDEMPOTENCY_KEY_REUSED`;批次補送在本行程內依批次串行(上限不超量);`onHello` 補送不擋心跳;關閉服務時 `prepare_shutdown` 後等 1 秒再關閉;migrator 計算 checksum 前統一換行(Windows autocrlf)。
+- **未處理(列為後續)**:WebSocket 每條連線的訊息速率上限(端點憑證被盜時的 DoS);`result` 依類型以 schema 限制欄位、GigaItApp 只以文字顯示結果(P4-3 實作時遵守,不用 `v-html`);批次上限在多實例時改為 SQL 原子條件(目前單一實例)。`message.show` 屬 basic 依 PLATFORM-PLAN §10 差異 2,指南修訂時一併確認。
 
 ## 7. 要你決定的事
 

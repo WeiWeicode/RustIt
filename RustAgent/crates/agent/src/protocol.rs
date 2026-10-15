@@ -220,6 +220,50 @@ pub struct HelloAck {
     pub settings: Option<AgentSettings>,
 }
 
+/// `command`(ws-envelope CommandBody;P4,類型見 docs/contracts/command-kinds.md)
+#[derive(Debug, Clone, Deserialize)]
+pub struct CommandBody {
+    pub command_id: String,
+    pub kind: String,
+    #[serde(default)]
+    pub params: serde_json::Value,
+    pub expires_at: String,
+    #[serde(default)]
+    pub issued_by: Option<String>,
+}
+
+/// `command_update`(ws-envelope CommandUpdateBody)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CommandUpdate {
+    pub command_id: String,
+    /// acked / running / succeeded / failed
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    pub occurred_at: String,
+}
+
+/// `command_update_ack`(ws-envelope CommandUpdateAckBody)
+#[derive(Debug, Clone, Deserialize)]
+pub struct CommandUpdateAck {
+    pub command_id: String,
+    pub accepted: bool,
+}
+
+/// `prepare_shutdown`(ws-envelope PrepareShutdownBody)
+#[derive(Debug, Clone, Deserialize)]
+pub struct PrepareShutdown {
+    pub reason: String,
+    #[serde(default)]
+    pub reconnect_after_sec: Option<u64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

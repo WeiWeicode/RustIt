@@ -83,6 +83,11 @@ export class SqlDeviceStore implements DeviceStore {
     return this.connecting;
   }
 
+  /** 指令儲存(SqlCommandStore)共用同一個連線池 */
+  connection(): Promise<sql.ConnectionPool> {
+    return this.ready();
+  }
+
   private async request(): Promise<sql.Request> {
     return (await this.ready()).request();
   }

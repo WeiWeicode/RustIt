@@ -7,6 +7,7 @@
 //! 3. 失敗依類型等待後重送(被拒 10 分鐘、429 照 Retry-After、其他指數退避),但不超過下一次蒐集的時間。
 //! 4. 裝置被主機停用時暫停蒐集(避免暫存塞滿),仍定期嘗試,恢復後繼續。
 //! 5. 間隔:主機下發設定 `inventory_interval_sec`,沒有時用 agent.toml。
+//! 6. 指令 `inventory.collect`(P4):經 [`CollectRequest`] 要求立即蒐集並送出,回覆這一份的回報結果;不影響原本的時程。
 
 use crate::Shared;
 use crate::protocol::{
@@ -22,14 +23,18 @@ use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
+
+/// 立即蒐集的要求(指令 inventory.collect):回覆 command_update 的 result,或失敗原因
+pub type CollectRequest = oneshot::Sender<Result<serde_json::Value, String>>;
 
 pub async fn run(
     shared: Arc<Shared>,
     install_interval: Duration,
     hello_tx: watch::Sender<Option<HelloBody>>,
     settings: watch::Receiver<AgentSettings>,
+    mut collect_now: mpsc::Receiver<CollectRequest>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut next_collect = Instant::now();
@@ -56,18 +61,54 @@ pub async fn run(
                 d.min(next_collect.saturating_duration_since(Instant::now()))
             }
         };
-        if wait(delay, &mut shutdown).await {
-            return;
+        tokio::select! {
+            stop = wait(delay, &mut shutdown) => if stop { return },
+            Some(reply) = collect_now.recv() => {
+                // 停止時不等蒐集與上傳結束(回覆被丟棄,執行器回報失敗)
+                tokio::select! {
+                    r = collect_and_send(&shared, &hello_tx) => { let _ = reply.send(r); }
+                    _ = shutdown.changed() => return,
+                }
+            }
         }
     }
 }
 
-async fn collect_into_outbox(shared: &Shared, hello_tx: &watch::Sender<Option<HelloBody>>) {
+/// 指令 inventory.collect:蒐集一份並送出(多份暫存時照常經 /sync),回報這一份的結果
+async fn collect_and_send(
+    shared: &Shared,
+    hello_tx: &watch::Sender<Option<HelloBody>>,
+) -> Result<serde_json::Value, String> {
+    let seq = collect_into_outbox(shared, hello_tx)
+        .await
+        .ok_or("資產蒐集或寫入本機暫存失敗")?;
+    flush(shared).await.map_err(|e| {
+        shared.failed(&e);
+        format!("資產回報失敗(已留在本機暫存補傳):{e}")
+    })?;
+    // 與前一份內容相同時本機只留最新一份,主機的結果以最後一次上傳為準
+    let last = shared
+        .last_upload
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    let result = match last {
+        Some((s, r)) if s == seq => r,
+        _ => "sent".to_string(),
+    };
+    Ok(json!({ "agent_seq": seq, "result": result }))
+}
+
+/// 蒐集並寫入本機暫存;回傳這一份的 agent_seq(失敗回 None,已記錄)
+async fn collect_into_outbox(
+    shared: &Shared,
+    hello_tx: &watch::Sender<Option<HelloBody>>,
+) -> Option<u64> {
     let info = match tokio::task::spawn_blocking(rustit_collector::collect).await {
         Ok(info) => info,
         Err(e) => {
             error!("資產蒐集失敗:{e}");
-            return;
+            return None;
         }
     };
     let collected_at = chrono::Utc::now();
@@ -90,7 +131,7 @@ async fn collect_into_outbox(shared: &Shared, hello_tx: &watch::Sender<Option<He
         Ok::<_, String>((seq, dropped))
     })();
     match result {
-        Ok((_, 0)) => {}
+        Ok((seq, 0)) => Some(seq),
         Ok((seq, dropped)) => {
             warn!("本機資產暫存已滿,丟棄最舊的 {dropped} 份(最新 seq={seq})");
             shared.events.record(
@@ -98,8 +139,12 @@ async fn collect_into_outbox(shared: &Shared, hello_tx: &watch::Sender<Option<He
                 crate::protocol::now_rfc3339(),
                 json!({ "store": "outbox_inventory", "dropped": dropped }),
             );
+            Some(seq)
         }
-        Err(e) => error!("無法寫入本機資產暫存:{e}"),
+        Err(e) => {
+            error!("無法寫入本機資產暫存:{e}");
+            None
+        }
     }
 }
 
@@ -161,6 +206,9 @@ async fn upload(shared: &Shared, p: &PendingInventory) -> Result<bool, SendError
         warn!("無法更新本機暫存:{e}");
     }
     shared.last_acked_seq.store(p.agent_seq, Ordering::Relaxed);
+    if let Ok(mut last) = shared.last_upload.lock() {
+        *last = Some((p.agent_seq, res.result.clone()));
+    }
     Ok(true)
 }
 

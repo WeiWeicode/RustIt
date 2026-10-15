@@ -69,7 +69,8 @@ export async function migrate(pool: sql.ConnectionPool, dir: string, log: (msg: 
     .filter((f) => f.endsWith('.sql'))
     .sort()) {
     const version = file.replace(/\.sql$/, '');
-    const text = readFileSync(path.join(dir, file), 'utf8');
+    // 換行統一為 LF 再算 checksum:Windows 上 git autocrlf 會把檔案取出成 CRLF(內容相同,不算修改)
+    const text = readFileSync(path.join(dir, file), 'utf8').replace(/\r\n/g, '\n');
     const checksum = createHash('sha256').update(text).digest('hex');
     const prev = applied.get(version);
     if (prev) {

@@ -4,6 +4,7 @@
  *   - 標頭只採信來自 AGENT_TRUSTED_PROXIES(Nginx)的連線;dev 以 DEV_TRUST_CLIENT_HEADERS 讓本機 Agent 直連
  *   - POST /agent/v1/inventory(資料契約 inventory.schema.json)、WS GET /agent/v1/ws(信封 ws-envelope.schema.json)
  *   - POST /agent/v1/sync(離線補傳比對,sync.schema.json)、POST /agent/v1/events(端點事件,event.schema.json)(PLATFORM-PLAN P2)
+ *   - WS command / command_update / command_update_ack / prepare_shutdown(指令通道,P4;邏輯在 CommandDispatcher)
  *   - HTTPS 回報同時處理中的請求超過 AGENT_MAX_INFLIGHT 時回 429 ITA_BUSY + Retry-After,在驗證身分前就擋下(A3)
  *   - 與 :51240 是不同的 Fastify 實例,不共用 hook(§5.2);日誌帶 x-request-id、DN、指紋(§5.7)
  *   - 監控(giga-observe 服務 endpoint-agent,與管理 API 分開的 Key):HTTPS 回報逐筆;WebSocket 每條連線關閉時記一筆
@@ -27,6 +28,7 @@ import {
   type WsEnvelope,
 } from './contracts.js';
 import { AppError } from './errors.js';
+import type { CommandDispatcher, CommandUpdateBody } from './services/command-dispatcher.js';
 import type { AgentConnection, Ctx, DeviceService } from './services/device-service.js';
 import type { DeviceRecord } from './stores/types.js';
 
@@ -48,6 +50,10 @@ export interface AgentAppOptions {
   contractsDir?: string;
   /** 心跳逾時檢查間隔(毫秒) */
   sweepIntervalMs?: number;
+  /** 指令派送器(P4;省略 = 不處理指令訊息) */
+  commands?: CommandDispatcher;
+  /** 指令逾期掃描間隔(毫秒) */
+  commandSweepIntervalMs?: number;
   /** giga-observe 監控(loadMonitorEnv;省略 = 不監控) */
   monitor?: MonitorEnv;
   /** 監控心跳附帶的相依服務狀態(SQL Server / Mongo / Redis) */
@@ -106,7 +112,7 @@ export function proxyChecker(list: string[] | null): (addr: string | undefined) 
 }
 
 export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInstance> {
-  const { config, service } = opts;
+  const { config, service, commands } = opts;
   const dir = opts.contractsDir ?? contractsDir();
   const app = Fastify({
     logger: { level: config.logLevel },
@@ -213,7 +219,15 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
   app.get('/agent/v1/ws', { websocket: true }, (socket, req) => {
     const device = req.device!;
     const ctx = ctxOf(req);
-    const conn: AgentConnection = { close: (code, reason) => socket.close(code, reason), terminate: () => socket.terminate() };
+    const conn: AgentConnection = {
+      // ws 對 CLOSING / CLOSED 的連線 send 不會丟例外:先檢查,讓呼叫端留在 queued
+      send: (text) => {
+        if (socket.readyState !== socket.OPEN) throw new Error('WebSocket 不是開啟狀態');
+        socket.send(text);
+      },
+      close: (code, reason) => socket.close(code, reason),
+      terminate: () => socket.terminate(),
+    };
     const send = (type: string, id: string, body: object) => socket.send(JSON.stringify({ v: 1, type, id, body }));
     const startedAt = Date.now();
     let messages = 0;
@@ -232,7 +246,19 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
       const mctx = { log, requestId: ctx.requestId };
       switch (m.type) {
         case 'hello':
-          return send('hello_ack', m.id, await service.hello(mctx, device, m.body as unknown as HelloBody));
+          send('hello_ack', m.id, await service.hello(mctx, device, m.body as unknown as HelloBody));
+          // 重連補送 queued 指令(指南 §8.4);在 hello_ack 之後(Agent 才知道時鐘偏差)。不等待,避免擋住心跳
+          if (commands) void commands.onHello(mctx, device.id);
+          return;
+        case 'command_update': {
+          if (!commands) return send('unsupported', m.id, { type: m.type });
+          const ack = await commands.onUpdate(mctx, device.id, m.body as unknown as CommandUpdateBody);
+          // SQL 無法寫入時不回 ack,Agent 留在本機稍後重送
+          return ack && send('command_update_ack', m.id, ack);
+        }
+        case 'unsupported':
+          // 舊版 Agent 不認得 command:信封 id = command_id
+          return commands?.onUnsupported(mctx, device.id, m.id, String(m.body?.type ?? ''));
         case 'heartbeat':
           return send('heartbeat_ack', m.id, await service.heartbeat(mctx, device, m.body ?? {}));
         default:
@@ -259,7 +285,11 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
     socket.on('close', (code: number) => {
       ctx.log.info({ code }, 'Agent WebSocket 已關閉');
       run(async () => {
+        // 先移出連線表再改回 queued:之間建立的指令不會被推送到正在關閉的連線。
+        // 被新連線取代的舊連線不處理(新連線的 hello 會改回 queued 並重送)
+        const replaced = service.replaced(device.deviceId, conn);
         await service.disconnected(ctx, device, conn);
+        if (!replaced) await commands?.onDisconnected(ctx, device.id);
         app.monitor.push(
           wsSessionLog({
             startedAt,
@@ -280,13 +310,20 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
 
   // 心跳逾時檢查(半開的 TCP 不會觸發 close,指南 §5.3)
   let timer: NodeJS.Timeout | undefined;
+  let commandTimer: NodeJS.Timeout | undefined;
   app.addHook('onReady', async () => {
     timer = setInterval(() => void service.sweep({ log: app.log, requestId: 'sweep' }), opts.sweepIntervalMs ?? 10_000);
     timer.unref();
+    // 指令逾期 / 逾時掃描,每分鐘(PLATFORM-PLAN §4.4)
+    if (commands) {
+      commandTimer = setInterval(() => void commands.sweep({ log: app.log, requestId: 'command-sweep' }), opts.commandSweepIntervalMs ?? 60_000);
+      commandTimer.unref();
+    }
   });
   app.addHook('preClose', async () => {
     clearInterval(timer);
-    service.closeAll();
+    clearInterval(commandTimer);
+    await service.closeAll();
   });
   return app;
 }

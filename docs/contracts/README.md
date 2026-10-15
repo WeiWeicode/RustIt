@@ -5,9 +5,10 @@ RustAgent 與 ItAgentBack 的**唯一共同依據**(`AGENT.md` §7.3、INTEGRATI
 | Schema | 用途 | 範例 |
 | --- | --- | --- |
 | [inventory.schema.json](inventory.schema.json) | `POST /agent/v1/inventory` 請求;回應在 `definitions.InventoryResponse` | `inventory.sample.json`、`inventory-response.sample.json` |
-| [ws-envelope.schema.json](ws-envelope.schema.json) | WebSocket `GET /agent/v1/ws` 信封與 `hello` / `hello_ack` / `heartbeat` / `heartbeat_ack` / `unsupported` | `ws-*.sample.json` |
+| [ws-envelope.schema.json](ws-envelope.schema.json) | WebSocket `GET /agent/v1/ws` 信封與 `hello` / `hello_ack` / `heartbeat` / `heartbeat_ack` / `unsupported`;P4 `command` / `command_update` / `command_update_ack` / `prepare_shutdown` | `ws-*.sample.json` |
 | [sync.schema.json](sync.schema.json) | `POST /agent/v1/sync` 請求;回應在 `definitions.SyncResponse`(PLATFORM-PLAN P2) | `sync.sample.json`、`sync-response.sample.json` |
 | [event.schema.json](event.schema.json) | `POST /agent/v1/events` 請求(`offline_period`、`usb_inserted` / `usb_removed`、`agent_started`、`local_overflow`);回應在 `definitions.EventsResponse`(P2) | `event.sample.json`、`event-response.sample.json` |
+| [command-kinds.md](command-kinds.md) | 指令類型:`kind`、等級、`params`、`result`、有效期限 / 逾時、錯誤代碼(PLATFORM-PLAN P4) | `ws-command*.sample.json` |
 
 - JSON Schema **draft-07**(Fastify 內建的 Ajv 與 Rust `jsonschema` 都支援)。欄位名稱 `snake_case`(沿用 collector 的 serde 輸出)。
 - 相容規則:只新增欄位,新欄位不列入 `required`;收到不認得的欄位忽略(不使用 `additionalProperties: false`);不認得的 WebSocket `type` 回 `unsupported`;不相容的變更走 `/agent/v2/` 並存。

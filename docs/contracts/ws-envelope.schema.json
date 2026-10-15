@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://giganexus.local/rustit/contracts/ws-envelope.schema.json",
   "title": "WebSocket GET /agent/v1/ws 訊息信封",
-  "description": "JSON 文字訊息,共用信封 {v, type, id, body}(Gateway ENDPOINT-AGENT-GUIDE §5.6)。回覆類訊息(hello_ack、heartbeat_ack、unsupported)沿用被回覆訊息的 id。收到不認得的 type 回 unsupported;不認得的欄位忽略。單則訊息上限 1 MB(§5.5)。Server 停用裝置時以 close code 4403 關閉(§5.4)。",
+  "description": "JSON 文字訊息,共用信封 {v, type, id, body}(Gateway ENDPOINT-AGENT-GUIDE §5.6)。回覆類訊息(hello_ack、heartbeat_ack、unsupported)沿用被回覆訊息的 id。收到不認得的 type 回 unsupported(command 的信封 id = command_id,舊版 Agent 回 unsupported 時主機據此設為 failed UNSUPPORTED_COMMAND);不認得的欄位忽略。單則訊息上限 1 MB(§5.5)。Server 停用裝置時以 close code 4403 關閉(§5.4)。",
   "type": "object",
   "required": ["v", "type", "id"],
   "properties": {
@@ -22,6 +22,22 @@
     {
       "if": { "properties": { "type": { "const": "unsupported" } } },
       "then": { "required": ["body"], "properties": { "body": { "$ref": "#/definitions/UnsupportedBody" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "command" } } },
+      "then": { "required": ["body"], "properties": { "body": { "$ref": "#/definitions/CommandBody" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "command_update" } } },
+      "then": { "required": ["body"], "properties": { "body": { "$ref": "#/definitions/CommandUpdateBody" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "command_update_ack" } } },
+      "then": { "required": ["body"], "properties": { "body": { "$ref": "#/definitions/CommandUpdateAckBody" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "prepare_shutdown" } } },
+      "then": { "required": ["body"], "properties": { "body": { "$ref": "#/definitions/PrepareShutdownBody" } } }
     }
   ],
   "definitions": {
@@ -83,6 +99,60 @@
       "type": "object",
       "required": ["type"],
       "properties": { "type": { "type": "string", "description": "不認得的訊息類型" } }
+    },
+    "CommandBody": {
+      "description": "Server → Agent:指令(指南 §8.4;類型與 params 見 command-kinds.md)。Agent 以 command_id 去重(至少送達一次);過期(以 hello_ack.clock_skew_ms 換算主機時間)回 failed EXPIRED 不執行;不認得的 kind 回 failed UNSUPPORTED_COMMAND",
+      "type": "object",
+      "required": ["command_id", "kind", "expires_at"],
+      "properties": {
+        "command_id": { "type": "string", "format": "uuid", "description": "與信封 id 相同" },
+        "kind": { "type": "string", "pattern": "^[a-z][a-z0-9_]*([.][a-z][a-z0-9_]*)+$", "maxLength": 64 },
+        "params": { "type": "object", "description": "依 kind 定義(command-kinds.md);不含機密" },
+        "expires_at": { "type": "string", "format": "date-time", "description": "主機時間;Agent 確認收到(acked)前超過即不執行" },
+        "issued_by": { "type": "string", "maxLength": 64, "description": "操作人工號(Agent 寫本機日誌)" },
+        "issued_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "CommandUpdateBody": {
+      "description": "Agent → Server:指令進度與結果。結果先寫本機,收到 command_update_ack 才刪除;斷線則重連(hello_ack)後重送最後狀態。主機只接受往前的狀態,終態不再改變",
+      "type": "object",
+      "required": ["command_id", "state"],
+      "properties": {
+        "command_id": { "type": "string", "format": "uuid" },
+        "state": { "type": "string", "enum": ["acked", "running", "succeeded", "failed"] },
+        "progress": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "result": { "type": "object", "description": "結果摘要(序列化後 4,000 字元內;超過主機只記大小);大量資料走 HTTPS" },
+        "error_code": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "UNSUPPORTED_COMMAND、EXPIRED、INVALID_PARAMS、NO_ACTIVE_SESSION、NOT_RUNNING_AS_SERVICE、EXECUTION_FAILED(command-kinds.md)"
+        },
+        "error_message": { "type": "string", "maxLength": 1000 },
+        "occurred_at": { "type": "string", "format": "date-time", "description": "端點時間" }
+      }
+    },
+    "CommandUpdateAckBody": {
+      "description": "Server → Agent,沿用 command_update 的信封 id。accepted=false:主機不採用(不屬於此裝置、找不到、已是終態),Agent 一樣視為送達、不再重送。SQL 無法寫入時主機不回 ack,Agent 稍後重送",
+      "type": "object",
+      "required": ["command_id", "accepted"],
+      "properties": {
+        "command_id": { "type": "string", "format": "uuid" },
+        "accepted": { "type": "boolean" },
+        "state": {
+          "type": "string",
+          "enum": ["queued", "sent", "acked", "running", "succeeded", "failed", "canceled", "expired"],
+          "description": "主機記錄的目前狀態"
+        }
+      }
+    },
+    "PrepareShutdownBody": {
+      "description": "Server → Agent:主機即將關閉連線(主機重啟;P5/P6 升級沿用)。Agent 送完待送的 command_update,以 1000 關閉,隨機 0–30 秒(或 reconnect_after_sec)後重連",
+      "type": "object",
+      "required": ["reason"],
+      "properties": {
+        "reason": { "type": "string", "maxLength": 64, "description": "server_restart、upgrade …" },
+        "reconnect_after_sec": { "type": "integer", "minimum": 0, "maximum": 3600 }
+      }
     }
   }
 }

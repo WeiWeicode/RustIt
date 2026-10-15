@@ -6,6 +6,7 @@
 //!
 //! 失敗復原:第 1、2、後續失敗分別 10 / 30 / 60 秒後重新啟動,1 天後重設計數;設定錯誤等「非當機」的失敗也套用。
 //! 停止:一般停止收尾 [`crate::STOP_GRACE`],Windows 關機只給 [`crate::SHUTDOWN_GRACE`](系統給服務的時間很短)。
+//! 指令 `agent.restart`(P4):收尾後以 [`EXIT_RESTART`] 停止,由失敗復原重新啟動(1 天內第 2、3 次分別 30、60 秒後)。
 
 use log::{LevelFilter, error, info, warn};
 use rustit_common::config::{AgentConfig, Settings};
@@ -38,6 +39,8 @@ const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 /// 設定檔錯誤(服務專屬結束代碼,SCM 依失敗復原設定重試)
 const EXIT_CONFIG: u32 = 2;
 const EXIT_RUNTIME: u32 = 1;
+/// 依指令 agent.restart 停止(非錯誤;SCM 依失敗復原重新啟動)
+const EXIT_RESTART: u32 = 3;
 /// 回報「停止中」時給 SCM 的等待提示:收尾 + 關閉執行環境 + 餘裕
 const STOP_WAIT_HINT: Duration =
     Duration::from_secs(STOP_GRACE.as_secs() + RUNTIME_SHUTDOWN.as_secs() + 15);
@@ -112,7 +115,12 @@ fn run_service(config: &Path) -> Result<(), String> {
         Ok(settings) => {
             log::set_max_level(settings.log_level.unwrap_or(LevelFilter::Info));
             info!("服務啟動,設定檔 {}", config.display());
+            crate::SERVICE_MODE.store(true, std::sync::atomic::Ordering::Relaxed);
             match run_agent(settings, stop, rx, status) {
+                Ok(()) if crate::RESTART_REQUESTED.load(std::sync::atomic::Ordering::Relaxed) => {
+                    info!("依指令重新啟動:以結束代碼 {EXIT_RESTART} 停止,由服務失敗復原重新啟動");
+                    ServiceExitCode::ServiceSpecific(EXIT_RESTART)
+                }
                 Ok(()) => ServiceExitCode::Win32(0),
                 Err(e) => {
                     error!("{e}");

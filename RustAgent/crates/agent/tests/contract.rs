@@ -2,8 +2,9 @@
 //! Server 的範例回應必須能被 Agent 解析。ItAgentBack 的 npm test 吃同一份範例;改契約時兩邊一起更新。
 
 use rustit_agent::protocol::{
-    Envelope, EventOut, EventsRequest, EventsResponse, HelloAck, HelloBody, InventoryRequest,
-    InventoryResponse, SyncPending, SyncRequest, SyncResponse,
+    CommandBody, CommandUpdate, CommandUpdateAck, Envelope, EventOut, EventsRequest,
+    EventsResponse, HelloAck, HelloBody, InventoryRequest, InventoryResponse, PrepareShutdown,
+    SyncPending, SyncRequest, SyncResponse,
 };
 use rustit_collector::{ComputerInfo, NetAdapter, Software};
 use serde_json::{Value, json};
@@ -213,5 +214,53 @@ fn sync_and_events_requests_match_schema() {
     assert_eq!(
         v["events"][0]["type"], "offline_period",
         "kind 以 type 送出"
+    );
+}
+
+/// P4:Agent 送出的 command_update 符合 schema;Server 的 command / command_update_ack / prepare_shutdown 範例可解析
+#[test]
+fn command_messages_match_contract() {
+    let cmd: Envelope = serde_json::from_value(read("examples/ws-command.sample.json")).unwrap();
+    assert_eq!(cmd.kind, "command");
+    let body: CommandBody = serde_json::from_value(cmd.body.unwrap()).unwrap();
+    assert_eq!(body.command_id, cmd.id, "信封 id = command_id");
+    assert_eq!(body.kind, "message.show");
+    assert!(body.params["text"].is_string());
+
+    let update = CommandUpdate {
+        command_id: body.command_id.clone(),
+        state: "failed".into(),
+        progress: None,
+        result: None,
+        error_code: Some("UNSUPPORTED_COMMAND".into()),
+        error_message: Some("此版本 Agent 不支援".into()),
+        occurred_at: "2026-10-06T08:00:01.250Z".into(),
+    };
+    assert_valid(
+        "ws-envelope.schema.json",
+        &serde_json::to_value(Envelope::new(
+            "command_update",
+            serde_json::to_value(&update).unwrap(),
+        ))
+        .unwrap(),
+    );
+    // 範例(Server 端測試同一份)可被 Agent 解析
+    let sample: Envelope =
+        serde_json::from_value(read("examples/ws-command-update.sample.json")).unwrap();
+    let parsed: CommandUpdate = serde_json::from_value(sample.body.unwrap()).unwrap();
+    assert_eq!(parsed.state, "succeeded");
+
+    let ack: Envelope =
+        serde_json::from_value(read("examples/ws-command-update-ack.sample.json")).unwrap();
+    let ack: CommandUpdateAck = serde_json::from_value(ack.body.unwrap()).unwrap();
+    assert!(ack.accepted);
+    assert_eq!(ack.command_id, body.command_id);
+
+    let ps: Envelope =
+        serde_json::from_value(read("examples/ws-prepare-shutdown.sample.json")).unwrap();
+    let ps: PrepareShutdown = serde_json::from_value(ps.body.unwrap()).unwrap();
+    assert_eq!(
+        (ps.reason.as_str(), ps.reconnect_after_sec),
+        ("server_restart", None)
     );
 }
