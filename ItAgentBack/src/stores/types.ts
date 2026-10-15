@@ -265,3 +265,32 @@ export interface CommandStore {
   /** 逾期(queued / sent 超過 expires_at)與逾時(acked / running 超過 timeout_at)的指令 */
   dueForSweep(now: Date, limit: number): Promise<CommandRecord[]>;
 }
+
+// ---------- 指令附檔(logs.collect;PLATFORM-PLAN A4、B5;migration 0003 ita.command_file) ----------
+
+export interface CommandFileRecord {
+  id: number;
+  fileId: string;
+  commandRef: number;
+  commandId: string;
+  /** 下載顯示名稱(主機產生) */
+  fileName: string;
+  sizeBytes: number;
+  sha256: string;
+  /** 相對於 COMMAND_FILES_DIR 的路徑(主機產生) */
+  storagePath: string;
+  createdAt: Date;
+  expiresAt: Date;
+}
+
+export type NewCommandFile = Omit<CommandFileRecord, 'id' | 'commandId'>;
+
+export interface CommandFileStore {
+  addFile(f: NewCommandFile): Promise<void>;
+  /** 該指令的附檔,依建立順序 */
+  listFiles(commandRef: number): Promise<CommandFileRecord[]>;
+  getFile(fileId: string): Promise<CommandFileRecord | null>;
+  /** 保存期限已到的附檔(清除用) */
+  expiredFiles(now: Date, limit: number): Promise<CommandFileRecord[]>;
+  deleteFile(id: number): Promise<void>;
+}

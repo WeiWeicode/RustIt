@@ -14,6 +14,8 @@
  *   AGENT_MONITOR_API_KEY_FILE(或 _KEY)      Agent 通道的監控(服務 endpoint-agent,另一把 Key;同一個 MONITOR_URL)
  *   AGENT_INVENTORY_INTERVAL_SEC / AGENT_USB_EVENTS   主機下發給 Agent 的設定(hello_ack.settings;PLATFORM-PLAN §4.2),預設 3600 / 1
  *   AGENT_MAX_INFLIGHT / AGENT_BUSY_RETRY_AFTER_SEC  HTTPS 回報同時處理上限,超過回 429 + Retry-After(A3),預設 32 / 30
+ *   COMMAND_FILES_DIR         指令附檔(logs.collect 日誌 zip)存放目錄;test / prod 必填(容器 /data/command-files),dev 預設 data/dev/command-files
+ *   COMMAND_FILE_KEEP_DAYS    指令附檔保存天數 14–30,預設 14(PLATFORM-PLAN B5)
  */
 import { readFileSync } from 'node:fs';
 import { isGatewayPort, loadGatewayEnv, loadMonitorEnv, type GatewayEnv, type MonitorEnv } from '@giganexus/backend-sdk';
@@ -60,6 +62,10 @@ export interface Config {
   agentMaxInflight: number;
   /** 429 的 Retry-After(秒) */
   busyRetryAfterSec: number;
+  /** 指令附檔存放目錄(P4-2) */
+  commandFilesDir: string;
+  /** 指令附檔保存天數(B5) */
+  commandFileKeepDays: number;
 }
 
 export class ConfigError extends Error {
@@ -160,5 +166,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd?: string): 
     },
     agentMaxInflight: int('AGENT_MAX_INFLIGHT', env.AGENT_MAX_INFLIGHT, 32, 1, 10000),
     busyRetryAfterSec: int('AGENT_BUSY_RETRY_AFTER_SEC', env.AGENT_BUSY_RETRY_AFTER_SEC, 30, 1, 3600),
+    commandFilesDir: isDev ? env.COMMAND_FILES_DIR || 'data/dev/command-files' : required('COMMAND_FILES_DIR', env.COMMAND_FILES_DIR),
+    commandFileKeepDays: int('COMMAND_FILE_KEEP_DAYS', env.COMMAND_FILE_KEEP_DAYS, 14, 14, 30),
   };
 }

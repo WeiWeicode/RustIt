@@ -3,7 +3,7 @@
  * 改契約時兩邊測試一起更新。
  */
 import assert from 'node:assert/strict';
-import { readdirSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, it } from 'node:test';
 import { Ajv } from 'ajv';
@@ -14,6 +14,9 @@ import { CONTRACTS_DIR, example } from './helpers.js';
 const addFormats = ((addFormatsModule as unknown as { default?: unknown }).default ?? addFormatsModule) as (a: Ajv) => Ajv;
 const ajv = addFormats(new Ajv({ strict: true, allErrors: true }));
 for (const name of ['inventory', 'ws-envelope', 'sync', 'event'] as const) ajv.addSchema(loadContract(name, CONTRACTS_DIR));
+// 指令附檔上傳回應(P4-2):Agent 通道以 Fastify 回傳,只在契約測試編譯
+const COMMAND_FILE_ID = 'https://giganexus.local/rustit/contracts/command-file.schema.json';
+ajv.addSchema(JSON.parse(readFileSync(path.join(CONTRACTS_DIR, 'command-file.schema.json'), 'utf8')) as object);
 
 function check(ref: string, file: string) {
   const validate = ajv.getSchema(ref);
@@ -26,13 +29,17 @@ describe('資料契約範例', () => {
   it('每個範例都有對應的 schema 檢查', () => {
     const files = readdirSync(path.join(CONTRACTS_DIR, 'examples')).sort();
     assert.deepEqual(files, [
+      'command-file-response.sample.json',
       'event-response.sample.json',
       'event.sample.json',
       'inventory-response.sample.json',
       'inventory.sample.json',
       'sync-response.sample.json',
       'sync.sample.json',
+      'ws-command-log-level.sample.json',
       'ws-command-update-ack.sample.json',
+      'ws-command-update-diagnose.sample.json',
+      'ws-command-update-logs.sample.json',
       'ws-command-update.sample.json',
       'ws-command.sample.json',
       'ws-heartbeat-ack.sample.json',
@@ -79,6 +86,16 @@ describe('資料契約範例', () => {
     const upd = example<{ body: Record<string, unknown> }>('ws-command-update.sample.json');
     assert.equal(validate({ ...upd, body: { ...upd.body, state: 'canceled' } }), false);
     assert.ok(validate({ ...upd, body: { ...upd.body, future: 1 } }));
+  });
+
+  it('P4-2:agent.log_level 指令、agent.diagnose / logs.collect 結果、附檔上傳回應', () => {
+    for (const f of ['ws-command-log-level', 'ws-command-update-diagnose', 'ws-command-update-logs']) check(CONTRACT_IDS.wsEnvelope, `${f}.sample.json`);
+    check(COMMAND_FILE_ID, 'command-file-response.sample.json');
+    const validate = ajv.getSchema(COMMAND_FILE_ID)!;
+    const sample = example<Record<string, unknown>>('command-file-response.sample.json');
+    assert.equal(validate({ ...sample, sha256: 'ABC' }), false);
+    const { file_id: _f, ...noId } = sample;
+    assert.equal(validate(noId), false);
   });
 
   it('相容規則:不認得的欄位與 type 通過信封驗證;已知 type 缺必要欄位不通過', () => {

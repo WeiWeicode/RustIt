@@ -41,6 +41,7 @@ const testEnv = {
   AGENT_TLS_CERT_FILE: file('crt'),
   AGENT_TLS_KEY_FILE: file('key'),
   AGENT_TRUSTED_PROXIES: '172.16.0.0/12',
+  COMMAND_FILES_DIR: '/data/command-files',
 };
 
 const clean = (e: Record<string, string | undefined>) => Object.fromEntries(Object.entries(e).filter(([, v]) => v !== undefined)) as NodeJS.ProcessEnv;
@@ -55,6 +56,7 @@ describe('部署區設定', () => {
     assert.equal(c.mongoDb, 'ita_dev');
     assert.equal(c.gateway.project, 'RustIt');
     assert.deepEqual([c.host, c.port, c.agentPort], ['127.0.0.1', 51240, 51241]);
+    assert.deepEqual([c.commandFilesDir, c.commandFileKeepDays], ['data/dev/command-files', 14]);
   });
 
   it('test:機密從 _FILE 讀取,TLS 與信任來源必填', () => {
@@ -82,5 +84,12 @@ describe('部署區設定', () => {
     assert.throws(() => loadConfig(clean({ ...devEnv, DEV_TRUST_CLIENT_HEADERS: undefined })), /AGENT_TRUSTED_PROXIES/);
     assert.throws(() => loadConfig(clean({ ...devEnv, ITA_DB_HOST: undefined })), /ITA_DB_HOST/);
     assert.throws(() => loadConfig(clean({ ...devEnv, PORT: '8080' })), /51200–51300/);
+    assert.throws(() => loadConfig(clean({ ...testEnv, COMMAND_FILES_DIR: undefined })), /COMMAND_FILES_DIR/);
+  });
+
+  it('指令附檔保存天數只能 14–30(PLATFORM-PLAN B5)', () => {
+    assert.equal(loadConfig(clean({ ...testEnv, COMMAND_FILE_KEEP_DAYS: '30' })).commandFileKeepDays, 30);
+    assert.throws(() => loadConfig(clean({ ...testEnv, COMMAND_FILE_KEEP_DAYS: '7' })), /COMMAND_FILE_KEEP_DAYS/);
+    assert.throws(() => loadConfig(clean({ ...testEnv, COMMAND_FILE_KEEP_DAYS: '31' })), /COMMAND_FILE_KEEP_DAYS/);
   });
 });

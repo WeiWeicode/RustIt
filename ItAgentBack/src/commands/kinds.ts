@@ -15,6 +15,8 @@ export interface CommandKind {
   timeoutSec: number;
   /** 同一台電腦尚未結束的同類型指令上限(避免洗版、反覆重啟;超過 409 ITA_COMMAND_LIMIT) */
   maxPending?: number;
+  /** Agent 可上傳指令附檔(POST /agent/v1/commands/{id}/files;P4-2) */
+  files?: boolean;
   params: Record<string, unknown>;
 }
 
@@ -42,6 +44,33 @@ export const COMMAND_KINDS: readonly CommandKind[] = [
         text: { type: 'string', minLength: 1, maxLength: 1000, pattern: SAFE_TEXT },
         title: { type: 'string', minLength: 1, maxLength: 64, pattern: SAFE_LINE },
         timeout_sec: { type: 'integer', minimum: 0, maximum: 3600 },
+      },
+    },
+  },
+  // 遠端診斷(PLATFORM-PLAN A4,P4-2):結果小的回 result;日誌以 HTTPS 上傳為指令附檔
+  { kind: 'agent.diagnose', level: 'basic', expiresSec: 3600, timeoutSec: 180, maxPending: 1, params: NO_PARAMS },
+  {
+    kind: 'logs.collect',
+    level: 'basic',
+    expiresSec: 3600,
+    timeoutSec: 900,
+    maxPending: 1,
+    files: true,
+    params: { type: 'object', additionalProperties: false, properties: { days: { type: 'integer', minimum: 1, maximum: 14 } } },
+  },
+  {
+    kind: 'agent.log_level',
+    level: 'basic',
+    expiresSec: 3600,
+    timeoutSec: 60,
+    maxPending: 1,
+    params: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['level'],
+      properties: {
+        level: { type: 'string', enum: ['debug', 'trace', 'default'] },
+        duration_min: { type: 'integer', minimum: 5, maximum: 1440 },
       },
     },
   },

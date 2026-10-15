@@ -1,9 +1,22 @@
 /**
- * 指令儲存(SQL Server 2012,migration 0003;PLATFORM-PLAN P4、ENDPOINT-AGENT-GUIDE §8.4–§8.5):ita.command、ita.command_batch。
+ * 指令儲存(SQL Server 2012,migration 0003;PLATFORM-PLAN P4、ENDPOINT-AGENT-GUIDE §8.4–§8.5):ita.command、ita.command_batch、
+ * ita.command_file(指令附檔索引,P4-2;檔案本身在 COMMAND_FILES_DIR)。
  * 與 SqlDeviceStore 共用連線池。狀態轉換一律條件更新(WHERE state IN …):多個來源同時更新時只有一個成功,狀態只能往前。
  */
 import sql from 'mssql';
-import type { BatchRecord, CommandFilter, CommandPatch, CommandRecord, CommandState, CommandStore, NewBatch, NewCommand } from './types.js';
+import type {
+  BatchRecord,
+  CommandFileRecord,
+  CommandFileStore,
+  CommandFilter,
+  CommandPatch,
+  CommandRecord,
+  CommandState,
+  CommandStore,
+  NewBatch,
+  NewCommand,
+  NewCommandFile,
+} from './types.js';
 
 type Row = Record<string, unknown>;
 
@@ -51,7 +64,25 @@ function toCommand(r: Row): CommandRecord {
   };
 }
 
-export class SqlCommandStore implements CommandStore {
+const FILE_COLS = `f.id, f.file_id, f.command_ref, c.command_id, f.file_name, f.size_bytes, f.sha256, f.storage_path, f.created_at, f.expires_at`;
+const FILE_FROM = `ita.command_file f JOIN ita.command c ON c.id = f.command_ref`;
+
+function toFile(r: Row): CommandFileRecord {
+  return {
+    id: Number(r.id),
+    fileId: String(r.file_id).toLowerCase(),
+    commandRef: Number(r.command_ref),
+    commandId: String(r.command_id).toLowerCase(),
+    fileName: String(r.file_name),
+    sizeBytes: Number(r.size_bytes),
+    sha256: String(r.sha256),
+    storagePath: String(r.storage_path),
+    createdAt: r.created_at as Date,
+    expiresAt: r.expires_at as Date,
+  };
+}
+
+export class SqlCommandStore implements CommandStore, CommandFileStore {
   constructor(private readonly pool: () => Promise<sql.ConnectionPool>) {}
 
   private async request(): Promise<sql.Request> {
@@ -268,5 +299,46 @@ export class SqlCommandStore implements CommandStore {
       WHERE (c.state IN ('queued', 'sent') AND c.expires_at <= @now) OR (c.state IN ('acked', 'running') AND c.timeout_at <= @now)
       ORDER BY c.id`);
     return (r.recordset as Row[]).map(toCommand);
+  }
+
+  // ---------- 指令附檔 ----------
+
+  async addFile(f: NewCommandFile): Promise<void> {
+    await (await this.request())
+      .input('fid', sql.UniqueIdentifier, f.fileId)
+      .input('cmd', sql.BigInt, f.commandRef)
+      .input('name', sql.NVarChar(255), f.fileName)
+      .input('size', sql.BigInt, f.sizeBytes)
+      .input('sha', sql.Char(64), f.sha256)
+      .input('path', sql.NVarChar(400), f.storagePath)
+      .input('at', sql.DateTime2(3), f.createdAt)
+      .input('exp', sql.DateTime2(3), f.expiresAt)
+      .query(`INSERT INTO ita.command_file (file_id, command_ref, file_name, size_bytes, sha256, storage_path, created_at, expires_at)
+        VALUES (@fid, @cmd, @name, @size, @sha, @path, @at, @exp)`);
+  }
+
+  async listFiles(commandRef: number): Promise<CommandFileRecord[]> {
+    const r = await (await this.request())
+      .input('cmd', sql.BigInt, commandRef)
+      .query(`SELECT ${FILE_COLS} FROM ${FILE_FROM} WHERE f.command_ref = @cmd ORDER BY f.id`);
+    return (r.recordset as Row[]).map(toFile);
+  }
+
+  async getFile(fileId: string): Promise<CommandFileRecord | null> {
+    const r = await (await this.request()).input('fid', sql.UniqueIdentifier, fileId).query(`SELECT ${FILE_COLS} FROM ${FILE_FROM} WHERE f.file_id = @fid`);
+    const row = r.recordset[0] as Row | undefined;
+    return row ? toFile(row) : null;
+  }
+
+  async expiredFiles(now: Date, limit: number): Promise<CommandFileRecord[]> {
+    const r = await (await this.request())
+      .input('now', sql.DateTime2(3), now)
+      .input('limit', sql.Int, limit)
+      .query(`SELECT TOP (@limit) ${FILE_COLS} FROM ${FILE_FROM} WHERE f.expires_at <= @now ORDER BY f.expires_at`);
+    return (r.recordset as Row[]).map(toFile);
+  }
+
+  async deleteFile(id: number): Promise<void> {
+    await (await this.request()).input('id', sql.BigInt, id).query(`DELETE FROM ita.command_file WHERE id = @id`);
   }
 }

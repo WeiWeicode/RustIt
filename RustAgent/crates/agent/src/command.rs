@@ -7,17 +7,39 @@
 //! - 會改變系統的類型(目前 `agent.restart`)取得同一把串行鎖;查詢類並行。
 //! - `agent.restart`:記下指令後以服務專屬結束代碼停止,由服務失敗復原重新啟動;啟動後回 `succeeded`。前景模式不支援。
 //! - `message.show`:使用者端程式(P8)尚未存在,一律 `WTSSendMessage` 送到主控台工作階段,不等待使用者按下。
+//! - `agent.diagnose`([`crate::diagnose`])、`logs.collect`([`crate::logs`],日誌 zip 以 HTTPS 上傳為指令附檔)、
+//!   `agent.log_level`(暫時調整日誌等級,記在本機 kv,重啟後仍有效直到到期):P4-2,PLATFORM-PLAN A4。
 
 use crate::Shared;
-use crate::protocol::{CommandBody, CommandUpdate, now_rfc3339};
-use log::{error, info, warn};
+use crate::protocol::{
+    CommandBody, CommandUpdate, UploadResponse, command_files_path, now_rfc3339,
+};
+use crate::{diagnose, logs};
+use log::{LevelFilter, error, info, warn};
+use rustit_common::backoff::Backoff;
+use rustit_common::transport::SendError;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 use tokio::sync::oneshot;
 
 /// 本版支援的類型(與 command-kinds.md 一致)
-pub const KINDS: [&str; 3] = ["inventory.collect", "agent.restart", "message.show"];
+pub const KINDS: [&str; 6] = [
+    "inventory.collect",
+    "agent.restart",
+    "message.show",
+    "agent.diagnose",
+    "logs.collect",
+    "agent.log_level",
+];
+/// kv:agent.log_level 暫時調整的等級 `{"level","until"}`(重啟後仍有效直到到期)
+const LOG_LEVEL_KEY: &str = "log_level_override";
+/// 服務模式日誌檔名前綴(`agent-YYYY-MM-DD.log`,rustit_common::logging)
+const LOG_FILE_PREFIX: &str = "agent-";
+/// logs.collect 上傳嘗試次數
+const UPLOAD_ATTEMPTS: u32 = 3;
 /// kv:執行中的 agent.restart 指令(重新啟動後回報 succeeded)
 const RESTART_KEY: &str = "restart_command";
 /// 已回報的指令紀錄保留天數(大於最長有效期限 1 天,才能去重)
@@ -180,6 +202,18 @@ async fn execute(shared: Arc<Shared>, cmd: CommandBody) {
             report(&shared, &id, "running", |_| {});
             message_show(&cmd.params, cmd.issued_by.as_deref()).await
         }
+        "agent.diagnose" => {
+            report(&shared, &id, "running", |_| {});
+            Ok(diagnose::run(&shared).await)
+        }
+        "logs.collect" => {
+            report(&shared, &id, "running", |_| {});
+            logs_collect(&shared, &id, &cmd.params).await
+        }
+        "agent.log_level" => {
+            report(&shared, &id, "running", |_| {});
+            log_level(&shared, &cmd.params)
+        }
         "agent.restart" => return agent_restart(&shared, &id).await,
         _ => Err(fail("UNSUPPORTED_COMMAND", cmd.kind.clone())),
     };
@@ -243,6 +277,183 @@ async fn agent_restart(shared: &Shared, id: &str) {
     info!("依指令 {id} 重新啟動 Agent");
     shared.request_restart();
     std::future::pending::<()>().await;
+}
+
+async fn logs_collect(shared: &Shared, id: &str, p: &Value) -> Result<Value, Failure> {
+    let days = match &p["days"] {
+        Value::Null => 3,
+        v => v
+            .as_u64()
+            .filter(|d| (1..=14).contains(d))
+            .ok_or_else(|| fail("INVALID_PARAMS", "days 需 1–14"))? as u32,
+    };
+    let dir = rustit_common::paths::logs_dir();
+    let today = chrono::Local::now().date_naive();
+    let scan = dir.clone();
+    let bundle = tokio::task::spawn_blocking(move || {
+        let files = logs::select_files(&scan, LOG_FILE_PREFIX, days, today);
+        if files.is_empty() {
+            return Ok(None);
+        }
+        logs::bundle(&files, logs::MAX_ZIP_BYTES).map(Some)
+    })
+    .await
+    .map_err(|e| fail("EXECUTION_FAILED", e.to_string()))?
+    .map_err(|e| fail("EXECUTION_FAILED", e))?
+    .ok_or_else(|| {
+        fail(
+            "NO_LOGS",
+            format!("最近 {days} 天沒有日誌檔({})", dir.display()),
+        )
+    })?;
+    info!(
+        "指令 {id}:日誌 {} 天、壓縮後 {} bytes{},上傳中",
+        bundle.days_included,
+        bundle.bytes.len(),
+        if bundle.truncated {
+            "(超過上限,已捨棄較舊的日期)"
+        } else {
+            ""
+        }
+    );
+    let path = command_files_path(id);
+    let headers = [("x-file-sha256", bundle.sha256.clone())];
+    let mut backoff = Backoff::new();
+    let mut last = String::new();
+    for attempt in 1..=UPLOAD_ATTEMPTS {
+        match shared
+            .transport
+            .post_bytes::<UploadResponse>(&path, "application/zip", &headers, bundle.bytes.clone())
+            .await
+        {
+            Ok(r) => {
+                return Ok(json!({
+                    "file_id": r.file_id,
+                    "file_name": format!("logs-{}.zip", chrono::Local::now().format("%Y%m%d-%H%M%S")),
+                    "size_bytes": bundle.bytes.len(),
+                    "sha256": bundle.sha256,
+                    "days_included": bundle.days_included,
+                    "truncated": bundle.truncated,
+                }));
+            }
+            Err(e) => {
+                warn!("指令 {id} 日誌上傳失敗(第 {attempt} 次):{e}");
+                last = e.to_string();
+                // 主機拒絕(指令狀態、大小、雜湊不符)重試也不會成功
+                if matches!(e, SendError::Rejected(_)) || attempt == UPLOAD_ATTEMPTS {
+                    break;
+                }
+                tokio::time::sleep(e.wait(&mut backoff).min(Duration::from_secs(60))).await;
+            }
+        }
+    }
+    Err(fail("UPLOAD_FAILED", last))
+}
+
+#[derive(Serialize, Deserialize)]
+struct LevelOverride {
+    level: String,
+    until: String,
+}
+
+fn level_name(l: LevelFilter) -> String {
+    l.to_string().to_lowercase()
+}
+
+fn parse_level(s: &str) -> Option<LevelFilter> {
+    match s {
+        "debug" => Some(LevelFilter::Debug),
+        "trace" => Some(LevelFilter::Trace),
+        _ => None,
+    }
+}
+
+/// agent.log_level:暫時調高日誌等級(第三方套件仍只記 warn 以上,rustit_common::logging),到期自動恢復
+fn log_level(shared: &Shared, p: &Value) -> Result<Value, Failure> {
+    let level = p["level"].as_str().unwrap_or_default();
+    let previous = log::max_level();
+    if level == "default" {
+        if let Err(e) = shared.store.lock().set(LOG_LEVEL_KEY, "") {
+            return Err(fail(
+                "EXECUTION_FAILED",
+                format!("無法清除日誌等級紀錄:{e}"),
+            ));
+        }
+        log::set_max_level(shared.base_log_level);
+        info!(
+            "依指令恢復設定檔的日誌等級 {}",
+            level_name(shared.base_log_level)
+        );
+        return Ok(
+            json!({ "level": level_name(shared.base_log_level), "previous": level_name(previous), "until": null }),
+        );
+    }
+    let filter = parse_level(level)
+        .ok_or_else(|| fail("INVALID_PARAMS", "level 只能 debug / trace / default"))?;
+    let minutes = match &p["duration_min"] {
+        Value::Null => 60,
+        v => v
+            .as_u64()
+            .filter(|m| (5..=1440).contains(m))
+            .ok_or_else(|| fail("INVALID_PARAMS", "duration_min 需 5–1440"))?,
+    };
+    let until = (chrono::Utc::now() + chrono::Duration::minutes(minutes as i64))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let saved = serde_json::to_string(&LevelOverride {
+        level: level.to_string(),
+        until: until.clone(),
+    })
+    .map_err(|e| e.to_string())
+    .and_then(|v| shared.store.lock().set(LOG_LEVEL_KEY, &v));
+    if let Err(e) = saved {
+        return Err(fail("EXECUTION_FAILED", format!("無法保存日誌等級:{e}")));
+    }
+    log::set_max_level(filter);
+    info!(
+        "依指令暫時將日誌等級調為 {level},{until} 自動恢復為 {}",
+        level_name(shared.base_log_level)
+    );
+    Ok(json!({ "level": level, "previous": level_name(previous), "until": until }))
+}
+
+/// 啟動時與每分鐘:暫時日誌等級未到期就(重新)套用,到期恢復設定檔的等級
+pub fn apply_log_level(shared: &Shared) {
+    let saved = shared
+        .store
+        .lock()
+        .get(LOG_LEVEL_KEY)
+        .ok()
+        .flatten()
+        .filter(|v| !v.is_empty());
+    let Some(saved) = saved else { return };
+    let current = serde_json::from_str::<LevelOverride>(&saved)
+        .ok()
+        .and_then(|o| {
+            let until = chrono::DateTime::parse_from_rfc3339(&o.until).ok()?;
+            Some((parse_level(&o.level)?, until))
+        });
+    match current {
+        Some((filter, until)) if until > chrono::Utc::now() => {
+            if log::max_level() != filter {
+                log::set_max_level(filter);
+                info!(
+                    "沿用暫時日誌等級 {} 到 {}",
+                    level_name(filter),
+                    until.to_rfc3339()
+                );
+            }
+        }
+        _ => {
+            log::set_max_level(shared.base_log_level);
+            if let Err(e) = shared.store.lock().set(LOG_LEVEL_KEY, "") {
+                warn!("無法清除日誌等級紀錄:{e}");
+            }
+            info!(
+                "暫時日誌等級已到期,恢復為 {}",
+                level_name(shared.base_log_level)
+            );
+        }
+    }
 }
 
 struct MessageParams {

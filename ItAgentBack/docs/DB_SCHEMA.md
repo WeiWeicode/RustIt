@@ -62,7 +62,7 @@ Agent 回報(0002,`POST /agent/v1/events`;`event.schema.json`):`offline_period`�
 | `idempotency_key` | 與 `created_by_emp` 篩選唯一索引(重複送出回傳同一筆) |
 | `created_by_emp` / `created_by_name` / `request_id` / `created_at` | 稽核:內部 Token 的工號、姓名與 X-Request-Id(不以來源 IP 為依據) |
 
-`ita.command_batch`:`batch_id`、`kind`、`level`、`params`、`target_count`、`max_concurrent`、第二人核可欄位(`requires_approval`、`approved_by_*`,B1,邏輯在 P7)、冪等鍵與稽核欄位。`ita.command_file`:診斷檔案索引(`logs.collect`,A4;程式在 P4-2),保存期限 `expires_at`(B5)。
+`ita.command_batch`:`batch_id`、`kind`、`level`、`params`、`target_count`、`max_concurrent`、第二人核可欄位(`requires_approval`、`approved_by_*`,B1,邏輯在 P7)、冪等鍵與稽核欄位。`ita.command_file`:指令附檔索引(`logs.collect` 的日誌 zip,A4;P4-2):`file_id`(對外)、`command_ref`、`file_name`(下載顯示名稱,主機產生)、`size_bytes`、`sha256`、`storage_path`(相對於 `COMMAND_FILES_DIR`)、`expires_at`(建立 + `COMMAND_FILE_KEEP_DAYS`,預設 14 天,B5)。寫入順序:先寫檔、再寫索引(失敗刪檔);清除:先刪檔、再刪索引列,`ita.command` 保留。
 
 ### 離線補傳比對(`DeviceService.sync`,`POST /agent/v1/sync`)
 

@@ -8,10 +8,10 @@
 | --- | --- |
 | 基本階段(INTEGRATION-PLAN M0–M4、M6) | ✅ 完成:Agent 經 Gateway `:9443` 回報 ItAgentBack,GigaItApp「電腦清單」看得到 |
 | `RustAgent/crates/collector` | ✅ 硬體、軟體、網路、防毒、USB 儲存、RustDesk 狀態 |
-| `RustAgent/crates/agent`(`rustit-agent`) | ✅ 前景執行(`run`)與 **Windows 服務**(`service`;開發用 `install` / `uninstall`,P1 第一批);HTTPS 回報、WebSocket hello / 心跳、退避重連、裝置憑證(PEM 檔或 Windows `LocalMachine\My`,P1 PoC 實測通過)、服務模式檔案日誌、監控 MSI(未簽章,P1 VM 驗證通過)。**P2**:本機加密暫存 `state\store.db`(資產 / 事件 outbox、連線紀錄)、離線照常蒐集與 `/sync` 補傳、`offline_period`、USB 插拔與 `agent_started` 事件、429 依 Retry-After、主機下發設定(2026-10-15 VM 驗證通過,見下方 P2-3)。**P4-1(0.3.0,分支 `feature/p4-command`)**:指令執行器 `inventory.collect` / `agent.restart` / `message.show`、本機 `command_log` 去重與待回報狀態 |
+| `RustAgent/crates/agent`(`rustit-agent`) | ✅ 前景執行(`run`)與 **Windows 服務**(`service`;開發用 `install` / `uninstall`,P1 第一批);HTTPS 回報、WebSocket hello / 心跳、退避重連、裝置憑證(PEM 檔或 Windows `LocalMachine\My`,P1 PoC 實測通過)、服務模式檔案日誌、監控 MSI(未簽章,P1 VM 驗證通過)。**P2**:本機加密暫存 `state\store.db`(資產 / 事件 outbox、連線紀錄)、離線照常蒐集與 `/sync` 補傳、`offline_period`、USB 插拔與 `agent_started` 事件、429 依 Retry-After、主機下發設定(2026-10-15 VM 驗證通過,見下方 P2-3)。**P4-1(0.3.0,已合併 develop)**:指令執行器 `inventory.collect` / `agent.restart` / `message.show`、本機 `command_log` 去重與待回報狀態。**P4-2(0.4.0,分支 `feature/p4-diagnose`)**:`agent.diagnose`、`logs.collect`(日誌 zip 上傳)、`agent.log_level` |
 | `RustAgent/crates/demo` | 示範介面;**將改造為使用者端程式 `desktop`**(P8),`src/deploy.rs` 是軟體派送的參考實作(P7 移植到 Agent) |
 | `RustAgent/crates/native` | ✅ 已移除(P1;最後版本 `3ba3827`) |
-| `ItAgentBack` | ✅ 測試區(主機 2,`endpoint-server` + `ita-mongo` / `ita-redis`,CI `develop` 部署);管理 API `GET /v1/devices[/{deviceId}]`;**P4-1(分支 `feature/p4-command`,未合併)**:指令派送器與 basic 指令 API(`/v1/devices/{id}/basic-commands`、`/v1/batches/basic-commands`、`/v1/commands[/{id}[/cancel]]`、`/v1/batches/{id}`),migration 0003 已套用 `giganexus_It_Agent_test`(2026-10-15,經需求方同意);giga-observe 監控已接。**P2 主機端已上測試區**(2026-10-14,MR !10):`/sync`、`/events`、429、時鐘偏差、硬體指紋、主機下發設定;migration 0002 已套用 `giganexus_It_Agent_test` |
+| `ItAgentBack` | ✅ 測試區(主機 2,`endpoint-server` + `ita-mongo` / `ita-redis`,CI `develop` 部署);管理 API `GET /v1/devices[/{deviceId}]`;**P4-2(分支 `feature/p4-diagnose`,未合併)**:指令附檔上傳 `POST /agent/v1/commands/{id}/files`、下載 `GET /v1/commands/{id}/files/{fileId}`、volume `ita_command_files`(保存 14 天);不需新 migration。**P4-1(已合併 develop)**:指令派送器與 basic 指令 API(`/v1/devices/{id}/basic-commands`、`/v1/batches/basic-commands`、`/v1/commands[/{id}[/cancel]]`、`/v1/batches/{id}`),migration 0003 已套用 `giganexus_It_Agent_test`(2026-10-15,經需求方同意);giga-observe 監控已接。**P2 主機端已上測試區**(2026-10-14,MR !10):`/sync`、`/events`、429、時鐘偏差、硬體指紋、主機下發設定;migration 0002 已套用 `giganexus_It_Agent_test` |
 | GigaItApp 電腦清單 | ✅ 清單 + 詳情(概要、磁碟、網卡) |
 | INTEGRATION-PLAN M5(離線暫存、`/sync`) | 併入 PLATFORM-PLAN P2(✅ 完成) |
 | 第二階段計畫 | ✅ `PLATFORM-PLAN.md` v0.4 **定案**(P0,2026-10-13):根目錄 `PROJECT-MAP.md` / `workspace.json`(cbf6db9)、Gateway `ENDPOINT-AGENT-GUIDE.md` v0.5(7319e87)已同步;甘特圖 W6-13 ~ W6-24(P0–P8、上線前準備),舊 W6-1 ~ W6-6、W6-12 已由新任務取代 |
@@ -20,7 +20,7 @@
 
 1. **P1 已完成**(2026-10-14 Hyper-V VM 驗證 7 項通過,見下方「P1 收尾:VM 測試」)。Win11 VM 可之後補測;VM 保留作 P2 以後的測試機(檢查點「匯入憑證」)。
 2. **P3 資料呈現**、**P8-1 使用者端外殼與我的電腦** 可並行:P3(管理 API 回完整資產 + GigaItApp 詳情分 Tab)只動後端與前端,適合交給同仁。
-3. **P2 已完成**(主機端與 Agent 端已合併 `develop`;2026-10-15 P2-3 VM 驗證 7 項通過,見下方)。驗證時發現裝置被停用期間會記成 `offline_period`(rejected),已於 0.2.1 排除(BugFix.md 2026-10-15;測試區 VM 仍為 0.2.0,下次重建 MSI 時一併升級)。**P4 指令通道進行中**(設計 `P4-COMMAND-DESIGN.md`,需求方 2026-10-15 確認):P4-1(資料表、契約、派送器、basic API、Agent 三個指令)本機驗證通過,待 MR;下一批 P4-2 `agent.diagnose` / `logs.collect` / `agent.log_level`,P4-3 GigaItApp 指令按鈕與指令紀錄、`gateway-rbac.yaml` 綁 `endpoint.command.basic`(動手前需同意;OpenAPI 註冊後才綁)。P4-1 測試區 VM 驗證需重建 0.3.0 MSI(`agent.restart` 需服務模式)。
+3. **P2 已完成**(主機端與 Agent 端已合併 `develop`;2026-10-15 P2-3 VM 驗證 7 項通過,見下方)。驗證時發現裝置被停用期間會記成 `offline_period`(rejected),已於 0.2.1 排除(BugFix.md 2026-10-15;測試區 VM 仍為 0.2.0,下次重建 MSI 時一併升級)。**P4 指令通道進行中**(設計 `P4-COMMAND-DESIGN.md`,需求方 2026-10-15 確認):P4-1 已合併 develop;P4-2 `agent.diagnose` / `logs.collect` / `agent.log_level`(設計 P4-COMMAND-DESIGN §8)本機端對端通過,待 MR(合併後測試區新增 volume `ita_command_files`,CI 部署自動建立);P4-3 GigaItApp 指令按鈕與指令紀錄、`gateway-rbac.yaml` 綁 `endpoint.command.basic`(動手前需同意;OpenAPI 註冊後才綁)。P4-1 測試區 VM 驗證需重建 0.3.0 MSI(`agent.restart` 需服務模式)。
 
 ### P2-3:VM 驗證(完成標準 PLATFORM-PLAN §4.2)
 

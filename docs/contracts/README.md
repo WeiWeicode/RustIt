@@ -9,6 +9,7 @@ RustAgent 與 ItAgentBack 的**唯一共同依據**(`AGENT.md` §7.3、INTEGRATI
 | [sync.schema.json](sync.schema.json) | `POST /agent/v1/sync` 請求;回應在 `definitions.SyncResponse`(PLATFORM-PLAN P2) | `sync.sample.json`、`sync-response.sample.json` |
 | [event.schema.json](event.schema.json) | `POST /agent/v1/events` 請求(`offline_period`、`usb_inserted` / `usb_removed`、`agent_started`、`local_overflow`);回應在 `definitions.EventsResponse`(P2) | `event.sample.json`、`event-response.sample.json` |
 | [command-kinds.md](command-kinds.md) | 指令類型:`kind`、等級、`params`、`result`、有效期限 / 逾時、錯誤代碼(PLATFORM-PLAN P4) | `ws-command*.sample.json` |
+| [command-file.schema.json](command-file.schema.json) | `POST /agent/v1/commands/{commandId}/files`(指令附檔,`logs.collect` 日誌 zip)的回應;請求為原始位元組 + `x-file-sha256`(P4-2) | `command-file-response.sample.json` |
 
 - JSON Schema **draft-07**(Fastify 內建的 Ajv 與 Rust `jsonschema` 都支援)。欄位名稱 `snake_case`(沿用 collector 的 serde 輸出)。
 - 相容規則:只新增欄位,新欄位不列入 `required`;收到不認得的欄位忽略(不使用 `additionalProperties: false`);不認得的 WebSocket `type` 回 `unsupported`;不相容的變更走 `/agent/v2/` 並存。

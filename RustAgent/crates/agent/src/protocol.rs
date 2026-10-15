@@ -19,6 +19,11 @@ pub const SYNC_PATH: &str = "/agent/v1/sync";
 pub const EVENTS_PATH: &str = "/agent/v1/events";
 pub const WS_PATH: &str = "/agent/v1/ws";
 
+/// 指令附檔上傳路徑(P4-2;command-file.schema.json)
+pub fn command_files_path(command_id: &str) -> String {
+    format!("/agent/v1/commands/{command_id}/files")
+}
+
 /// `POST /agent/v1/inventory` 請求(inventory.schema.json)
 #[derive(Debug, Serialize)]
 pub struct InventoryRequest {
@@ -254,6 +259,15 @@ pub struct CommandUpdate {
 pub struct CommandUpdateAck {
     pub command_id: String,
     pub accepted: bool,
+}
+
+/// `POST /agent/v1/commands/{id}/files` 回應(command-file.schema.json)
+#[derive(Debug, Clone, Deserialize)]
+pub struct UploadResponse {
+    pub file_id: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub expires_at: String,
 }
 
 /// `prepare_shutdown`(ws-envelope PrepareShutdownBody)

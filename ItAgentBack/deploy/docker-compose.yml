@@ -49,6 +49,11 @@ services:
       MONITOR_API_KEY_FILE: /run/secrets/monitor_api_key
       AGENT_MONITOR_API_KEY_FILE: /run/secrets/agent_monitor_api_key
       RELEASE_SHA: ${RELEASE_SHA:-dev}
+      # 指令附檔(logs.collect 日誌 zip,P4-2):保存 14–30 天(PLATFORM-PLAN B5),到期自動刪除
+      COMMAND_FILES_DIR: /data/command-files
+      COMMAND_FILE_KEEP_DAYS: ${COMMAND_FILE_KEEP_DAYS:-14}
+    volumes:
+      - ita_command_files:/data/command-files
     secrets: [gw_api_key, ita_db_password, mongo_url, redis_url, endpoint_server_crt, endpoint_server_key, monitor_api_key, agent_monitor_api_key]
     depends_on: [ita-mongo, ita-redis]
     networks:
@@ -104,6 +109,7 @@ secrets:
 volumes:
   ita_mongo:
   ita_redis:
+  ita_command_files:
 
 networks:
   gateway:
