@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | **P4-1(本次)** | migration `0003_command.sql`;契約 `command` / `command_update` / `command_update_ack` / `prepare_shutdown` 與 `command-kinds.md`;ItAgentBack `command-dispatcher` 與 **basic** 指令 API;Agent 執行器 + `inventory.collect`、`agent.restart`、`message.show`(Agent 0.3.0,自 0.2.1 往上) | migration 套用到 `giganexus_It_Agent_test` 前先問 |
 | P4-2(§8) | `agent.diagnose`、`logs.collect`(診斷檔上傳 HTTPS、下載 API)、`agent.log_level`(Agent 0.4.0) | 新增 Rust 相依 `zip`(已同意) |
-| P4-3 | GigaItApp 指令按鈕、「指令紀錄」Tab;`gateway-rbac.yaml` 綁 `endpoint.command.basic`(OpenAPI 註冊後) | **GigaItApp、BFF 權限:動手前另外確認** |
+| P4-3(GigaItApp MR !2,2026-10-15) | GigaItApp 指令按鈕、「指令紀錄」Tab;`gateway-rbac.yaml` 綁 `endpoint.command.basic`(OpenAPI 註冊後) | **GigaItApp、BFF 權限:動手前另外確認** |
 
 P4 完成標準(§8)要 P4-1~3 全部做完才達成;P4-1 結束時能以 curl / 測試對本機與測試區驗證「queued → succeeded、離線補送、過期不執行、離線完成的結果補回、稽核欄位」。
 
