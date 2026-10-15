@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-15 前景 Agent 本機狀態目錄被誤加入版控
+- 內容:P4-1 合併 develop(`e30fe9a`)時,把開發機前景執行 Agent(`cargo run -p rustit-agent -- run --config crates/agent/agent.dev.toml`,`state_dir` 為設定檔目錄下的 `state/`)產生的 `RustAgent/crates/agent/state/` 一併 commit:`store.db`(含 `-shm`、`-wal`)是本機 SQLite 佇列,`store.key` 是以 DPAPI 保護的本機加密金鑰。改為 `git rm --cached` 移出版控(不刪本機檔案,開發機的 Agent 仍在使用),並在根目錄 `.gitignore` 加上 `/RustAgent/crates/agent/state/`。`store.key` 由 DPAPI 綁定開發者的 Windows 帳號,其他帳號或電腦無法解開,外洩風險低;歷史中的舊版本仍在,是否改寫歷史另行決定。
+- 檔案:`.gitignore`、`RustAgent/crates/agent/state/*`(移出版控)
+- 驗證:`git ls-files RustAgent/crates/agent/state` 無輸出;`git check-ignore -v RustAgent/crates/agent/state/store.key` 命中 `.gitignore` 新規則;主 checkout 的本機檔案仍存在。
+
 ## 2026-10-15 裝置被停用期間被記成離線期間
 - 內容:P2-3 VM 驗證時,IT 停用裝置 10 分鐘後恢復,主機收到一筆 reason `rejected` 的 `offline_period`。停用是 IT 的操作、主機有回應,主機端本來就知道(`ita.device.status`),再記離線期間是重複且會誤導。`SendError::counts_as_offline` 改為也排除裝置停用 / 退役(403 `ITA_DEVICE_DISABLED` / `ITA_DEVICE_RETIRED`、WebSocket close 4403);其他 403(憑證、身分)仍算離線。另外收到停用回應時結束進行中的離線期間(`ConnTracker::observe_failure`):網路恢復後第一個回應就是停用時,原本那段期間會一直延續到 IT 重新啟用才結束。429、400 的行為不變。rustit-agent 升為 0.2.1。
 - 檔案:`RustAgent/crates/common/src/transport.rs`、`RustAgent/crates/agent/src/{conn,lib}.rs`、`RustAgent/crates/agent/Cargo.toml`、`RustAgent/Cargo.lock`、`docs/contracts/event.schema.json`(reason 說明)、`docs/HANDOFF.md`
