@@ -413,6 +413,8 @@ Demo(Tauri)改造為使用者端程式 `desktop`:使用者會用的頁面保留(
 
 ## 8. 階段與完成標準
 
+> 進度(細節以甘特圖為準):P0、P1、P2、P4 已在測試區完成(P4 含 GigaItApp 指令畫面,見 `HANDOFF.md`);P3、P5–P8 未開始。
+
 | 階段 | 內容 | 主要 repo | 完成標準 | 依賴 |
 | --- | --- | --- | --- | --- |
 | **P0** 框架定案 | 本計畫;README / HANDOFF / PROJECT-MAP 對齊;定案後更新根目錄文件、甘特圖、指南(§10) | RustIt(後續:根目錄、Gateway) | 需求方確認本計畫 | — |
@@ -476,6 +478,7 @@ Demo(Tauri)改造為使用者端程式 `desktop`:使用者會用的頁面保留(
 | 7 | §8.3 指令類型 | 新增 `agent.diagnose`、`logs.collect`、`agent.log_level`(basic,A4) | 修訂 §8.3 |
 | 8 | §4.2 / §5 未定義主機忙碌與最低版本 | `429` + `Retry-After`(A3)、`min_agent_version` / `AGENT_TOO_OLD`(B2) | 修訂 §4.2、§5.6 |
 | 9 | §3.3 以 DN 為裝置鍵 | 不變;另加硬體指紋供 IT 確認合併(A1) | 修訂 §3.3 補一點 |
+| 10 | §8.3 / §8.4 指令 API 與訊息為草案 | P4 實作:指令紀錄 / 批次 / 日誌下載 API、Agent 指令附檔上傳、`command_update_ack`、`prepare_shutdown.reconnect_after_sec`;正式格式在 `docs/contracts/` | 指南 v0.6 已修訂(2026-10-15) |
 
 PRD(2026-09-27)中的 Rust Axum 後端、PostgreSQL、React 前端已由後續決定取代(ADR 0004、GigaItApp);托盤程式保留,改為使用者端程式(§4.8),公告後端用 BFF 通知中心;PRD 保留為需求來源,架構以本計畫與指南為準。
 
