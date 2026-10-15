@@ -239,4 +239,26 @@ describe('指令附檔下載與清除(:51240)', () => {
     assert.equal(op['x-permission'], 'endpoint.device.read');
     assert.equal(op['x-audit-level'], 'meta');
   });
+
+  it('OpenAPI 符合 Gateway 匯入規則(全部路由;任一不符時整批註冊失敗 IMPORT_HAS_ERRORS)', async () => {
+    // 同 giga-api-gateway-bff bff/src/cli/openapi.ts 的檢查
+    const CODE = /^[a-z][a-z0-9-]*(\.[a-z0-9-]+){2,}$/;
+    const doc = (await mgmt.inject({ method: 'GET', url: '/openapi.json' })).json() as {
+      'x-permissions': { code: string }[];
+      paths: Record<string, Record<string, Record<string, unknown>>>;
+    };
+    const declared = new Set(doc['x-permissions'].map((p) => p.code));
+    const ops = Object.values(doc.paths).flatMap((p) => Object.values(p));
+    assert.ok(ops.length >= 10, `路由數 ${ops.length}`);
+    for (const op of ops) {
+      const id = String(op.operationId);
+      assert.match(id, CODE, `operationId 格式:${id}`);
+      assert.ok(op.summary, `${id} 缺少 summary`);
+      const perm = String(op['x-permission']);
+      assert.match(perm, CODE, `${id} x-permission 格式`);
+      assert.ok(declared.has(perm), `${id} 的 x-permission ${perm} 未列在 x-permissions`);
+      assert.ok(typeof op.description === 'string' && op.description.length <= 1000, `${id} description 需 1000 字內`);
+      assert.ok(typeof op['x-gherkin'] === 'string', `${id} 缺少 x-gherkin`);
+    }
+  });
 });

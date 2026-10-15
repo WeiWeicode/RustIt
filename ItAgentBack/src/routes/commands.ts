@@ -281,7 +281,8 @@ export function commandRoutes(commands: CommandDispatcher, files?: CommandFileSe
       '/v1/devices/:deviceId/commands',
       {
         schema: {
-          operationId: 'endpoint.command.listByDevice',
+          // operationId 只能小寫(Gateway 匯入格式 {system}.{resource}.{action})
+          operationId: 'endpoint.command.list-by-device',
           summary: '電腦的指令紀錄',
           description: '該電腦的指令,新到舊;每頁最多 100 筆,以 nextCursor 取下一頁。',
           tags: ['端點指令'],
