@@ -232,6 +232,10 @@ describe('SQL Server + Mongo + Redis', () => {
     const up = await files.upload(ctx, device, cmd.commandId, hash, body.length, Readable.from([body]));
     const again = await files.upload(ctx, device, cmd.commandId, hash, body.length, Readable.from([body]));
     assert.equal(again.file_id, up.file_id);
+    // 沒收到 running 就完成:started_at 補上(本例未經 WebSocket 推送、沒有 acked_at,以完成時間補)
+    await commands.onUpdate(ctx, device.id, { command_id: cmd.commandId, state: 'succeeded', result: { file_id: up.file_id } });
+    const finished = await commands.get(ctx, cmd.commandId);
+    assert.ok(finished.startedAt && finished.startedAt <= finished.finishedAt!);
     const list = await files.forCommand(ctx, cmd.commandId);
     assert.deepEqual(
       list.map((f) => [f.fileId, f.sizeBytes, f.sha256, f.expired]),

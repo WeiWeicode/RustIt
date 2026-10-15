@@ -163,10 +163,31 @@ pub struct Bundle {
     pub truncated: bool,
 }
 
+/// zip 項目時間(本機時間;zip 格式沒有時區,秒數只到偶數):日誌檔的修改時間,讀不到時用現在時間。
+/// 不設定時預設為 1980-01-01(zip 套件未開 time / chrono 功能)
+fn entry_time(path: &Path) -> zip::DateTime {
+    let t: chrono::DateTime<chrono::Local> = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .map(Into::into)
+        .unwrap_or_else(|_| chrono::Local::now());
+    use chrono::{Datelike, Timelike};
+    zip::DateTime::from_date_and_time(
+        t.year().clamp(1980, 2107) as u16,
+        t.month() as u8,
+        t.day() as u8,
+        t.hour() as u8,
+        t.minute() as u8,
+        t.second() as u8,
+    )
+    .unwrap_or_default()
+}
+
 /// 單一項目的 zip(只用來量壓縮後大小,之後原樣搬進最終 zip)
-fn single(name: &str, content: &[u8]) -> Result<Vec<u8>, String> {
+fn single(name: &str, content: &[u8], modified: zip::DateTime) -> Result<Vec<u8>, String> {
     let mut w = ZipWriter::new(Cursor::new(Vec::new()));
-    let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    let opts = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Deflated)
+        .last_modified_time(modified);
     w.start_file(name, opts)
         .map_err(|e| format!("壓縮 {name} 失敗:{e}"))?;
     w.write_all(content)
@@ -187,7 +208,11 @@ pub fn bundle(files: &[(NaiveDate, PathBuf)], max: usize) -> Result<Bundle, Stri
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         let raw = std::fs::read(path).map_err(|e| format!("無法讀取 {name}:{e}"))?;
-        let part = single(&name, redact(&String::from_utf8_lossy(&raw)).as_bytes())?;
+        let part = single(
+            &name,
+            redact(&String::from_utf8_lossy(&raw)).as_bytes(),
+            entry_time(path),
+        )?;
         if total + part.len() > max {
             truncated = true;
             break;
@@ -327,10 +352,36 @@ mod tests {
             .unwrap();
         assert!(s.starts_with('0'));
         assert_eq!(all.sha256, hex::encode(Sha256::digest(&all.bytes)));
-        let newest = std::fs::read_to_string(&files[0].1).unwrap();
-        let first = single("agent-2026-10-15.log", redact(&newest).as_bytes())
+        // 項目時間 = 日誌檔修改時間(本機時間),不是 1980-01-01
+        let modified: chrono::DateTime<chrono::Local> = std::fs::metadata(&files[0].1)
             .unwrap()
-            .len();
+            .modified()
+            .unwrap()
+            .into();
+        let t = archive
+            .by_name("agent-2026-10-15.log")
+            .unwrap()
+            .last_modified()
+            .unwrap();
+        use chrono::{Datelike, Timelike};
+        assert_eq!(
+            (t.year(), t.month(), t.day(), t.hour(), t.minute()),
+            (
+                modified.year() as u16,
+                modified.month() as u8,
+                modified.day() as u8,
+                modified.hour() as u8,
+                modified.minute() as u8
+            )
+        );
+        let newest = std::fs::read_to_string(&files[0].1).unwrap();
+        let first = single(
+            "agent-2026-10-15.log",
+            redact(&newest).as_bytes(),
+            entry_time(&files[0].1),
+        )
+        .unwrap()
+        .len();
         let cut = bundle(&files, ZIP_OVERHEAD + first + 1).unwrap();
         assert_eq!(
             (cut.days_included, cut.truncated),

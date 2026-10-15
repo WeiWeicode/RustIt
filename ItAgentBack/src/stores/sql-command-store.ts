@@ -230,7 +230,8 @@ export class SqlCommandStore implements CommandStore, CommandFileStore {
       .input('result', sql.NVarChar(4000), p.resultSummary ?? null)
       .input('code', sql.VarChar(64), cut(p.errorCode, 64))
       .input('msg', sql.NVarChar(1000), cut(p.errorMessage, 1000))
-      .input('timeout', sql.DateTime2(3), p.timeoutAt ?? null);
+      .input('timeout', sql.DateTime2(3), p.timeoutAt ?? null)
+      .input('markStarted', sql.Bit, p.markStarted === true);
     const states = from.map((s, k) => {
       req.input(`f${k}`, sql.VarChar(16), s);
       return `@f${k}`;
@@ -247,7 +248,8 @@ export class SqlCommandStore implements CommandStore, CommandFileStore {
         send_count = CASE WHEN @state = 'sent' THEN send_count + 1 ELSE send_count END,
         sent_at = CASE WHEN @state = 'sent' THEN @at ELSE sent_at END,
         acked_at = CASE WHEN @state IN ('acked', 'running', 'succeeded', 'failed') AND acked_at IS NULL AND sent_at IS NOT NULL THEN @at ELSE acked_at END,
-        started_at = CASE WHEN @state = 'running' AND started_at IS NULL THEN @at ELSE started_at END,
+        started_at = CASE WHEN started_at IS NOT NULL THEN started_at WHEN @state = 'running' THEN @at
+          WHEN @markStarted = 1 THEN COALESCE(acked_at, @at) ELSE started_at END,
         finished_at = CASE WHEN @state IN ('succeeded', 'failed', 'canceled', 'expired') THEN @at ELSE finished_at END,
         updated_at = SYSUTCDATETIME()
       WHERE id = @id AND state IN (${states.join(', ')})`);

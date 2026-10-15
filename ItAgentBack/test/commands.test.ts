@@ -129,6 +129,22 @@ describe('指令派送器', () => {
     assert.deepEqual([got.state, got.errorCode], ['failed', 'UNSUPPORTED_COMMAND']);
   });
 
+  it('瞬間完成(沒收到 running)時 started_at 以 acked_at 補上;未開始執行的失敗不補', async () => {
+    await online(device);
+    const a = await env.commands.create(ctx, IT, 'basic', device.deviceId, { kind: 'agent.diagnose' });
+    env.clock.advance(1);
+    await env.commands.onUpdate(ctx, device.id, { command_id: a.commandId, state: 'acked' });
+    env.clock.advance(1);
+    await env.commands.onUpdate(ctx, device.id, { command_id: a.commandId, state: 'succeeded', result: {} });
+    const done = await env.commands.get(ctx, a.commandId);
+    assert.ok(done.startedAt);
+    assert.equal(done.startedAt, done.ackedAt);
+    assert.ok(done.startedAt < done.finishedAt!);
+    const b = await env.commands.create(ctx, IT, 'basic', device.deviceId, { kind: 'inventory.collect' });
+    await env.commands.onUpdate(ctx, device.id, { command_id: b.commandId, state: 'failed', error_code: 'UNSUPPORTED_COMMAND' });
+    assert.equal((await env.commands.get(ctx, b.commandId)).startedAt, null);
+  });
+
   it('WebSocket 斷線:sent 改回 queued 並於重連後重送;acked 不動', async () => {
     let conn = await online(device);
     const a = await env.commands.create(ctx, IT, 'basic', device.deviceId, { kind: 'inventory.collect' });

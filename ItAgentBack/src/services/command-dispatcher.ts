@@ -95,6 +95,8 @@ export interface CommandDispatcherOptions {
 const RANK: Record<CommandState, number> = { queued: 0, sent: 1, acked: 2, running: 3, succeeded: 4, failed: 4, canceled: 4, expired: 4 };
 const NOT_FINAL: CommandState[] = ['queued', 'sent', 'acked', 'running'];
 const isFinal = (s: CommandState) => RANK[s] === 4;
+/** Agent 沒有開始執行就失敗的錯誤代碼(不補 started_at) */
+const NOT_STARTED_CODES = new Set(['UNSUPPORTED_COMMAND', 'EXPIRED', 'INVALID_PARAMS', 'NOT_RUNNING_AS_SERVICE']);
 /** result_summary 上限(NVARCHAR(4000)) */
 const RESULT_MAX = 4000;
 export const BATCH_MAX_DEVICES = 200;
@@ -512,6 +514,8 @@ export class CommandDispatcher {
         patch.errorCode = body.error_code ?? 'EXECUTION_FAILED';
         patch.errorMessage = body.error_message ?? null;
       }
+      // 瞬間完成的指令 Agent 只送出最後狀態(running 被覆蓋),開始時間以確認收到的時間補上
+      patch.markStarted = target === 'succeeded' || !NOT_STARTED_CODES.has(patch.errorCode ?? '');
     }
     let ok: boolean;
     try {

@@ -344,6 +344,7 @@ export class MemoryCommandStore extends Failable implements CommandStore, Comman
     }
     if (['acked', 'running', 'succeeded', 'failed'].includes(p.state) && !c.ackedAt && c.sentAt) c.ackedAt = p.at;
     if (p.state === 'running') c.startedAt ??= p.at;
+    if (p.markStarted) c.startedAt ??= c.ackedAt ?? p.at;
     if (['succeeded', 'failed', 'canceled', 'expired'].includes(p.state)) c.finishedAt = p.at;
     return true;
   }
