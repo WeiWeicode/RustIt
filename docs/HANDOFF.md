@@ -20,7 +20,7 @@
 
 1. **P1 已完成**(2026-10-14 Hyper-V VM 驗證 7 項通過,見下方「P1 收尾:VM 測試」)。Win11 VM 可之後補測;VM 保留作 P2 以後的測試機(檢查點「匯入憑證」)。
 2. **P3 資料呈現**、**P8-1 使用者端外殼與我的電腦** 可並行:P3(管理 API 回完整資產 + GigaItApp 詳情分 Tab)只動後端與前端,適合交給同仁。
-3. **P2 已完成**(主機端與 Agent 端已合併 `develop`;2026-10-15 P2-3 VM 驗證 7 項通過,見下方)。待決:裝置被停用(403 `ITA_DEVICE_DISABLED`)期間目前會記成一筆 reason `rejected` 的 `offline_period`,是否排除。**下一步 P4 指令通道**(升級、派送的共同基礎)。
+3. **P2 已完成**(主機端與 Agent 端已合併 `develop`;2026-10-15 P2-3 VM 驗證 7 項通過,見下方)。驗證時發現裝置被停用期間會記成 `offline_period`(rejected),已於 0.2.1 排除(BugFix.md 2026-10-15;測試區 VM 仍為 0.2.0,下次重建 MSI 時一併升級)。**下一步 P4 指令通道**(升級、派送的共同基礎)。
 
 ### P2-3:VM 驗證(完成標準 PLATFORM-PLAN §4.2)
 
@@ -36,7 +36,7 @@
 | 查詢 | `ita.device_event`(event_uid 非 NULL 為端點事件)、`ita.device`(`clock_skew_ms`)。`docker logs` 在主機 2 讀不到較新的紀錄(2026-10-15 只讀到 10/14 13:13,疑似日誌輪替),以資料庫為準。VM 的 `C:\ProgramData\GigaNexus\Agent` 只允許 SYSTEM、Administrators,一般檔案總管會顯示「找不到」,改用系統管理員 PowerShell;讀日誌加 `-Encoding UTF8` |
 | 結果(2026-10-15) | **7 項全部通過**(VM `DESKTOP-1TB2UMP`,0.2.0 MSI 升級安裝)。1–2:離線 19 分鐘(中間重啟服務 2 次)與 16.7 小時各只有一筆 `offline_period`(network),恢復後 6 份離線資產經 `/sync` 全部 stored,無重複。3:離線中 Windows Update 重開機 2 次(00:27、00:37),停機不到 10 分鐘延續同一段,事件留在本機恢復後補傳。4:複製 `state\` 以登入者身分前景啟動 → DPAPI 解不開,改名 `.unreadable-…` 後重建。5:時間調快 10 分鐘 → `clock_skew_ms` 599868、`clock_skew` 事件。6:SQL 設 disabled 後重啟服務 → 三個通道 403、暫停蒐集;改回 active 後 10 分鐘內恢復。7(自己的電腦,隨身碟):連線中插拔即時送達;離線插拔後恢復,`usb_*` 的 occurred_at 為插拔當下、同一段 `offline_period`(tls) |
 
-注意:`429` 與 `400` 主機有回應,不算離線;不到 60 秒的中斷不送 `offline_period`;離線期間 Agent 重啟(10 分鐘內)延續同一段。DPAPI 改為執行帳號範圍(SYSTEM),前景模式以登入者身分建立的 `state\` 不能給服務使用(反之亦然)。
+注意:`429`、`400` 與裝置停用 / 退役(0.2.1 起)主機有回應,不算離線,停用的回應還會結束進行中的離線期間;不到 60 秒的中斷不送 `offline_period`;離線期間 Agent 重啟(10 分鐘內)延續同一段。DPAPI 改為執行帳號範圍(SYSTEM),前景模式以登入者身分建立的 `state\` 不能給服務使用(反之亦然)。
 
 ### P1 收尾:VM 測試(完成標準 PLATFORM-PLAN §4.1、§4.10 A8)
 

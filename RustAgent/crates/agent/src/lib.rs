@@ -49,11 +49,9 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    /// 連線或回報失敗:記入連線紀錄(429、400 主機有回應,不算離線);被停用時切換狀態
+    /// 連線或回報失敗:記入連線紀錄(429、400、停用時主機有回應,不算離線);被停用時切換狀態
     pub fn failed(&self, e: &SendError) {
-        if e.counts_as_offline() {
-            self.conn.failed(e);
-        }
+        self.conn.observe_failure(e);
         if e.is_device_disabled() {
             self.set_disabled(true);
         }
