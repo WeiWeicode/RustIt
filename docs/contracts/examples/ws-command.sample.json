@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "type": "command",
+  "id": "5b2e8c1d-4f3a-4e6b-9d7c-1a2b3c4d5e01",
+  "body": {
+    "command_id": "5b2e8c1d-4f3a-4e6b-9d7c-1a2b3c4d5e01",
+    "kind": "message.show",
+    "params": { "title": "IT 部門通知", "text": "今晚 22:00 進行網路維護,請先存檔。", "timeout_sec": 300 },
+    "expires_at": "2026-10-06T09:00:00.000Z",
+    "issued_by": "S000001",
+    "issued_at": "2026-10-06T08:00:00.000Z"
+  }
+}

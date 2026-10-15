@@ -6,6 +6,7 @@
 //! | `outbox_inventory` | 尚未確認的資產回報(完整請求 JSON,**加密**);連續相同 hash 只留最新一份 | `/sync` skip 或 `/inventory` 200 後刪除 | 50 份或 20 MB,丟最舊 |
 //! | `outbox_event` | 端點事件(data **加密**),保留發生時間 | `/events` accepted 後刪除 | 5,000 筆,丟最舊 |
 //! | `conn_log` | 連線中斷期間:開始、最後嘗試、次數、各原因次數、最後錯誤 | 保留 30 天 | 30 天 |
+//! | `command_log` | 收到的指令(以 command_id 去重)與最後一則 command_update(**加密**);reported = 主機已回 ack(P4) | 已回報的保留 7 天 | 7 天 |
 //!
 //! 金鑰無法解開(store 被複製到別台電腦)時,把舊檔改名保留、建立新的 store,不讓 Agent 無法啟動。
 //! 日誌不寫 payload 與金鑰(AGENT.md §7.1)。
@@ -163,7 +164,10 @@ impl Store {
                occurred_at TEXT NOT NULL, data BLOB NOT NULL);
              CREATE TABLE IF NOT EXISTS conn_log (
                id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT NOT NULL, ended_at TEXT, last_attempt_at TEXT NOT NULL,
-               retries INTEGER NOT NULL, reasons TEXT NOT NULL, last_error TEXT NOT NULL);",
+               retries INTEGER NOT NULL, reasons TEXT NOT NULL, last_error TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS command_log (
+               command_id TEXT PRIMARY KEY, kind TEXT NOT NULL, state TEXT NOT NULL, received_at TEXT NOT NULL,
+               updated_at TEXT NOT NULL, update_json BLOB, reported INTEGER NOT NULL DEFAULT 1);",
         )
         .map_err(OpenError::from)?;
         Ok(Self { conn, cipher })
@@ -450,6 +454,117 @@ impl Store {
             .map(|n| n as u64)
             .map_err(db_err)
     }
+
+    // ---------- command_log(P4) ----------
+
+    /// 記下收到的指令;第一次收到回傳 true,重複(至少送達一次的重送)回傳 false
+    pub fn command_begin(&self, id: &str, kind: &str, at: &str) -> R<bool> {
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO command_log (command_id, kind, state, received_at, updated_at) VALUES (?1, ?2, 'received', ?3, ?3)",
+                params![id, kind, at],
+            )
+            .map(|n| n == 1)
+            .map_err(db_err)
+    }
+
+    /// 該指令最後一則 command_update(重複收到時重送用);尚未有或無法解密回 None
+    pub fn command_last_update(&self, id: &str) -> R<Option<Value>> {
+        let sealed: Option<Option<Vec<u8>>> = self
+            .conn
+            .query_row(
+                "SELECT update_json FROM command_log WHERE command_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(db_err)?;
+        Ok(sealed
+            .flatten()
+            .and_then(|s| self.cipher.open(&s).ok())
+            .and_then(|b| serde_json::from_slice(&b).ok()))
+    }
+
+    /// 保存最新的 command_update(先寫本機,主機 ack 後才標記已回報)
+    pub fn command_save(&self, id: &str, state: &str, update: &Value, at: &str) -> R<()> {
+        let sealed = self.cipher.seal(update.to_string().as_bytes())?;
+        self.conn
+            .execute(
+                "UPDATE command_log SET state = ?2, update_json = ?3, reported = 0, updated_at = ?4 WHERE command_id = ?1",
+                params![id, state, sealed, at],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// 主機回 command_update_ack:狀態相同才標記(之後又有新狀態時仍要送)
+    pub fn command_reported(&self, id: &str, state: &str) -> R<()> {
+        self.conn
+            .execute(
+                "UPDATE command_log SET reported = 1 WHERE command_id = ?1 AND state = ?2",
+                params![id, state],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// 尚未被主機確認的最後狀態(重連後重送),依收到順序;無法解密或解析的記錄並標為已回報(不永遠卡住)
+    pub fn command_unreported(&self) -> R<Vec<Value>> {
+        let rows: Vec<(String, Vec<u8>)> = {
+            let mut st = self
+                .conn
+                .prepare("SELECT command_id, update_json FROM command_log WHERE reported = 0 AND update_json IS NOT NULL ORDER BY received_at")
+                .map_err(db_err)?;
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(db_err)?
+                .collect::<Result<_, _>>()
+                .map_err(db_err)?
+        };
+        let mut out = Vec::with_capacity(rows.len());
+        for (id, sealed) in rows {
+            match self
+                .cipher
+                .open(&sealed)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            {
+                Some(v) => out.push(v),
+                None => {
+                    warn!("暫存的指令狀態 {id} 無法解密或解析,不再重送");
+                    self.conn
+                        .execute(
+                            "UPDATE command_log SET reported = 1 WHERE command_id = ?1",
+                            [&id],
+                        )
+                        .map_err(db_err)?;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// 尚未到終態的指令(啟動時檢查:上次執行中途停止)
+    pub fn command_unfinished(&self) -> R<Vec<String>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT command_id FROM command_log WHERE state IN ('received', 'acked', 'running') ORDER BY received_at")
+            .map_err(db_err)?;
+        st.query_map([], |r| r.get(0))
+            .map_err(db_err)?
+            .collect::<Result<_, _>>()
+            .map_err(db_err)
+    }
+
+    /// 刪除早於 before 且已回報的指令紀錄(去重至少要涵蓋最長有效期限 1 天)
+    pub fn purge_command_log(&self, before: &str) -> R<u64> {
+        self.conn
+            .execute(
+                "DELETE FROM command_log WHERE reported = 1 AND updated_at < ?1",
+                [before],
+            )
+            .map(|n| n as u64)
+            .map_err(db_err)
+    }
 }
 
 #[cfg(test)]
@@ -461,6 +576,47 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = Store::open(dir.path()).unwrap();
         (dir, s)
+    }
+
+    #[test]
+    fn command_log_dedup_and_unreported() {
+        let (dir, s) = open();
+        let id = "5b2e8c1d-4f3a-4e6b-9d7c-1a2b3c4d5e01";
+        assert!(
+            s.command_begin(id, "message.show", "2026-10-06T08:00:00Z")
+                .unwrap()
+        );
+        assert!(
+            !s.command_begin(id, "message.show", "2026-10-06T08:00:05Z")
+                .unwrap(),
+            "重送不重複"
+        );
+        assert_eq!(s.command_last_update(id).unwrap(), None);
+        let running = json!({ "command_id": id, "state": "running" });
+        s.command_save(id, "running", &running, "2026-10-06T08:00:01Z")
+            .unwrap();
+        let done =
+            json!({ "command_id": id, "state": "succeeded", "result": { "secret_like": "x" } });
+        s.command_save(id, "succeeded", &done, "2026-10-06T08:00:02Z")
+            .unwrap();
+        // 舊狀態的 ack 不算
+        s.command_reported(id, "running").unwrap();
+        assert_eq!(s.command_unreported().unwrap(), vec![done.clone()]);
+        let raw: Vec<u8> = s
+            .conn
+            .query_row("SELECT update_json FROM command_log", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&raw).contains("secret_like"),
+            "加密保存"
+        );
+        drop(s);
+        let s = Store::open(dir.path()).unwrap();
+        assert_eq!(s.command_last_update(id).unwrap(), Some(done));
+        s.command_reported(id, "succeeded").unwrap();
+        assert!(s.command_unreported().unwrap().is_empty());
+        assert_eq!(s.purge_command_log("2026-10-06T08:00:01Z").unwrap(), 0);
+        assert_eq!(s.purge_command_log("2026-10-07T00:00:00Z").unwrap(), 1);
     }
 
     #[test]

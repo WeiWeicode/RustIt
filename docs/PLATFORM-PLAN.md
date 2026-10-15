@@ -385,7 +385,7 @@ Demo(Tauri)改造為使用者端程式 `desktop`:使用者會用的頁面保留(
 | --- | --- | --- |
 | `sync.schema.json` | 既有,實作;`hello` 加 `agent_time`、`hw_fingerprint`(A1、A2),`hello_ack` 加 `settings_version`、`min_agent_version`(B2);README 補 `429` + `Retry-After`(A3) | P2 |
 | `event.schema.json`(新) | `POST /agent/v1/events`:`events[]`(`type`、`occurred_at`、`data`);含 `offline_period`(開始、結束、主要原因、重試次數) | P2 |
-| `ws-envelope.schema.json` | 加 `command`、`command_update`、`prepare_shutdown`(P4);`heartbeat.body.health`(選填,P5) | P4、P5 |
+| `ws-envelope.schema.json` | 加 `command`、`command_update`、`prepare_shutdown`(P4;實作時另加 `command_update_ack`:Agent 的結果先寫本機、主機確認才刪,需求方 2026-10-15 同意,設計見 `P4-COMMAND-DESIGN.md`);`heartbeat.body.health`(選填,P5) | P4、P5 |
 | ~~`settings.schema.json`(新)~~ | 主機下發設定;**P2 實作時併入 `ws-envelope.schema.json` 的 `AgentSettings`**(只在 `hello_ack` 使用,先有回報間隔、USB 事件開關,其餘隨階段新增) | P2 |
 | `watchdog.schema.json`(新) | `POST /agent/v1/watchdog/report` 請求與回應(目標版本、下載路徑、SHA-256) | P5、P6 |
 | `pipe.schema.json`(新) | 本機管道 `get_status` / `status` / `prepare_shutdown`(指南 §7.2) | P5 |

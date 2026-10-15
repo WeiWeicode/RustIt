@@ -6,15 +6,24 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { primaryIpv4, type InventoryRequest } from '../src/contracts.js';
+import { CommandDispatcher } from '../src/services/command-dispatcher.js';
 import { DeviceService } from '../src/services/device-service.js';
 import type {
   AgentEvent,
+  BatchRecord,
+  CommandFilter,
+  CommandPatch,
+  CommandRecord,
+  CommandState,
+  CommandStore,
   CurrentInventory,
   DeviceEventType,
   DeviceRecord,
   DeviceRow,
   DeviceStore,
   InventorySnapshot,
+  NewBatch,
+  NewCommand,
   OnlineInfo,
   SnapshotStore,
   StateStore,
@@ -231,3 +240,165 @@ export function inventoryRequest(patch: Partial<InventoryRequest> = {}): Invento
 }
 
 export const certHeaders = (fp = FP) => ({ 'x-client-cert-dn': DN, 'x-client-cert-fp': fp, 'x-client-verify': 'SUCCESS', 'x-request-id': 'req-agent-1' });
+
+/** 指令儲存(記憶體版,與 SqlCommandStore 相同的條件更新語意) */
+export class MemoryCommandStore extends Failable implements CommandStore {
+  commands: (NewCommand & { id: number; batchRef: number | null; state: CommandState } & Partial<CommandRecord>)[] = [];
+  batches: (NewBatch & { id: number; targetCount: number })[] = [];
+  constructor(private readonly devices: MemoryDeviceStore) {
+    super();
+  }
+  private rec(c: MemoryCommandStore['commands'][number]): CommandRecord {
+    const d = this.devices.byId(c.deviceRef);
+    const b = this.batches.find((x) => x.id === c.batchRef);
+    return {
+      progress: null,
+      resultSummary: null,
+      errorCode: null,
+      errorMessage: null,
+      timeoutAt: null,
+      sendCount: 0,
+      sentAt: null,
+      ackedAt: null,
+      startedAt: null,
+      finishedAt: null,
+      ...c,
+      batchId: b?.batchId ?? null,
+      batchMaxConcurrent: b?.maxConcurrent ?? null,
+      deviceId: d.deviceId,
+      computerName: d.computerName,
+      requestId: c.requestId,
+    } as CommandRecord;
+  }
+  private batchRec(b: MemoryCommandStore['batches'][number]): BatchRecord {
+    const counts: BatchRecord['counts'] = {};
+    for (const c of this.commands.filter((x) => x.batchRef === b.id)) counts[c.state] = (counts[c.state] ?? 0) + 1;
+    return { ...b, counts };
+  }
+  async createCommands(batch: NewBatch | null, commands: NewCommand[]) {
+    this.hit('createCommands');
+    for (const c of commands)
+      if (c.idempotencyKey && this.commands.some((x) => x.createdByEmp === c.createdByEmp && x.idempotencyKey === c.idempotencyKey))
+        throw Object.assign(new Error('duplicate'), { number: 2601 });
+    let batchRef: number | null = null;
+    if (batch) {
+      batchRef = this.batches.length + 1;
+      this.batches.push({ ...batch, id: batchRef, targetCount: commands.length });
+    }
+    for (const c of commands) this.commands.push({ ...c, id: this.commands.length + 1, batchRef, state: 'queued' });
+  }
+  async getCommand(commandId: string) {
+    this.hit('getCommand');
+    const c = this.commands.find((x) => x.commandId === commandId);
+    return c ? this.rec(c) : null;
+  }
+  async findByIdempotency(emp: string, key: string) {
+    this.hit('findByIdempotency');
+    const c = this.commands.find((x) => x.createdByEmp === emp && x.idempotencyKey === key && x.batchRef === null);
+    return c ? this.rec(c) : null;
+  }
+  async findBatchByIdempotency(emp: string, key: string) {
+    this.hit('findBatchByIdempotency');
+    const b = this.batches.find((x) => x.createdByEmp === emp && x.idempotencyKey === key);
+    return b ? this.batchRec(b) : null;
+  }
+  async getBatch(batchId: string) {
+    this.hit('getBatch');
+    const b = this.batches.find((x) => x.batchId === batchId);
+    return b ? this.batchRec(b) : null;
+  }
+  async listCommands(f: CommandFilter) {
+    this.hit('listCommands');
+    return this.commands
+      .filter(
+        (c) =>
+          (f.deviceRef === undefined || c.deviceRef === f.deviceRef) &&
+          (f.batchRef === undefined || c.batchRef === f.batchRef) &&
+          (!f.state || c.state === f.state) &&
+          (!f.kind || c.kind === f.kind) &&
+          (f.beforeId === undefined || c.id < f.beforeId),
+      )
+      .sort((a, b) => b.id - a.id)
+      .slice(0, f.limit)
+      .map((c) => this.rec(c));
+  }
+  async transition(id: number, from: CommandState[], p: CommandPatch) {
+    this.hit('transition');
+    const c = this.commands.find((x) => x.id === id);
+    if (!c || !from.includes(c.state)) return false;
+    c.state = p.state;
+    if (p.progress !== undefined) c.progress = p.progress;
+    if (p.resultSummary !== undefined) c.resultSummary = p.resultSummary;
+    if (p.errorCode) c.errorCode = p.errorCode;
+    if (p.errorMessage) c.errorMessage = p.errorMessage;
+    c.timeoutAt ??= p.timeoutAt ?? null;
+    if (p.state === 'sent') {
+      c.sendCount = (c.sendCount ?? 0) + 1;
+      c.sentAt = p.at;
+    }
+    if (['acked', 'running', 'succeeded', 'failed'].includes(p.state) && !c.ackedAt && c.sentAt) c.ackedAt = p.at;
+    if (p.state === 'running') c.startedAt ??= p.at;
+    if (['succeeded', 'failed', 'canceled', 'expired'].includes(p.state)) c.finishedAt = p.at;
+    return true;
+  }
+  async requeueSent(deviceRef: number) {
+    this.hit('requeueSent');
+    let n = 0;
+    for (const c of this.commands)
+      if (c.deviceRef === deviceRef && c.state === 'sent') {
+        c.state = 'queued';
+        n++;
+      }
+    return n;
+  }
+  async queuedForDevice(deviceRef: number, now: Date) {
+    this.hit('queuedForDevice');
+    return this.commands.filter((c) => c.deviceRef === deviceRef && c.state === 'queued' && c.expiresAt > now).map((c) => this.rec(c));
+  }
+  async queuedForBatch(batchRef: number, now: Date, limit: number) {
+    this.hit('queuedForBatch');
+    return this.commands
+      .filter((c) => c.batchRef === batchRef && c.state === 'queued' && c.expiresAt > now)
+      .slice(0, limit)
+      .map((c) => this.rec(c));
+  }
+  async activeInBatch(batchRef: number) {
+    this.hit('activeInBatch');
+    return this.commands.filter((c) => c.batchRef === batchRef && ['sent', 'acked', 'running'].includes(c.state)).length;
+  }
+  async pendingCount(deviceRef: number, kind: string) {
+    this.hit('pendingCount');
+    return this.commands.filter((c) => c.deviceRef === deviceRef && c.kind === kind && ['queued', 'sent', 'acked', 'running'].includes(c.state)).length;
+  }
+  async dueForSweep(now: Date, limit: number) {
+    this.hit('dueForSweep');
+    return this.commands
+      .filter((c) => (['queued', 'sent'].includes(c.state) && c.expiresAt <= now) || (['acked', 'running'].includes(c.state) && c.timeoutAt && c.timeoutAt <= now))
+      .slice(0, limit)
+      .map((c) => this.rec(c));
+  }
+}
+
+/** 假的 WebSocket 連線:記錄送出的信封 */
+export class FakeConnection {
+  sent: { type: string; id: string; body: Record<string, unknown> }[] = [];
+  closed: number | null = null;
+  broken = false;
+  send(text: string) {
+    if (this.broken) throw new Error('socket closed');
+    this.sent.push(JSON.parse(text) as FakeConnection['sent'][number]);
+  }
+  close(code: number) {
+    this.closed = code;
+  }
+  terminate() {
+    this.closed = 1006;
+  }
+}
+
+export function setupCommands(opts: { batchMaxConcurrent?: number } = {}) {
+  const base = setup();
+  const store = new MemoryCommandStore(base.sql);
+  const commands = new CommandDispatcher(store, base.sql, base.service, { now: base.clock.now, ...opts });
+  return { ...base, store, commands };
+}

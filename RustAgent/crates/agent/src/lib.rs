@@ -5,11 +5,13 @@
 //!   - WebSocket([`ws`]):`hello`(端點時間、硬體指紋)+ 每 30 秒 `heartbeat`,斷線退避重連;`hello_ack` 的主機設定寫入本機
 //!   - 端點事件([`events`]):本機暫存 → `POST /agent/v1/events`
 //!   - USB 插拔([`usb`]):每 10 秒比對可移除磁碟區
+//!   - 指令([`command`],P4):WebSocket 收到 `command` 在背景執行,結果先寫本機再經 WebSocket 回報
 //!
 //! 共用一個 `rustit_common::transport::Transport`(同一個 rustls 設定)。蒐集一律經 rustit-collector,Agent 不直接呼叫 WMI。
 //! 連不上主機時照常蒐集與記錄,恢復後補傳並回報離線期間([`conn`],PLATFORM-PLAN §4.2)。
 //! 失敗只記錄並重試,**不因回報失敗而結束或卡住使用者電腦**(AGENT.md §5)。
 
+mod command;
 mod conn;
 mod crypto;
 mod events;
@@ -33,8 +35,13 @@ use rustit_common::transport::{SendError, Transport};
 use serde_json::json;
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use tokio::sync::watch;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use tokio::sync::{Notify, mpsc, watch};
+
+/// 以 Windows 服務執行(service.rs 設定);前景模式不支援 agent.restart
+pub static SERVICE_MODE: AtomicBool = AtomicBool::new(false);
+/// 依指令 agent.restart 結束:服務以專屬結束代碼停止,由失敗復原重新啟動
+pub static RESTART_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// 各工作共用的狀態
 pub(crate) struct Shared {
@@ -46,6 +53,18 @@ pub(crate) struct Shared {
     pub last_acked_seq: AtomicU64,
     /// 主機已停用此裝置(HTTP 403 ITA_DEVICE_DISABLED、WebSocket 4403);持久化於 kv device_status
     disabled: AtomicBool,
+    /// 最近一次 hello_ack 的時鐘偏差(端點 − 主機,毫秒);判斷指令是否過期用
+    pub clock_skew_ms: AtomicI64,
+    /// 指令 inventory.collect:要求資產迴圈立即蒐集
+    pub collect_now: mpsc::Sender<inventory::CollectRequest>,
+    /// 最近一次上傳的 (agent_seq, 主機結果)
+    pub last_upload: std::sync::Mutex<Option<(u64, String)>>,
+    /// 有新的 command_update 待送(WebSocket 迴圈等待)
+    pub command_notify: Notify,
+    /// 會改變系統的指令串行
+    pub exclusive: tokio::sync::Mutex<()>,
+    /// 讓所有工作結束(外部停止訊號或 agent.restart)
+    stop: watch::Sender<bool>,
 }
 
 impl Shared {
@@ -61,6 +80,12 @@ impl Shared {
     pub fn reached(&self) {
         self.conn.succeeded();
         self.set_disabled(false);
+    }
+
+    /// 指令 agent.restart:結束所有工作,服務以專屬結束代碼停止
+    pub fn request_restart(&self) {
+        RESTART_REQUESTED.store(true, Ordering::Relaxed);
+        let _ = self.stop.send(true);
     }
 
     pub fn is_disabled(&self) -> bool {
@@ -141,6 +166,9 @@ pub async fn run(settings: Settings, mut shutdown: watch::Receiver<bool>) -> Res
         now_rfc3339(),
         json!({ "agent_version": protocol::AGENT_VERSION }),
     );
+    // 所有工作共用的結束訊號:外部停止(服務停止、Ctrl+C)轉送過來,agent.restart 也從這裡結束
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let (collect_tx, collect_rx) = mpsc::channel(4);
     let shared = Arc::new(Shared {
         transport,
         store,
@@ -148,7 +176,24 @@ pub async fn run(settings: Settings, mut shutdown: watch::Receiver<bool>) -> Res
         conn,
         last_acked_seq: AtomicU64::new(0),
         disabled: AtomicBool::new(disabled),
+        clock_skew_ms: AtomicI64::new(0),
+        collect_now: collect_tx,
+        last_upload: std::sync::Mutex::new(None),
+        command_notify: Notify::new(),
+        exclusive: tokio::sync::Mutex::new(()),
+        stop: stop_tx,
     });
+    // 上次的 agent.restart 回報成功、中途停止的指令回報失敗(重連後送出)
+    command::recover(&shared);
+    {
+        let shared = shared.clone();
+        let mut external = shutdown.clone();
+        tokio::spawn(async move {
+            if external.wait_for(|s| *s).await.is_ok() {
+                let _ = shared.stop.send(true);
+            }
+        });
+    }
     if let Ok((inv, ev)) = shared.store.lock().counts() {
         info!(
             "本機暫存:{} 尚待送出資產 {inv} 份、事件 {ev} 筆",
@@ -181,16 +226,17 @@ pub async fn run(settings: Settings, mut shutdown: watch::Receiver<bool>) -> Res
         settings.inventory_interval,
         hello_tx,
         settings_rx.clone(),
-        shutdown.clone(),
+        collect_rx,
+        stop_rx.clone(),
     ));
     let ws = tokio::spawn(ws::run(
         shared.clone(),
         hello_rx,
         settings_tx,
-        shutdown.clone(),
+        stop_rx.clone(),
     ));
-    let ev = tokio::spawn(events::run(shared.clone(), shutdown.clone()));
-    let usb = tokio::spawn(usb::run(shared.events.clone(), settings_rx, shutdown));
+    let ev = tokio::spawn(events::run(shared.clone(), stop_rx.clone()));
+    let usb = tokio::spawn(usb::run(shared.events.clone(), settings_rx, stop_rx));
     let (a, b, c, d) = tokio::join!(inv, ws, ev, usb);
     a.and(b)
         .and(c)

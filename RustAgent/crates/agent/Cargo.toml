@@ -1,8 +1,8 @@
 [package]
 name = "rustit-agent"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
-description = "GigaNexus 端點 Agent:蒐集資產 → HTTPS 回報、一條 WebSocket 心跳;本機加密暫存與離線補傳;前景或 Windows 服務執行(RustIt PLATFORM-PLAN P1、P2)"
+description = "GigaNexus 端點 Agent:蒐集資產 → HTTPS 回報、一條 WebSocket 心跳;本機加密暫存與離線補傳;固定類型指令;前景或 Windows 服務執行(RustIt PLATFORM-PLAN P1、P2、P4)"
 
 [dependencies]
 rustit-collector = { path = "../collector" }
@@ -30,4 +30,5 @@ tempfile = "3.27.0"
 [target."cfg(windows)".dependencies]
 # Windows 服務:SCM 進入點、安裝與失敗復原設定(PLATFORM-PLAN §4.1、指南 §6.1)
 windows-service = "0.8.1"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+# 指令 message.show:WTSSendMessage 送到主控台工作階段(P4)
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_RemoteDesktop", "Win32_UI_WindowsAndMessaging"] }

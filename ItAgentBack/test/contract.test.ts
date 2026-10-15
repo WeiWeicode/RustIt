@@ -32,10 +32,14 @@ describe('資料契約範例', () => {
       'inventory.sample.json',
       'sync-response.sample.json',
       'sync.sample.json',
+      'ws-command-update-ack.sample.json',
+      'ws-command-update.sample.json',
+      'ws-command.sample.json',
       'ws-heartbeat-ack.sample.json',
       'ws-heartbeat.sample.json',
       'ws-hello-ack.sample.json',
       'ws-hello.sample.json',
+      'ws-prepare-shutdown.sample.json',
       'ws-unsupported.sample.json',
     ]);
   });
@@ -63,6 +67,18 @@ describe('資料契約範例', () => {
 
   it('WebSocket 信封:hello / hello_ack / heartbeat / heartbeat_ack / unsupported', () => {
     for (const f of ['ws-hello', 'ws-hello-ack', 'ws-heartbeat', 'ws-heartbeat-ack', 'ws-unsupported']) check(CONTRACT_IDS.wsEnvelope, `${f}.sample.json`);
+  });
+
+  it('WebSocket 指令(P4):command / command_update / command_update_ack / prepare_shutdown;缺必要欄位、未知 state 不通過', () => {
+    for (const f of ['ws-command', 'ws-command-update', 'ws-command-update-ack', 'ws-prepare-shutdown']) check(CONTRACT_IDS.wsEnvelope, `${f}.sample.json`);
+    const validate = compileWsEnvelope(CONTRACTS_DIR);
+    const cmd = example<{ body: Record<string, unknown> }>('ws-command.sample.json');
+    const { expires_at: _e, ...noExpiry } = cmd.body;
+    assert.equal(validate({ ...cmd, body: noExpiry }), false);
+    assert.equal(validate({ ...cmd, body: { ...cmd.body, kind: 'rm -rf' } }), false);
+    const upd = example<{ body: Record<string, unknown> }>('ws-command-update.sample.json');
+    assert.equal(validate({ ...upd, body: { ...upd.body, state: 'canceled' } }), false);
+    assert.ok(validate({ ...upd, body: { ...upd.body, future: 1 } }));
   });
 
   it('相容規則:不認得的欄位與 type 通過信封驗證;已知 type 缺必要欄位不通過', () => {

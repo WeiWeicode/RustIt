@@ -13,7 +13,7 @@
  *   hello:記錄時鐘偏差(超過 ±5 分鐘寫 clock_skew 事件,A2)、硬體指紋(與其他裝置相同時寫 suspected_duplicate,不自動合併,A1)。
  */
 import type { FastifyBaseLogger } from 'fastify';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   type AgentSettings,
   type ComputerInfo,
@@ -27,6 +27,7 @@ import {
   type SyncResponse,
 } from '../contracts.js';
 import { AppError, storageUnavailable } from '../errors.js';
+import type { CommandChannel } from './command-dispatcher.js';
 import type { AgentEvent, DeviceRecord, DeviceRow, DeviceStore, OnlineInfo, SnapshotStore, StateStore, TouchPatch } from '../stores/types.js';
 
 /** 一則請求或一條 WebSocket 的日誌與追蹤(指南 §5.7:x-request-id、DN、指紋) */
@@ -37,6 +38,8 @@ export interface Ctx {
 
 /** WebSocket 連線的最小介面(測試可用假物件) */
 export interface AgentConnection {
+  /** 送出一則 JSON 文字訊息(指令推送,P4) */
+  send(text: string): void;
   close(code: number, reason: string): void;
   terminate(): void;
 }
@@ -114,7 +117,7 @@ export function camelize(v: unknown): unknown {
   return v;
 }
 
-export class DeviceService {
+export class DeviceService implements CommandChannel {
   private readonly connections = new Map<string, LiveConnection>();
   private readonly lastTouch = new Map<number, number>();
   private readonly now: () => Date;
@@ -382,6 +385,12 @@ export class DeviceService {
     return { server_time: at.toISOString() };
   }
 
+  /** 該裝置已有另一條較新的連線(conn 被取代) */
+  replaced(deviceId: string, conn: AgentConnection): boolean {
+    const current = this.connections.get(deviceId);
+    return !!current && current.conn !== conn;
+  }
+
   async disconnected(ctx: Ctx, device: DeviceRecord, conn: AgentConnection): Promise<void> {
     // 被新連線取代的舊連線關閉時,不影響新連線的在線狀態
     if (this.connections.get(device.deviceId)?.conn !== conn) return;
@@ -407,8 +416,31 @@ export class DeviceService {
     return n;
   }
 
-  /** 關閉服務時中斷所有 Agent 連線(Agent 會退避重連) */
-  closeAll(): void {
+  /** 指令推送通道(CommandChannel):只對本行程握有的連線(單一實例,指南 §8.4) */
+  isOnline(deviceId: string): boolean {
+    return this.connections.has(deviceId);
+  }
+
+  send(deviceId: string, type: string, id: string, body: object): boolean {
+    const live = this.connections.get(deviceId);
+    if (!live) return false;
+    try {
+      live.conn.send(JSON.stringify({ v: 1, type, id, body }));
+      return true;
+    } catch {
+      // 連線正在關閉:回 false,呼叫端留在 queued 重連後再送
+      return false;
+    }
+  }
+
+  /**
+   * 關閉服務時:先送 prepare_shutdown(Agent 送完待送結果、以 1000 關閉、隨機延遲後重連,P4),
+   * 等 graceMs 讓 Agent 送出與關閉,再中斷仍未關閉的連線
+   */
+  async closeAll(graceMs = 1000): Promise<void> {
+    const ids = [...this.connections.keys()];
+    for (const id of ids) this.send(id, 'prepare_shutdown', randomUUID(), { reason: 'server_restart' });
+    if (ids.length && graceMs > 0) await new Promise((r) => setTimeout(r, graceMs));
     for (const live of this.connections.values()) live.conn.close(1001, 'server shutting down');
     this.connections.clear();
   }
