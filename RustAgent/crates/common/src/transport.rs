@@ -77,9 +77,9 @@ impl SendError {
         matches!(self, SendError::Rejected(m) if m.starts_with("HTTP 400"))
     }
 
-    /// 是否算「連不上主機」(記入離線期間):429 忙碌與 400 內容錯誤時主機有回應,不算
+    /// 是否算「連不上主機」(記入離線期間):429 忙碌、400 內容錯誤、裝置被停用 / 退役時主機有回應,不算
     pub fn counts_as_offline(&self) -> bool {
-        !matches!(self, SendError::Busy(..)) && !self.is_bad_request()
+        !matches!(self, SendError::Busy(..)) && !self.is_bad_request() && !self.is_device_disabled()
     }
 }
 
@@ -328,6 +328,14 @@ mod tests {
         assert!(classify(403, r#"{"code":"ITA_DEVICE_DISABLED"}"#, None).is_device_disabled());
         assert!(!classify(403, r#"{"code":"DEVICE_UNAUTHORIZED"}"#, None).is_device_disabled());
         assert!(SendError::Rejected("裝置已被 IT 停用(close 4403)".into()).is_device_disabled());
+        // 主機有回應的錯誤不算離線;其他 403(憑證、身分)與網路錯誤算
+        assert!(!classify(403, r#"{"code":"ITA_DEVICE_DISABLED"}"#, None).counts_as_offline());
+        assert!(!classify(403, r#"{"code":"ITA_DEVICE_RETIRED"}"#, None).counts_as_offline());
+        assert!(!SendError::Rejected("裝置已被 IT 停用(close 4403)".into()).counts_as_offline());
+        assert!(!classify(400, "", None).counts_as_offline());
+        assert!(!classify(429, "", None).counts_as_offline());
+        assert!(classify(403, r#"{"code":"DEVICE_UNAUTHORIZED"}"#, None).counts_as_offline());
+        assert!(SendError::Retry("IO error: (os error 10060)".into()).counts_as_offline());
         assert!(
             !classify(401, r#"{"requestId":"a4403b"}"#, None).is_device_disabled(),
             "requestId 含 4403 不算"

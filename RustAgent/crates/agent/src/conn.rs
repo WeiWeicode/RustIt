@@ -43,6 +43,16 @@ impl ConnTracker {
         Self { store, events }
     }
 
+    /// 回報或連線失敗時呼叫:連不上主機才記入離線期間;裝置被停用代表主機有回應,
+    /// 結束進行中的期間(否則會延續到 IT 重新啟用才結束);429、400 不影響期間
+    pub fn observe_failure(&self, err: &SendError) {
+        if err.counts_as_offline() {
+            self.failed(err);
+        } else if err.is_device_disabled() {
+            self.succeeded();
+        }
+    }
+
     /// 一次連線或回報失敗
     pub fn failed(&self, err: &SendError) {
         let result =
@@ -208,6 +218,48 @@ mod tests {
             0,
             "起點與最後嘗試相同 → 期間 0 秒,關機時間不算離線"
         );
+    }
+
+    #[test]
+    fn disabled_device_is_not_offline() {
+        let (_d, store, t) = setup();
+        let disabled = SendError::Rejected(
+            r#"HTTP 403 {"code":"ITA_DEVICE_DISABLED","message":"此裝置已停用"}"#.into(),
+        );
+        t.observe_failure(&disabled);
+        t.observe_failure(&SendError::Rejected("裝置已被 IT 停用(close 4403)".into()));
+        assert!(
+            store.lock().open_period().unwrap().is_none(),
+            "停用不開離線期間"
+        );
+        t.succeeded();
+        assert!(store.lock().event_batch(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn disabled_response_ends_outage() {
+        let (_d, store, t) = setup();
+        t.observe_failure(&SendError::Retry("IO error: (os error 10060)".into()));
+        backdate(&store, 3600);
+        // 網路恢復後第一個回應就是停用:主機已可連上,離線期間到此結束
+        t.observe_failure(&SendError::Rejected(
+            r#"HTTP 403 {"code":"ITA_DEVICE_DISABLED"}"#.into(),
+        ));
+        assert!(store.lock().open_period().unwrap().is_none());
+        let ev = store.lock().event_batch(10).unwrap();
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0].kind, "offline_period");
+        assert_eq!(ev[0].data["reason"], "network");
+    }
+
+    #[test]
+    fn busy_does_not_touch_period() {
+        let (_d, store, t) = setup();
+        t.observe_failure(&SendError::Busy(
+            std::time::Duration::from_secs(30),
+            "HTTP 429".into(),
+        ));
+        assert!(store.lock().open_period().unwrap().is_none());
     }
 
     #[test]
