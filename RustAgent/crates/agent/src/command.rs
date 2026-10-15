@@ -339,8 +339,7 @@ async fn logs_collect(shared: &Shared, id: &str, p: &Value) -> Result<Value, Fai
             Err(e) => {
                 warn!("指令 {id} 日誌上傳失敗(第 {attempt} 次):{e}");
                 last = e.to_string();
-                // 主機拒絕(指令狀態、大小、雜湊不符)重試也不會成功
-                if matches!(e, SendError::Rejected(_)) || attempt == UPLOAD_ATTEMPTS {
+                if upload_permanent(&e) || attempt == UPLOAD_ATTEMPTS {
                     break;
                 }
                 tokio::time::sleep(e.wait(&mut backoff).min(Duration::from_secs(60))).await;
@@ -348,6 +347,20 @@ async fn logs_collect(shared: &Shared, id: &str, p: &Value) -> Result<Value, Fai
         }
     }
     Err(fail("UPLOAD_FAILED", last))
+}
+
+/// 上傳重試也不會成功的錯誤:主機拒絕(400 / 401 / 403)、指令不存在(404)、已結束(409 ITA_COMMAND_NOT_RUNNING)、
+/// 超過大小(413)。409 ITA_COMMAND_FILE_EXISTS(另一個上傳進行中)可能是暫時的,照常重試
+fn upload_permanent(e: &SendError) -> bool {
+    match e {
+        SendError::Rejected(_) => true,
+        SendError::Retry(m) => {
+            m.starts_with("HTTP 404")
+                || m.starts_with("HTTP 413")
+                || m.contains("ITA_COMMAND_NOT_RUNNING")
+        }
+        SendError::Busy(..) => false,
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -624,5 +637,45 @@ mod tests {
             message_params(&json!({ "text": long }), None).is_ok(),
             "以字元計,不以位元組"
         );
+    }
+
+    #[test]
+    fn upload_errors_that_are_not_retried() {
+        use rustit_common::transport::classify;
+        assert!(upload_permanent(&classify(
+            400,
+            r#"{"code":"ITA_FILE_HASH_MISMATCH"}"#,
+            None
+        )));
+        assert!(upload_permanent(&classify(
+            404,
+            r#"{"code":"ITA_COMMAND_NOT_FOUND"}"#,
+            None
+        )));
+        assert!(upload_permanent(&classify(
+            413,
+            r#"{"code":"ITA_FILE_TOO_LARGE"}"#,
+            None
+        )));
+        assert!(upload_permanent(&classify(
+            409,
+            r#"{"code":"ITA_COMMAND_NOT_RUNNING"}"#,
+            None
+        )));
+        assert!(!upload_permanent(&classify(
+            409,
+            r#"{"code":"ITA_COMMAND_FILE_EXISTS"}"#,
+            None
+        )));
+        assert!(!upload_permanent(&classify(503, "", None)));
+        assert!(!upload_permanent(&classify(429, "", None)));
+    }
+
+    #[test]
+    fn log_levels() {
+        assert_eq!(parse_level("debug"), Some(LevelFilter::Debug));
+        assert_eq!(parse_level("trace"), Some(LevelFilter::Trace));
+        assert_eq!(parse_level("info"), None, "只允許調高");
+        assert_eq!(level_name(LevelFilter::Info), "info");
     }
 }

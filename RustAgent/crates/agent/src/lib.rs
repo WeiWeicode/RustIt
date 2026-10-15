@@ -43,6 +43,8 @@ use tokio::sync::{Notify, mpsc, watch};
 
 /// 以 Windows 服務執行(service.rs 設定);前景模式不支援 agent.restart
 pub static SERVICE_MODE: AtomicBool = AtomicBool::new(false);
+/// 設定檔的日誌等級(第一次 run 時記下;agent.log_level 到期恢復用)
+static BASE_LOG_LEVEL: std::sync::OnceLock<log::LevelFilter> = std::sync::OnceLock::new();
 /// 依指令 agent.restart 結束:服務以專屬結束代碼停止,由失敗復原重新啟動
 pub static RESTART_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -191,7 +193,8 @@ pub async fn run(settings: Settings, mut shutdown: watch::Receiver<bool>) -> Res
         clock_known: AtomicBool::new(false),
         started: std::time::Instant::now(),
         tls: settings.tls.clone(),
-        base_log_level: log::max_level(),
+        // 同一行程第一次啟動時的等級(設定檔);之後即使暫時等級生效中也不會誤抓
+        base_log_level: *BASE_LOG_LEVEL.get_or_init(log::max_level),
         collect_now: collect_tx,
         last_upload: std::sync::Mutex::new(None),
         command_notify: Notify::new(),

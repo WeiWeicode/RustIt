@@ -98,7 +98,7 @@
 | `days` | integer 1–14 | | 最近幾天(含今天),預設 3;日誌只保留 14 天 |
 
 - 流程:`acked` → `running` → 日誌目錄最近 `days` 天的 `agent-YYYY-MM-DD.log` 壓成一個 zip → `POST /agent/v1/commands/{commandId}/files` → `succeeded`。Watchdog 日誌待 P5 再加參數。
-- **遮罩**(第二道防線;日誌本來就不可含私鑰與 Token,`AGENT.md` §7.1):`-----BEGIN … PRIVATE KEY-----` 到 `-----END … PRIVATE KEY-----` 整段、`Bearer <值>`、`token=` / `password=` / `secret=` 之後的值(不分大小寫)替換為 `***`。
+- **遮罩**(第二道防線;日誌本來就不可含私鑰與 Token,`AGENT.md` §7.1):`-----BEGIN … PRIVATE KEY-----` 到 `-----END … PRIVATE KEY-----` 整段、`Bearer` / `Basic` 之後的值、鍵 `token` / `password` / `passwd` / `pwd` / `secret` / `api_key` / `api-key` / `apikey` 接 `=` 或 `:`(前後可有空白,含 JSON `"token":"值"`)的值,不分大小寫,替換為 `***`。
 - 壓縮後上限 20 MB:超過時從最舊的日期開始捨棄,`truncated = true`。指定天數內沒有任何日誌 → `failed NO_LOGS`;上傳重試 3 次仍失敗 → `failed UPLOAD_FAILED`。
 - `result`:`{ "file_id", "file_name", "size_bytes", "sha256", "days_included", "truncated" }`(範例 `ws-command-update-logs.sample.json`)。
 
@@ -118,7 +118,7 @@
 
 | 方向 | API | 說明 |
 | --- | --- | --- |
-| Agent → 主機 | `POST /agent/v1/commands/{commandId}/files`(`:9443` mTLS) | 本體為 zip 原始位元組(`Content-Type: application/zip`)、標頭 `x-file-sha256`;上限 20 MB。只接受屬於此裝置、kind 為 `logs.collect`、狀態 `acked` / `running` 的指令。回 `201`(`command-file.schema.json`)。錯誤:`404 ITA_COMMAND_NOT_FOUND`、`409 ITA_COMMAND_NOT_RUNNING`、`400 ITA_COMMAND_FILE_NOT_ALLOWED`、`400 ITA_FILE_HASH_MISMATCH`、`409 ITA_COMMAND_FILE_EXISTS`(同一指令已有不同內容的檔;相同內容回同一個 `file_id`)、`413 ITA_FILE_TOO_LARGE`、`503 ITA_STORAGE_UNAVAILABLE` |
+| Agent → 主機 | `POST /agent/v1/commands/{commandId}/files`(`:9443` mTLS) | 本體為 zip 原始位元組(`Content-Type: application/zip`、必須帶 `Content-Length`,否則 `411 ITA_LENGTH_REQUIRED`)、標頭 `x-file-sha256`;上限 20 MB。只接受屬於此裝置、kind 為 `logs.collect`、狀態 `acked` / `running` 的指令。回 `201`(`command-file.schema.json`)。錯誤:`404 ITA_COMMAND_NOT_FOUND`、`409 ITA_COMMAND_NOT_RUNNING`、`400 ITA_COMMAND_FILE_NOT_ALLOWED`、`400 ITA_FILE_HASH_MISMATCH`、`409 ITA_COMMAND_FILE_EXISTS`(同一指令已有不同內容的檔;相同內容回同一個 `file_id`)、`413 ITA_FILE_TOO_LARGE`、`503 ITA_STORAGE_UNAVAILABLE` |
 | IT → 主機 | `GET /api/endpoint/commands/{commandId}/files/{fileId}`(BFF 權限 `endpoint.device.read`) | 下載(`Content-Disposition: attachment`);過期 `410 ITA_COMMAND_FILE_EXPIRED`。`GET /commands/{commandId}` 回應的 `files` 列出附檔 |
 
 - 檔名與存放路徑由主機產生(不採用 Agent 給的名稱);保存 14 天(`COMMAND_FILE_KEEP_DAYS` 14–30,B5),到期刪除檔案,指令紀錄與 `result` 保留。

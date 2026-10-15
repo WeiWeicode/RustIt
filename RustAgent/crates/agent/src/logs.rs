@@ -16,8 +16,12 @@ pub const MAX_ZIP_BYTES: usize = 20 * 1024 * 1024;
 /// 預留給 zip 中央目錄等結構
 const ZIP_OVERHEAD: usize = 64 * 1024;
 const MASK: &str = "***";
-/// `key=value` 形式要遮罩值的鍵(不分大小寫)
-const SECRET_KEYS: [&str; 3] = ["token=", "password=", "secret="];
+/// 認證方式:之後的一個值遮罩(`Authorization: Bearer <值>`、`Basic <值>`)
+const AUTH_SCHEMES: [&str; 2] = ["bearer ", "basic "];
+/// 要遮罩值的鍵(不分大小寫);後面接 `=` 或 `:` 才算,前後可有空白,也涵蓋 JSON 的 `"token":"值"`
+const SECRET_KEYS: [&str; 8] = [
+    "token", "password", "passwd", "pwd", "secret", "api_key", "api-key", "apikey",
+];
 
 /// 日誌目錄中最近 `days` 天(含今天)的日誌檔,新到舊
 pub fn select_files(
@@ -43,7 +47,7 @@ pub fn select_files(
     files
 }
 
-/// 遮罩私鑰區塊、`Bearer <值>`、`token=` / `password=` / `secret=` 之後的值
+/// 遮罩私鑰區塊、`Bearer` / `Basic` 之後的值、`token` / `password` / `passwd` / `pwd` / `secret` / `api_key` 等鍵(`=` 或 `:`)的值
 pub fn redact(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut in_key = false;
@@ -70,7 +74,11 @@ fn value_span(line: &str, start: usize) -> (usize, usize) {
     let rest = &line[start..];
     if let Some(q) = rest.chars().next().filter(|c| matches!(c, '"' | '\'')) {
         let s = start + 1;
-        return (s, s + line[s..].find(q).unwrap_or(line.len() - s));
+        // 沒有結尾引號時到行尾為止,保留換行
+        let end = line[s..]
+            .find(q)
+            .unwrap_or(line.trim_end_matches(['\r', '\n']).len().max(s) - s);
+        return (s, s + end);
     }
     let len = rest
         .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ';' | '&' | ')' | '}'))
@@ -78,26 +86,54 @@ fn value_span(line: &str, start: usize) -> (usize, usize) {
     (start, start + len)
 }
 
+/// 鍵之後的分隔:可選的結尾引號(JSON 鍵)、空白、`=` 或 `:`、空白;回傳值的開始位置,不是分隔則 None
+fn after_separator(line: &str, after_key: usize) -> Option<usize> {
+    let b = line.as_bytes();
+    let skip_space = |mut i: usize| {
+        while i < b.len() && matches!(b[i], b' ' | b'\t') {
+            i += 1;
+        }
+        i
+    };
+    let mut i = after_key;
+    if i < b.len() && matches!(b[i], b'"' | b'\'') {
+        i += 1;
+    }
+    i = skip_space(i);
+    if i < b.len() && matches!(b[i], b'=' | b':') {
+        Some(skip_space(i + 1))
+    } else {
+        None
+    }
+}
+
 fn redact_line(line: &str) -> String {
     let lower = line.to_ascii_lowercase();
     // (開始, 結束) 要換成 *** 的範圍;to_ascii_lowercase 不改變位元組位置
     let mut spans: Vec<(usize, usize)> = Vec::new();
-    let mut from = 0;
-    while let Some(i) = lower[from..].find("bearer ") {
-        let (start, end) = value_span(line, from + i + "bearer ".len());
-        if end > start {
-            spans.push((start, end));
-        }
-        from = end.max(start);
-    }
-    for key in SECRET_KEYS {
+    for scheme in AUTH_SCHEMES {
         let mut from = 0;
-        while let Some(i) = lower[from..].find(key) {
-            let (start, end) = value_span(line, from + i + key.len());
+        while let Some(i) = lower[from..].find(scheme) {
+            let (start, end) = value_span(line, from + i + scheme.len());
             if end > start {
                 spans.push((start, end));
             }
             from = end.max(start);
+        }
+    }
+    for key in SECRET_KEYS {
+        let mut from = 0;
+        while let Some(i) = lower[from..].find(key) {
+            let after = from + i + key.len();
+            from = after;
+            let Some(value) = after_separator(line, after) else {
+                continue;
+            };
+            let (start, end) = value_span(line, value);
+            if end > start {
+                spans.push((start, end));
+            }
+            from = end.max(after);
         }
     }
     if spans.is_empty() {
@@ -158,6 +194,9 @@ pub fn bundle(files: &[(NaiveDate, PathBuf)], max: usize) -> Result<Bundle, Stri
         }
         total += part.len();
         parts.push(part);
+    }
+    if parts.is_empty() && truncated {
+        return Err(format!("最新一天的日誌壓縮後仍超過上限 {max} bytes"));
     }
     let mut w = ZipWriter::new(Cursor::new(Vec::new()));
     for part in &parts {
@@ -228,6 +267,31 @@ mod tests {
         assert!(r.contains("普通訊息"));
         assert_eq!(redact("TOKEN=Abc\n"), "TOKEN=***\n", "不分大小寫");
         assert_eq!(
+            redact(r#"{"password":"x1","user":"u"}"#),
+            r#"{"password":"***","user":"u"}"#,
+            "JSON"
+        );
+        assert_eq!(redact("token: abc def"), "token: *** def");
+        assert_eq!(redact("token= abc"), "token= ***", "等號後有空白");
+        assert_eq!(
+            redact("Authorization: Basic dXNlcjpw"),
+            "Authorization: Basic ***"
+        );
+        assert_eq!(
+            redact("pwd=1 api-key = k2 ApiKey:k3"),
+            "pwd=*** api-key = *** ApiKey:***"
+        );
+        assert_eq!(
+            redact("tokens 5 筆、token 已更新"),
+            "tokens 5 筆、token 已更新",
+            "沒有分隔符號不遮罩"
+        );
+        assert_eq!(
+            redact("password=\"abc\nnext\n"),
+            "password=\"***\nnext\n",
+            "引號未閉合時保留換行"
+        );
+        assert_eq!(
             redact("-----BEGIN EC PRIVATE KEY-----\nzz\n"),
             "[已遮罩:私鑰]\n",
             "沒有結尾也不輸出內容"
@@ -275,5 +339,9 @@ mod tests {
         );
         let mut a = ZipArchive::new(Cursor::new(cut.bytes)).unwrap();
         assert!(a.by_name("agent-2026-10-15.log").is_ok());
+        assert!(
+            bundle(&files, ZIP_OVERHEAD + 10).is_err(),
+            "一天都放不下時失敗,不上傳空 zip"
+        );
     }
 }

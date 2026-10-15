@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { loadGatewayEnv, loadMonitorEnv, type GatewayIdentity } from '@giganexus/backend-sdk';
 import { Ajv } from 'ajv';
@@ -139,6 +140,14 @@ describe('指令附檔上傳(:51241)', () => {
     const tooBig = await upload(id, big);
     assert.deepEqual([tooBig.statusCode, tooBig.json().code], [413, 'ITA_FILE_TOO_LARGE']);
     assert.equal((await upload(id, zip, sha(zip), {})).statusCode, 401);
+    const chunked = await agent.inject({
+      method: 'POST',
+      url: `/agent/v1/commands/${id}/files`,
+      // 串流本體:不帶 Content-Length(分段傳送)
+      headers: { ...certHeaders(), 'content-type': 'application/zip', 'x-file-sha256': sha(zip) },
+      payload: Readable.from([zip]),
+    });
+    assert.deepEqual([chunked.statusCode, chunked.json().code], [411, 'ITA_LENGTH_REQUIRED']);
     assert.equal(env.store.files.length, 0);
     const left = readdirSync(env.filesDir, { recursive: true }).filter((n) => String(n).endsWith('.zip') || String(n).endsWith('.part'));
     assert.deepEqual(left, []);

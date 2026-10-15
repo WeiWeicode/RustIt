@@ -102,7 +102,10 @@ export class CommandFileService {
   ): Promise<UploadResult> {
     const sha = (sha256 ?? '').trim().toLowerCase();
     if (!SHA256.test(sha)) throw new AppError(400, 'VALIDATION_FAILED', 'x-file-sha256 必須是 64 位 hex');
-    if (contentLength !== undefined && contentLength > FILE_MAX_BYTES) throw new AppError(413, 'ITA_FILE_TOO_LARGE', `附檔超過上限 ${FILE_MAX_BYTES} bytes`);
+    // 必須帶 Content-Length:提早拒絕時丟棄的本體也受限於宣告的長度(未計量的分段傳送不接受)
+    if (contentLength === undefined || !Number.isSafeInteger(contentLength) || contentLength < 0)
+      throw new AppError(411, 'ITA_LENGTH_REQUIRED', '附檔上傳需要 Content-Length');
+    if (contentLength > FILE_MAX_BYTES) throw new AppError(413, 'ITA_FILE_TOO_LARGE', `附檔超過上限 ${FILE_MAX_BYTES} bytes`);
     const cmd = await this.sqlDo(ctx, 'command.get', () => this.store.getCommand(commandId));
     // 不屬於這台裝置的指令一律當作不存在(防止一台電腦替別台上傳)
     if (!cmd || cmd.deviceRef !== device.id) throw new AppError(404, 'ITA_COMMAND_NOT_FOUND', '找不到此指令');

@@ -233,15 +233,15 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
         async (req, reply) => {
           const length = req.headers['content-length'] === undefined ? undefined : Number(req.headers['content-length']);
           const sha = req.headers['x-file-sha256'];
-          const r = await files.upload(
-            ctxOf(req),
-            req.device!,
-            req.params.commandId.toLowerCase(),
-            typeof sha === 'string' ? sha : undefined,
-            length,
-            req.body as Readable,
-          );
-          return reply.status(201).send(r);
+          const body = req.body as Readable;
+          try {
+            const r = await files.upload(ctxOf(req), req.device!, req.params.commandId.toLowerCase(), typeof sha === 'string' ? sha : undefined, length, body);
+            return reply.status(201).send(r);
+          } catch (err) {
+            // 提早拒絕(格式、權限、狀態)時丟棄未讀的本體,不寫入任何地方
+            body.resume();
+            throw err;
+          }
         },
       );
     });

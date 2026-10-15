@@ -183,7 +183,7 @@ stateDiagram-v2
 
 ### 8.1 附檔上傳與存放
 
-- `POST /agent/v1/commands/{commandId}/files`(`:9443` → `:51241`,裝置憑證):本體為 zip 原始位元組、標頭 `x-file-sha256`。只接受屬於此裝置、`kind` 允許附檔(`kinds.ts` 的 `files`)、狀態 `acked` / `running` 的指令;串流寫暫存檔並計算 SHA-256 與大小(20 MB),相符才搬到 `<COMMAND_FILES_DIR>/<yyyy>/<MM>/<file_id>.zip`,再寫 `ita.command_file`(SQL 失敗刪檔、503)。每筆指令一個檔,重送相同內容回同一個 `file_id`;同一指令同時只處理一個上傳。檔名與路徑由主機產生。
+- `POST /agent/v1/commands/{commandId}/files`(`:9443` → `:51241`,裝置憑證):本體為 zip 原始位元組、必須帶 `Content-Length`(否則 `411 ITA_LENGTH_REQUIRED`)、標頭 `x-file-sha256`。只接受屬於此裝置、`kind` 允許附檔(`kinds.ts` 的 `files`)、狀態 `acked` / `running` 的指令;串流寫暫存檔並計算 SHA-256 與大小(20 MB),相符才搬到 `<COMMAND_FILES_DIR>/<yyyy>/<MM>/<file_id>.zip`,再寫 `ita.command_file`(SQL 失敗刪檔、503)。每筆指令一個檔,重送相同內容回同一個 `file_id`;同一指令同時只處理一個上傳。檔名與路徑由主機產生。
 - 存放:容器 `/data/command-files`,Docker volume `ita_command_files`(`deploy/docker-compose.yml`;Dockerfile 預先建立目錄給 `node`);dev 預設 `ItAgentBack/data/dev/command-files`(已在 .gitignore)。不放 Mongo GridFS(Mongo 只放可重建的資料)。
 - 保存:`COMMAND_FILE_KEEP_DAYS` 14–30,預設 14(B5);每小時刪除到期檔案與索引列,並清除超過 1 小時的上傳暫存檔;`ita.command` 紀錄與 `result` 保留。
 - Gateway 不用改:`:9443` 的 `client_max_body_size 0`(上限由本服務決定),BFF 代理以串流回傳二進位。
@@ -196,6 +196,13 @@ stateDiagram-v2
 
 ### 8.3 日誌不含私鑰與 Token
 
-- 日誌本來就不可記錄私鑰、Token(`AGENT.md` §7.1);`logs.collect` 再逐行遮罩:`-----BEGIN … PRIVATE KEY-----` 整段、`Bearer <值>`、`token=` / `password=` / `secret=` 之後的值(含引號包住的值),不分大小寫。
+- 日誌本來就不可記錄私鑰、Token(`AGENT.md` §7.1);`logs.collect` 再逐行遮罩:`-----BEGIN … PRIVATE KEY-----` 整段、`Bearer` / `Basic` 之後的值、鍵 `token` / `password` / `passwd` / `pwd` / `secret` / `api_key` / `api-key` / `apikey` 接 `=` 或 `:`(前後可有空白、JSON 引號)的值,不分大小寫。
 - `agent.log_level` 調到 trace 時,第三方套件(HTTP、TLS、WebSocket)仍只記 warn 以上(`rustit_common::logging`),不會記下標頭或內容。
 - `agent.diagnose` 的 `cert` 只讀憑證到期日,不讀私鑰、不回傳憑證內容。
+
+### 8.4 審查後的修正(code-reviewer、security-auditor 子代理,2026-10-15)
+
+- 遮罩補 `key: value`、`key = value`、JSON `"key":"value"`、`Basic`、`passwd` / `pwd` / `api_key`;引號未閉合時保留換行。
+- 上傳必須帶 `Content-Length`(411):提早拒絕或重送相同內容時丟棄的本體受宣告長度限制;提早拒絕時丟棄未讀本體。
+- Agent 上傳:404、413、409 `ITA_COMMAND_NOT_RUNNING` 不重試(只有 409 `ITA_COMMAND_FILE_EXISTS` 與網路 / 5xx 重試);上傳逾時依大小放寬(每秒 100 KB 估算,至少 60 秒);最新一天壓縮後就超過上限時失敗,不上傳空 zip;設定檔日誌等級以行程第一次啟動時為準(`OnceLock`)。
+- **未處理(列為後續)**:慢速上傳佔住回報併發名額(上傳專用逾時或併發上限,Nginx 端 body 逾時屬 Gateway repo);`ita.command_file.command_ref` 唯一索引(目前以單一實例的程序內鎖保證一指令一檔,多實例前需 migration);附檔目錄總量 / 剩餘空間檢查(507)與磁碟告警;下載權限是否另設 `endpoint.command.file.read`(需求方已定 `endpoint.device.read`,上線前可再檢討);`agent.log_level` 套用與到期恢復的單元測試(需 Shared 測試替身)。

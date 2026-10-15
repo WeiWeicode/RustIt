@@ -196,6 +196,8 @@ impl Transport {
             .http
             .post(url)
             .header("content-type", content_type)
+            // 大檔在慢速網路(VPN、Wi-Fi)以每秒 100 KB 估算,至少 60 秒
+            .timeout(Duration::from_secs((body.len() as u64 / 100_000).max(60)))
             .body(body);
         for (k, v) in self
             .extra_headers
