@@ -15,6 +15,8 @@ gen/
 # RustAgent:本機 Agent 設定與裝置憑證(範本 agent.example.toml、agent.dev.toml 進版控)
 /RustAgent/crates/agent/agent.toml
 /RustAgent/crates/agent/pki/
+# 前景執行 Agent(agent.dev.toml)的本機狀態:store.db、store.key(DPAPI 保護的本機加密金鑰)
+/RustAgent/crates/agent/state/
 
 # ItAgentBack(Node.js):相依、建置輸出、本機 Mongo / Redis 資料、Docker secret
 /ItAgentBack/node_modules
