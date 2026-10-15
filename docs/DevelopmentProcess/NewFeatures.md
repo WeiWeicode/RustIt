@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-15 P4-2:測試區 VM 驗證(含 P4-1 服務模式 agent.restart)
+- 內容:P4-2 合併 develop 後,重建 0.4.0 測試區 MSI 並放到主機 2,VM `DESKTOP-1TB2UMP` 由 0.2.0 升級。部署時發現 endpoint-api 自動註冊被 Gateway 拒絕,修正後(MR !17)Gateway 發佈 v51(8 條指令路由);GigaItApp MR !1 以按鈕節點 `it.endpoint-device.command` 把 `endpoint.command.basic` 授予 it-admin(需求方同意只改 RBAC)。
+- 檔案:`docs/HANDOFF.md`(「P4 測試區 VM 驗證」)
+- 驗證:六項全部通過(詳見 HANDOFF):`agent.diagnose`(cert 讀 `LocalMachine\My`、gateway 經 :9443)、`logs.collect` 上傳與下載、`agent.log_level` 調高 / 重啟沿用 / 到期恢復、`agent.restart` 服務模式重啟與重送去重、離線排隊與恢復後補送。待辦:zip 內檔案時間 1980-01-01、瞬間完成的指令沒有 started_at。
+
 ## 2026-10-15 P4-2:遠端診斷(agent.diagnose、logs.collect、agent.log_level)
 - 內容:依 `docs/P4-COMMAND-DESIGN.md` §8(需求方確認:類型定義、Rust 相依 `zip`、附檔放 Docker volume 保存 14 天、下載權限 `endpoint.device.read`)。契約:`command-kinds.md` 定義三個類型(params / result / 期限 / 每台上限 1)與錯誤代碼 `NO_LOGS`、`UPLOAD_FAILED`、指令附檔;新增 `command-file.schema.json`(上傳回應)與範例 `command-file-response`、`ws-command-log-level`、`ws-command-update-diagnose`、`ws-command-update-logs`;`ws-envelope` 只改說明。ItAgentBack:`kinds.ts` 加三個類型(`logs.collect` 標記可附檔);`CommandFileService`:Agent 上傳 `POST /agent/v1/commands/{id}/files`(zip 原始位元組 + `x-file-sha256`;只接受同一裝置、可附檔類型、acked / running;串流計算 SHA-256 與 20 MB 上限;主機產生檔名與路徑;每指令一檔、重送冪等;SQL 失敗刪檔 503)、下載 `GET /v1/commands/{id}/files/{fileId}`(`endpoint.device.read`、`x-audit-level: meta`、attachment / nosniff / no-store;404 / 410)、`GET /v1/commands/{id}` 帶 `files`、每小時清除到期檔與暫存檔;`SqlCommandStore` 實作 `ita.command_file`(0003 已建,不需新 migration);設定 `COMMAND_FILES_DIR`(test / prod 必填)、`COMMAND_FILE_KEEP_DAYS`(14–30);compose volume `ita_command_files`、Dockerfile 建立目錄。Agent 0.4.0:`diagnose.rs`(gateway `GET /healthz`、AD 網域 DNS、時鐘偏差、裝置憑證到期、系統磁碟、WMI、本機暫存;各項逾時獨立)、`logs.rs`(最近 N 天日誌、逐行遮罩私鑰 / Bearer / token= / password= / secret=、每天壓縮一次再合併、超過 20 MB 捨棄最舊日期)、上傳重試 3 次(4xx 不重試)、`agent.log_level`(本機 kv 保存、重啟後沿用、每分鐘檢查到期恢復設定檔等級);common `Transport::post_bytes` / `get_status`、`tls::device_cert_not_after`;collector `system_volume`、`wmi_probe`(只新增函式)。
 - 版本:rustit-agent 0.4.0。新相依 `zip` 9(只開 `deflate-flate2-zlib-rs`,不含 zopfli 與其他壓縮法)。
