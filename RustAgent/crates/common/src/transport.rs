@@ -177,20 +177,58 @@ impl Transport {
             .send()
             .await
             .map_err(|e| SendError::Retry(format!("回報連線失敗:{}", error_chain(&e))))?;
-        let status = res.status();
-        if status.is_success() {
-            return res
-                .json::<Res>()
-                .await
-                .map_err(|e| SendError::Retry(format!("回應格式錯誤:{e}")));
+        read_json(res).await
+    }
+
+    /// `POST <server><path>`,本體為原始位元組(指令附檔,P4-2;`docs/contracts/command-file.schema.json`)
+    pub async fn post_bytes<Res: DeserializeOwned>(
+        &self,
+        path: &str,
+        content_type: &str,
+        headers: &[(&str, String)],
+        body: Vec<u8>,
+    ) -> Result<Res, SendError> {
+        let url = self
+            .server
+            .join(path)
+            .map_err(|e| SendError::Rejected(format!("路徑錯誤 {path}:{e}")))?;
+        let mut rb = self
+            .http
+            .post(url)
+            .header("content-type", content_type)
+            // 大檔在慢速網路(VPN、Wi-Fi)以每秒 100 KB 估算,至少 60 秒
+            .timeout(Duration::from_secs((body.len() as u64 / 100_000).max(60)))
+            .body(body);
+        for (k, v) in self
+            .extra_headers
+            .iter()
+            .map(|(k, v)| (*k, v))
+            .chain(headers.iter().map(|(k, v)| (*k, v)))
+        {
+            rb = rb.header(k, v);
         }
-        let retry_after = res
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string);
-        let body = res.text().await.unwrap_or_default();
-        Err(classify(status.as_u16(), &body, retry_after.as_deref()))
+        let res = rb
+            .send()
+            .await
+            .map_err(|e| SendError::Retry(format!("上傳連線失敗:{}", error_chain(&e))))?;
+        read_json(res).await
+    }
+
+    /// `GET <server><path>`,只回傳 HTTP 狀態(遠端診斷 agent.diagnose 的 Gateway 檢查)
+    pub async fn get_status(&self, path: &str) -> Result<u16, SendError> {
+        let url = self
+            .server
+            .join(path)
+            .map_err(|e| SendError::Rejected(format!("路徑錯誤 {path}:{e}")))?;
+        let mut rb = self.http.get(url);
+        for (k, v) in &self.extra_headers {
+            rb = rb.header(*k, v);
+        }
+        let res = rb
+            .send()
+            .await
+            .map_err(|e| SendError::Retry(format!("連線失敗:{}", error_chain(&e))))?;
+        Ok(res.status().as_u16())
     }
 
     /// WebSocket 位址:`<server><path>`,https → wss、http → ws
@@ -252,6 +290,24 @@ impl Transport {
             Err(e) => Err(SendError::Retry(format!("WebSocket 連線失敗:{e}"))),
         }
     }
+}
+
+/// 成功回傳解析後的 JSON,失敗依 §4.2 分類
+async fn read_json<Res: DeserializeOwned>(res: reqwest::Response) -> Result<Res, SendError> {
+    let status = res.status();
+    if status.is_success() {
+        return res
+            .json::<Res>()
+            .await
+            .map_err(|e| SendError::Retry(format!("回應格式錯誤:{e}")));
+    }
+    let retry_after = res
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let body = res.text().await.unwrap_or_default();
+    Err(classify(status.as_u16(), &body, retry_after.as_deref()))
 }
 
 /// 錯誤連同底層原因(例 reqwest 的「error sending request」之下的 DNS / 連線 / TLS 錯誤),供日誌與離線原因分類

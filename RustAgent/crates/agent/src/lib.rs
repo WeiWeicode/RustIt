@@ -5,7 +5,8 @@
 //!   - WebSocket([`ws`]):`hello`(端點時間、硬體指紋)+ 每 30 秒 `heartbeat`,斷線退避重連;`hello_ack` 的主機設定寫入本機
 //!   - 端點事件([`events`]):本機暫存 → `POST /agent/v1/events`
 //!   - USB 插拔([`usb`]):每 10 秒比對可移除磁碟區
-//!   - 指令([`command`],P4):WebSocket 收到 `command` 在背景執行,結果先寫本機再經 WebSocket 回報
+//!   - 指令([`command`],P4):WebSocket 收到 `command` 在背景執行,結果先寫本機再經 WebSocket 回報;
+//!     遠端診斷([`diagnose`]、[`logs`],P4-2)。另有每分鐘檢查暫時日誌等級是否到期
 //!
 //! 共用一個 `rustit_common::transport::Transport`(同一個 rustls 設定)。蒐集一律經 rustit-collector,Agent 不直接呼叫 WMI。
 //! 連不上主機時照常蒐集與記錄,恢復後補傳並回報離線期間([`conn`],PLATFORM-PLAN §4.2)。
@@ -14,8 +15,10 @@
 mod command;
 mod conn;
 mod crypto;
+mod diagnose;
 mod events;
 mod inventory;
+mod logs;
 pub mod protocol;
 #[cfg(windows)]
 pub mod service;
@@ -29,7 +32,7 @@ use crate::protocol::{AgentSettings, now_rfc3339};
 use crate::store::{CONN_LOG_DAYS, SharedStore, Store};
 use log::{info, warn};
 use rustit_common::backoff;
-use rustit_common::config::Settings;
+use rustit_common::config::{Settings, TlsSettings};
 use rustit_common::stop::{RUNTIME_SHUTDOWN, StopSignal, wait, with_grace};
 use rustit_common::transport::{SendError, Transport};
 use serde_json::json;
@@ -40,6 +43,8 @@ use tokio::sync::{Notify, mpsc, watch};
 
 /// 以 Windows 服務執行(service.rs 設定);前景模式不支援 agent.restart
 pub static SERVICE_MODE: AtomicBool = AtomicBool::new(false);
+/// 設定檔的日誌等級(第一次 run 時記下;agent.log_level 到期恢復用)
+static BASE_LOG_LEVEL: std::sync::OnceLock<log::LevelFilter> = std::sync::OnceLock::new();
 /// 依指令 agent.restart 結束:服務以專屬結束代碼停止,由失敗復原重新啟動
 pub static RESTART_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -55,6 +60,14 @@ pub(crate) struct Shared {
     disabled: AtomicBool,
     /// 最近一次 hello_ack 的時鐘偏差(端點 − 主機,毫秒);判斷指令是否過期用
     pub clock_skew_ms: AtomicI64,
+    /// 已收到過 hello_ack(clock_skew_ms 有意義;agent.diagnose)
+    pub clock_known: AtomicBool,
+    /// 啟動時間(agent.diagnose uptime)
+    pub started: std::time::Instant,
+    /// 裝置憑證設定(agent.diagnose 讀到期日;開發模式 http 為 None)
+    pub tls: Option<TlsSettings>,
+    /// 設定檔的日誌等級(agent.log_level 到期後恢復)
+    pub base_log_level: log::LevelFilter,
     /// 指令 inventory.collect:要求資產迴圈立即蒐集
     pub collect_now: mpsc::Sender<inventory::CollectRequest>,
     /// 最近一次上傳的 (agent_seq, 主機結果)
@@ -177,14 +190,20 @@ pub async fn run(settings: Settings, mut shutdown: watch::Receiver<bool>) -> Res
         last_acked_seq: AtomicU64::new(0),
         disabled: AtomicBool::new(disabled),
         clock_skew_ms: AtomicI64::new(0),
+        clock_known: AtomicBool::new(false),
+        started: std::time::Instant::now(),
+        tls: settings.tls.clone(),
+        // 同一行程第一次啟動時的等級(設定檔);之後即使暫時等級生效中也不會誤抓
+        base_log_level: *BASE_LOG_LEVEL.get_or_init(log::max_level),
         collect_now: collect_tx,
         last_upload: std::sync::Mutex::new(None),
         command_notify: Notify::new(),
         exclusive: tokio::sync::Mutex::new(()),
         stop: stop_tx,
     });
-    // 上次的 agent.restart 回報成功、中途停止的指令回報失敗(重連後送出)
+    // 上次的 agent.restart 回報成功、中途停止的指令回報失敗(重連後送出);未到期的暫時日誌等級重新套用
     command::recover(&shared);
+    command::apply_log_level(&shared);
     {
         let shared = shared.clone();
         let mut external = shutdown.clone();
@@ -236,10 +255,23 @@ pub async fn run(settings: Settings, mut shutdown: watch::Receiver<bool>) -> Res
         stop_rx.clone(),
     ));
     let ev = tokio::spawn(events::run(shared.clone(), stop_rx.clone()));
-    let usb = tokio::spawn(usb::run(shared.events.clone(), settings_rx, stop_rx));
-    let (a, b, c, d) = tokio::join!(inv, ws, ev, usb);
+    let usb = tokio::spawn(usb::run(
+        shared.events.clone(),
+        settings_rx,
+        stop_rx.clone(),
+    ));
+    let level = tokio::spawn(log_level_task(shared.clone(), stop_rx));
+    let (a, b, c, d, e) = tokio::join!(inv, ws, ev, usb, level);
     a.and(b)
         .and(c)
         .and(d)
+        .and(e)
         .map_err(|e| format!("背景工作異常結束:{e}"))
+}
+
+/// 每分鐘檢查 agent.log_level 的暫時等級是否到期
+async fn log_level_task(shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
+    while !wait(std::time::Duration::from_secs(60), &mut stop).await {
+        command::apply_log_level(&shared);
+    }
 }

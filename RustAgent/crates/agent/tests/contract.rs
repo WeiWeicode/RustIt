@@ -4,7 +4,7 @@
 use rustit_agent::protocol::{
     CommandBody, CommandUpdate, CommandUpdateAck, Envelope, EventOut, EventsRequest,
     EventsResponse, HelloAck, HelloBody, InventoryRequest, InventoryResponse, PrepareShutdown,
-    SyncPending, SyncRequest, SyncResponse,
+    SyncPending, SyncRequest, SyncResponse, UploadResponse, command_files_path,
 };
 use rustit_collector::{ComputerInfo, NetAdapter, Software};
 use serde_json::{Value, json};
@@ -262,5 +262,35 @@ fn command_messages_match_contract() {
     assert_eq!(
         (ps.reason.as_str(), ps.reconnect_after_sec),
         ("server_restart", None)
+    );
+}
+
+/// P4-2:agent.log_level 指令可解析;agent.diagnose / logs.collect 的結果範例符合 schema;附檔上傳回應可解析
+#[test]
+fn diagnose_messages_match_contract() {
+    let cmd: Envelope =
+        serde_json::from_value(read("examples/ws-command-log-level.sample.json")).unwrap();
+    let body: CommandBody = serde_json::from_value(cmd.body.unwrap()).unwrap();
+    assert_eq!(
+        (body.kind.as_str(), body.params["level"].as_str()),
+        ("agent.log_level", Some("debug"))
+    );
+    for f in ["ws-command-update-diagnose", "ws-command-update-logs"] {
+        let v = read(&format!("examples/{f}.sample.json"));
+        assert_valid("ws-envelope.schema.json", &v);
+        let env: Envelope = serde_json::from_value(v).unwrap();
+        let u: CommandUpdate = serde_json::from_value(env.body.unwrap()).unwrap();
+        assert!(
+            serde_json::to_string(&u.result).unwrap().len() <= 4000,
+            "result 4,000 字元內"
+        );
+    }
+    let sample = read("examples/command-file-response.sample.json");
+    assert_valid("command-file.schema.json", &sample);
+    let r: UploadResponse = serde_json::from_value(sample).unwrap();
+    assert_eq!(r.sha256.len(), 64);
+    assert_eq!(
+        command_files_path("5b2e8c1d-4f3a-4e6b-9d7c-1a2b3c4d5e02"),
+        "/agent/v1/commands/5b2e8c1d-4f3a-4e6b-9d7c-1a2b3c4d5e02/files"
     );
 }

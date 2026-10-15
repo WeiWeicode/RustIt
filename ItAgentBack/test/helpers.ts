@@ -3,14 +3,18 @@
  * 真實的 SQL Server / Mongo / Redis 由整合測試(test/int/,npm run test:int)涵蓋。
  */
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { primaryIpv4, type InventoryRequest } from '../src/contracts.js';
 import { CommandDispatcher } from '../src/services/command-dispatcher.js';
+import { CommandFileService } from '../src/services/command-files.js';
 import { DeviceService } from '../src/services/device-service.js';
 import type {
   AgentEvent,
   BatchRecord,
+  CommandFileRecord,
+  CommandFileStore,
   CommandFilter,
   CommandPatch,
   CommandRecord,
@@ -24,6 +28,7 @@ import type {
   InventorySnapshot,
   NewBatch,
   NewCommand,
+  NewCommandFile,
   OnlineInfo,
   SnapshotStore,
   StateStore,
@@ -242,9 +247,10 @@ export function inventoryRequest(patch: Partial<InventoryRequest> = {}): Invento
 export const certHeaders = (fp = FP) => ({ 'x-client-cert-dn': DN, 'x-client-cert-fp': fp, 'x-client-verify': 'SUCCESS', 'x-request-id': 'req-agent-1' });
 
 /** 指令儲存(記憶體版,與 SqlCommandStore 相同的條件更新語意) */
-export class MemoryCommandStore extends Failable implements CommandStore {
+export class MemoryCommandStore extends Failable implements CommandStore, CommandFileStore {
   commands: (NewCommand & { id: number; batchRef: number | null; state: CommandState } & Partial<CommandRecord>)[] = [];
   batches: (NewBatch & { id: number; targetCount: number })[] = [];
+  files: (NewCommandFile & { id: number })[] = [];
   constructor(private readonly devices: MemoryDeviceStore) {
     super();
   }
@@ -377,6 +383,33 @@ export class MemoryCommandStore extends Failable implements CommandStore {
       .slice(0, limit)
       .map((c) => this.rec(c));
   }
+  private fileRec(f: MemoryCommandStore['files'][number]): CommandFileRecord {
+    return { ...f, commandId: this.commands.find((c) => c.id === f.commandRef)!.commandId };
+  }
+  async addFile(f: NewCommandFile) {
+    this.hit('addFile');
+    this.files.push({ ...f, id: this.files.length + 1 });
+  }
+  async listFiles(commandRef: number) {
+    this.hit('listFiles');
+    return this.files.filter((f) => f.commandRef === commandRef).map((f) => this.fileRec(f));
+  }
+  async getFile(fileId: string) {
+    this.hit('getFile');
+    const f = this.files.find((x) => x.fileId === fileId);
+    return f ? this.fileRec(f) : null;
+  }
+  async expiredFiles(now: Date, limit: number) {
+    this.hit('expiredFiles');
+    return this.files
+      .filter((f) => f.expiresAt <= now)
+      .slice(0, limit)
+      .map((f) => this.fileRec(f));
+  }
+  async deleteFile(id: number) {
+    this.hit('deleteFile');
+    this.files = this.files.filter((f) => f.id !== id);
+  }
 }
 
 /** 假的 WebSocket 連線:記錄送出的信封 */
@@ -400,5 +433,8 @@ export function setupCommands(opts: { batchMaxConcurrent?: number } = {}) {
   const base = setup();
   const store = new MemoryCommandStore(base.sql);
   const commands = new CommandDispatcher(store, base.sql, base.service, { now: base.clock.now, ...opts });
-  return { ...base, store, commands };
+  // 指令附檔放在每次測試各自的暫存目錄
+  const filesDir = mkdtempSync(path.join(tmpdir(), 'ita-files-'));
+  const files = new CommandFileService(store, filesDir, { keepDays: 14, now: base.clock.now });
+  return { ...base, store, commands, files, filesDir };
 }

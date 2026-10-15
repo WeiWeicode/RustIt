@@ -9,6 +9,7 @@ import { loadConfig } from './config.js';
 import { buildAgentApp } from './agent-app.js';
 import { buildMgmtApp } from './mgmt-app.js';
 import { CommandDispatcher } from './services/command-dispatcher.js';
+import { CommandFileService } from './services/command-files.js';
 import { DeviceService } from './services/device-service.js';
 import { MongoSnapshotStore } from './stores/mongo-store.js';
 import { RedisStateStore } from './stores/redis-store.js';
@@ -21,7 +22,10 @@ const mongo = new MongoSnapshotStore(config.mongoUrl, config.mongoDb, config.sna
 const redis = new RedisStateStore(config.redisUrl, config.redisPrefix);
 const service = new DeviceService(sql, mongo, redis, { heartbeatIntervalSec: config.heartbeatIntervalSec, settings: config.agentSettings });
 // 指令派送(P4):SQL 與裝置共用連線池,推送經 DeviceService 的 WebSocket 連線表
-const commands = new CommandDispatcher(new SqlCommandStore(() => sql.connection()), sql, service);
+const commandStore = new SqlCommandStore(() => sql.connection());
+const commands = new CommandDispatcher(commandStore, sql, service);
+// 指令附檔(logs.collect 日誌,P4-2):檔案在 COMMAND_FILES_DIR,索引在 ita.command_file
+const files = new CommandFileService(commandStore, config.commandFilesDir, { keepDays: config.commandFileKeepDays });
 
 const check = async (fn: () => Promise<void>) => {
   try {
@@ -50,8 +54,8 @@ const deps = (): Promise<DepStatus[]> =>
     }),
   );
 
-const mgmt = await buildMgmtApp({ config, service, commands, readiness, deps });
-const agent = await buildAgentApp({ config, service, commands, monitor: config.agentMonitor, deps });
+const mgmt = await buildMgmtApp({ config, service, commands, files, readiness, deps });
+const agent = await buildAgentApp({ config, service, commands, files, monitor: config.agentMonitor, deps });
 
 await mgmt.listen({ host: config.host, port: config.port });
 await agent.listen({ host: config.host, port: config.agentPort });

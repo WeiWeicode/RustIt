@@ -4,7 +4,11 @@
  * Mongo 用獨立資料庫 ita_int_test、Redis 用前綴 ita:int_test:,不碰開發資料。
  */
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import { after, before, describe, it } from 'node:test';
 import Fastify from 'fastify';
 import { connect, migrate, migrateConfig, resetSchema } from '../../src/db/migrator.js';
@@ -12,6 +16,7 @@ import { DeviceService } from '../../src/services/device-service.js';
 import { MongoSnapshotStore } from '../../src/stores/mongo-store.js';
 import { RedisStateStore } from '../../src/stores/redis-store.js';
 import { SqlCommandStore } from '../../src/stores/sql-command-store.js';
+import { CommandFileService } from '../../src/services/command-files.js';
 import { SqlDeviceStore } from '../../src/stores/sql-store.js';
 import { CommandDispatcher } from '../../src/services/command-dispatcher.js';
 import { MongoClient } from 'mongodb';
@@ -211,5 +216,35 @@ describe('SQL Server + Mongo + Redis', () => {
     assert.equal(page.items.length, 2);
     assert.ok(page.nextCursor);
     assert.equal((await commands.list(ctx, { deviceId: device.deviceId, cursor: page.nextCursor!, limit: 10 })).items.length, 1);
+  });
+
+  it('P4-2:指令附檔(ita.command_file):上傳寫索引、清單、下載、到期清除', async () => {
+    const store = new SqlCommandStore(() => sql.connection());
+    const commands = new CommandDispatcher(store, sql, service);
+    const dir = mkdtempSync(path.join(tmpdir(), 'ita-int-files-'));
+    const files = new CommandFileService(store, dir, { keepDays: 14 });
+    const who = { sub: '1', emp: 'S000001', name: '測試人員' };
+    const device = await service.identify(ctx, 'O=GigaNexus Dev,CN=PC-EXAMPLE-FILES', 'd'.repeat(40));
+    const cmd = await commands.create(ctx, who, 'basic', device.deviceId, { kind: 'logs.collect', params: { days: 1 } });
+    await commands.onUpdate(ctx, device.id, { command_id: cmd.commandId, state: 'acked' });
+    const body = Buffer.from('PK 整合測試');
+    const hash = createHash('sha256').update(body).digest('hex');
+    const up = await files.upload(ctx, device, cmd.commandId, hash, body.length, Readable.from([body]));
+    const again = await files.upload(ctx, device, cmd.commandId, hash, body.length, Readable.from([body]));
+    assert.equal(again.file_id, up.file_id);
+    const list = await files.forCommand(ctx, cmd.commandId);
+    assert.deepEqual(
+      list.map((f) => [f.fileId, f.sizeBytes, f.sha256, f.expired]),
+      [[up.file_id, body.length, hash, false]],
+    );
+    const { stream } = await files.open(ctx, cmd.commandId, up.file_id);
+    const chunks: Buffer[] = [];
+    for await (const c of stream) chunks.push(c as Buffer);
+    assert.deepEqual(Buffer.concat(chunks), body);
+    // 以未來時間清除:檔案與索引列刪除,指令紀錄保留
+    const later = new CommandFileService(store, dir, { keepDays: 14, now: () => new Date(Date.now() + 15 * 86400_000) });
+    assert.ok((await later.sweep(ctx)) >= 1);
+    assert.equal(await store.getFile(up.file_id), null);
+    assert.equal((await commands.get(ctx, cmd.commandId)).kind, 'logs.collect');
   });
 });

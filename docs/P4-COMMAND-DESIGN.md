@@ -2,13 +2,14 @@
 
 > 草案 2026-10-15,分支 `feature/p4-command`(從 `gitlab/develop` e926a2f 開，已合併 316ef31 v0.2.1)。依據:PLATFORM-PLAN §4.4、§5、§6、§8 P4 列;指南 ENDPOINT-AGENT-GUIDE §8.2–§8.5、§5.6、§6.5。
 > **2026-10-15 需求方確認**:§7 第 1–3 項照建議(新增 `command_update_ack`、`ita.command_file` 一起建、admin 路徑延到 P6);migration 0003 經需求方看過後由 Claude 套用到 `giganexus_It_Agent_test`。P4-1 已實作,契約以 `docs/contracts/` 為準、資料表以 `ItAgentBack/docs/DB_SCHEMA.md` 為準。
+> **P4-2(2026-10-15,分支 `feature/p4-diagnose`)**:§8 設計經需求方確認(「同意方案」)後實作。
 
 ## 0. 分批
 
 | 批 | 內容 | 需要同意 |
 | --- | --- | --- |
 | **P4-1(本次)** | migration `0003_command.sql`;契約 `command` / `command_update` / `command_update_ack` / `prepare_shutdown` 與 `command-kinds.md`;ItAgentBack `command-dispatcher` 與 **basic** 指令 API;Agent 執行器 + `inventory.collect`、`agent.restart`、`message.show`(Agent 0.3.0,自 0.2.1 往上) | migration 套用到 `giganexus_It_Agent_test` 前先問 |
-| P4-2 | `agent.diagnose`、`logs.collect`(診斷檔上傳 HTTPS、下載 API)、`agent.log_level` | — |
+| P4-2(§8) | `agent.diagnose`、`logs.collect`(診斷檔上傳 HTTPS、下載 API)、`agent.log_level`(Agent 0.4.0) | 新增 Rust 相依 `zip`(已同意) |
 | P4-3 | GigaItApp 指令按鈕、「指令紀錄」Tab;`gateway-rbac.yaml` 綁 `endpoint.command.basic`(OpenAPI 註冊後) | **GigaItApp、BFF 權限:動手前另外確認** |
 
 P4 完成標準(§8)要 P4-1~3 全部做完才達成;P4-1 結束時能以 curl / 測試對本機與測試區驗證「queued → succeeded、離線補送、過期不執行、離線完成的結果補回、稽核欄位」。
@@ -169,3 +170,39 @@ stateDiagram-v2
 3. admin 路徑延到 P6 才加?(建議:是)
 4. 0003 寫好後,由你在開發機執行 `npm run db:migrate` 套到 `giganexus_It_Agent_test`,還是我來執行?(HANDOFF §4:migration 由開發者電腦套用;寫入測試區前要先問)
 5. 指南 §8.3、§8.4 的修訂(`message.show` 已列在 PLATFORM-PLAN §10 差異 2;另加 `command_update_ack`、`prepare_shutdown` body)— P4-1 完成後一併提給 Gateway repo,屆時再確認。
+
+## 8. P4-2:遠端診斷(A4)
+
+> 需求方 2026-10-15 確認:三個類型照下表、新增 Rust 相依 `zip`、附檔放 Docker volume 保存 14 天、下載權限 `endpoint.device.read`。類型的完整定義在 `docs/contracts/command-kinds.md`。
+
+| kind | 有效 / 逾時 | 每台上限 | 內容 |
+| --- | --- | --- | --- |
+| `agent.diagnose` | 1 小時 / 3 分鐘 | 1 | 無參數;檢查 `gateway`(`GET /healthz`)、`dns`(AD 網域)、`clock`、`cert`(到期日)、`disk`(系統磁碟)、`wmi`(`Win32_ComputerSystem`,同時取得網域)、`store`,各項 `ok` / `warn` / `fail` / `skipped`,結果在 `result` |
+| `logs.collect` | 1 小時 / 15 分鐘 | 1 | `days` 1–14(預設 3);日誌遮罩後壓成 zip(20 MB,超過捨棄最舊的日期)→ 上傳附檔;`NO_LOGS`、`UPLOAD_FAILED` |
+| `agent.log_level` | 1 小時 / 1 分鐘 | 1 | `level` debug / trace / default、`duration_min` 5–1440(預設 60);本機 kv 保存,重啟後仍有效直到到期,每分鐘檢查到期 |
+
+### 8.1 附檔上傳與存放
+
+- `POST /agent/v1/commands/{commandId}/files`(`:9443` → `:51241`,裝置憑證):本體為 zip 原始位元組、必須帶 `Content-Length`(否則 `411 ITA_LENGTH_REQUIRED`)、標頭 `x-file-sha256`。只接受屬於此裝置、`kind` 允許附檔(`kinds.ts` 的 `files`)、狀態 `acked` / `running` 的指令;串流寫暫存檔並計算 SHA-256 與大小(20 MB),相符才搬到 `<COMMAND_FILES_DIR>/<yyyy>/<MM>/<file_id>.zip`,再寫 `ita.command_file`(SQL 失敗刪檔、503)。每筆指令一個檔,重送相同內容回同一個 `file_id`;同一指令同時只處理一個上傳。檔名與路徑由主機產生。
+- 存放:容器 `/data/command-files`,Docker volume `ita_command_files`(`deploy/docker-compose.yml`;Dockerfile 預先建立目錄給 `node`);dev 預設 `ItAgentBack/data/dev/command-files`(已在 .gitignore)。不放 Mongo GridFS(Mongo 只放可重建的資料)。
+- 保存:`COMMAND_FILE_KEEP_DAYS` 14–30,預設 14(B5);每小時刪除到期檔案與索引列,並清除超過 1 小時的上傳暫存檔;`ita.command` 紀錄與 `result` 保留。
+- Gateway 不用改:`:9443` 的 `client_max_body_size 0`(上限由本服務決定),BFF 代理以串流回傳二進位。
+
+### 8.2 下載
+
+- `GET /v1/commands/{commandId}/files/{fileId}`(`endpoint.device.read`、`x-audit-level: meta`):`Content-Disposition: attachment`(`<電腦名稱>-logs-<UTC 時間>Z.zip`,只留英數與 `-` `_`)、`X-Content-Type-Options: nosniff`、`Cache-Control: no-store`、`x-file-sha256`。`fileId` 不屬於此指令 `404 ITA_COMMAND_FILE_NOT_FOUND`;過期或檔案已不在 `410 ITA_COMMAND_FILE_EXPIRED`。
+- `GET /v1/commands/{commandId}` 回應加 `files`(`fileId`、`fileName`、`sizeBytes`、`sha256`、`createdAt`、`expiresAt`、`expired`)。
+- 日誌可能含電腦名稱、登入帳號與 IP;下載記錄稽核。GigaItApp 下載按鈕屬 P4-3。
+
+### 8.3 日誌不含私鑰與 Token
+
+- 日誌本來就不可記錄私鑰、Token(`AGENT.md` §7.1);`logs.collect` 再逐行遮罩:`-----BEGIN … PRIVATE KEY-----` 整段、`Bearer` / `Basic` 之後的值、鍵 `token` / `password` / `passwd` / `pwd` / `secret` / `api_key` / `api-key` / `apikey` 接 `=` 或 `:`(前後可有空白、JSON 引號)的值,不分大小寫。
+- `agent.log_level` 調到 trace 時,第三方套件(HTTP、TLS、WebSocket)仍只記 warn 以上(`rustit_common::logging`),不會記下標頭或內容。
+- `agent.diagnose` 的 `cert` 只讀憑證到期日,不讀私鑰、不回傳憑證內容。
+
+### 8.4 審查後的修正(code-reviewer、security-auditor 子代理,2026-10-15)
+
+- 遮罩補 `key: value`、`key = value`、JSON `"key":"value"`、`Basic`、`passwd` / `pwd` / `api_key`;引號未閉合時保留換行。
+- 上傳必須帶 `Content-Length`(411):提早拒絕或重送相同內容時丟棄的本體受宣告長度限制;提早拒絕時丟棄未讀本體。
+- Agent 上傳:404、413、409 `ITA_COMMAND_NOT_RUNNING` 不重試(只有 409 `ITA_COMMAND_FILE_EXISTS` 與網路 / 5xx 重試);上傳逾時依大小放寬(每秒 100 KB 估算,至少 60 秒);最新一天壓縮後就超過上限時失敗,不上傳空 zip;設定檔日誌等級以行程第一次啟動時為準(`OnceLock`)。
+- **未處理(列為後續)**:慢速上傳佔住回報併發名額(上傳專用逾時或併發上限,Nginx 端 body 逾時屬 Gateway repo);`ita.command_file.command_ref` 唯一索引(目前以單一實例的程序內鎖保證一指令一檔,多實例前需 migration);附檔目錄總量 / 剩餘空間檢查(507)與磁碟告警;下載權限是否另設 `endpoint.command.file.read`(需求方已定 `endpoint.device.read`,上線前可再檢討);`agent.log_level` 套用與到期恢復的單元測試(需 Shared 測試替身)。

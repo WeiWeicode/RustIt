@@ -1,6 +1,6 @@
 # 專案地圖 — RustIt (企業端點資產管理與控管平台)
 
-> **最後更新**：2026-10-15(P4-1 指令通道:migration 0003、契約 command / command_update / command_update_ack / prepare_shutdown 與 `command-kinds.md`;ItAgentBack `command-dispatcher`、`routes/commands.ts`、`sql-command-store`;Agent `command.rs`(inventory.collect、agent.restart、message.show)、本機 `command_log`)。2026-10-14(P2 第二批 Agent:本機加密暫存 `store.rs` / `crypto.rs`、連線紀錄與 offline_period `conn.rs`、事件佇列 `events.rs`、USB 插拔 `usb.rs`、資產暫存與 `/sync` 補傳、429 依 Retry-After、主機下發設定;collector `removable_volumes`)。2026-10-14(P2 第一批主機端:契約 `event.schema.json`、hello / hello_ack 擴充、`/sync` 加 `skip`;ItAgentBack `/agent/v1/sync`、`/agent/v1/events`、429 ITA_BUSY、時鐘偏差與硬體指紋;migration 0002)。2026-10-14(P1 收尾:測試 VM 裝置憑證腳本 `installer/host2-issue-test-device-cert.sh`;`.cargo/config.toml` 靜態連結 C 執行階段)。2026-10-13(P1:監控 MSI(WiX v5,installer/);WMI 查詢逾時與蒐集背景優先權;Windows 憑證存放區 `store_issuer`(PoC 實測通過);抽出 `rustit-common`、移除 `native`;P1 第一批:Agent Windows 服務化 `service` / `install` / `uninstall`、檔案日誌;第二階段計畫 PLATFORM-PLAN v0.4:監控服務與使用者端程式分開、本機持久化;交接文件改寫;Demo 將改造為 desktop、native 將移除)。2026-10-07(M4 測試區接通:ItAgentBack 容器化與 CI 部署、Agent 經 Gateway :9443 回報)  
+> **最後更新**：2026-10-15(P4-2 遠端診斷:Agent 0.4.0 `diagnose.rs`、`logs.rs`、`agent.log_level`;collector `system_volume`、`wmi_probe`;common `post_bytes`、`get_status`、`device_cert_not_after`;ItAgentBack `command-files.ts` 附檔上傳 / 下載 / 清除、volume `ita_command_files`;契約 `command-file.schema.json`)。2026-10-15(P4-1 指令通道:migration 0003、契約 command / command_update / command_update_ack / prepare_shutdown 與 `command-kinds.md`;ItAgentBack `command-dispatcher`、`routes/commands.ts`、`sql-command-store`;Agent `command.rs`(inventory.collect、agent.restart、message.show)、本機 `command_log`)。2026-10-14(P2 第二批 Agent:本機加密暫存 `store.rs` / `crypto.rs`、連線紀錄與 offline_period `conn.rs`、事件佇列 `events.rs`、USB 插拔 `usb.rs`、資產暫存與 `/sync` 補傳、429 依 Retry-After、主機下發設定;collector `removable_volumes`)。2026-10-14(P2 第一批主機端:契約 `event.schema.json`、hello / hello_ack 擴充、`/sync` 加 `skip`;ItAgentBack `/agent/v1/sync`、`/agent/v1/events`、429 ITA_BUSY、時鐘偏差與硬體指紋;migration 0002)。2026-10-14(P1 收尾:測試 VM 裝置憑證腳本 `installer/host2-issue-test-device-cert.sh`;`.cargo/config.toml` 靜態連結 C 執行階段)。2026-10-13(P1:監控 MSI(WiX v5,installer/);WMI 查詢逾時與蒐集背景優先權;Windows 憑證存放區 `store_issuer`(PoC 實測通過);抽出 `rustit-common`、移除 `native`;P1 第一批:Agent Windows 服務化 `service` / `install` / `uninstall`、檔案日誌;第二階段計畫 PLATFORM-PLAN v0.4:監控服務與使用者端程式分開、本機持久化;交接文件改寫;Demo 將改造為 desktop、native 將移除)。2026-10-07(M4 測試區接通:ItAgentBack 容器化與 CI 部署、Agent 經 Gateway :9443 回報)  
 > **目前階段**：基本階段完成(Agent 前景執行 → `:9443` → ItAgentBack → GigaItApp 電腦清單,測試區運作);第二階段 [PLATFORM-PLAN.md](PLATFORM-PLAN.md) P0 定案、**P1 常駐完成**(服務化、監控 MSI,測試 VM 驗證通過);下一步 P2 本機持久化,P3、P8-1 可並行。  
 > **上位規範**：全專案總圖 [PROJECT-MAP.md](../../PROJECT-MAP.md)、Gateway 規範 [giga-api-gateway-bff/docs/](../../giga-api-gateway-bff/docs/)。
 
@@ -57,7 +57,9 @@ RustIt/
 │     │  ├─ src/main.rs             只組裝:子指令、日誌、Ctrl+C
 │     │  ├─ src/lib.rs              開啟本機暫存 → 延續 / 結束上次的離線期間、記 agent_started → 啟動隨機延遲 → 資產回報、WebSocket、事件、USB 四個工作;Shared(連線成功 / 失敗、停用狀態);run_blocking
 │     │  ├─ src/service.rs          Windows 服務:SCM 進入點、狀態回報(啟動中 / 執行中 / 停止中)、每次啟動自行套用失敗復原 10/30/60 秒、開發用 install / uninstall;agent.restart 以結束代碼 3 停止
-│     │  ├─ src/command.rs          指令執行器(P4):command_id 去重、過期不執行、結果先寫本機;inventory.collect / agent.restart / message.show(WTSSendMessage)
+│     │  ├─ src/command.rs          指令執行器(P4):command_id 去重、過期不執行、結果先寫本機;inventory.collect / agent.restart / message.show(WTSSendMessage)/ agent.log_level(本機 kv,到期恢復)
+│     │  ├─ src/diagnose.rs         agent.diagnose(P4-2):gateway / dns / clock / cert / disk / wmi / store 檢查
+│     │  ├─ src/logs.rs             logs.collect(P4-2):挑最近 N 天日誌、遮罩私鑰與 Token、zip(20 MB)
 │     │  ├─ src/inventory.rs        蒐集 → 本機暫存 → 單份 POST /agent/v1/inventory、多份先 /sync(刪 skip、傳 need);停用時暫停蒐集;間隔依主機設定
 │     │  ├─ src/store.rs            本機持久化 state\store.db(SQLite):kv、outbox_inventory / outbox_event(加密、上限)、conn_log(30 天)、command_log(指令去重與待回報狀態,加密,7 天)
 │     │  ├─ src/crypto.rs           AES-256-GCM;金鑰以 DPAPI 執行帳號範圍(服務 = SYSTEM)+ 附加熵保護存 state\store.key(換電腦或一般使用者無法解開)
@@ -69,8 +71,8 @@ RustIt/
 │     │  └─ tests/contract.rs       以 docs/contracts 的 JSON Schema 驗證送出的 JSON
 │     ├─ common/                    rustit-common:Agent 與 Watchdog 共用(PLATFORM-PLAN §3.1;P2 加入本機持久化、P5 加入具名管道)
 │     │  ├─ src/config.rs           agent.toml 解析與檢查(http 只允許本機、dev 模擬憑證標頭、選用 log_level;[tls] 裝置憑證 PEM 檔或 store_issuer 二選一)
-│     │  ├─ src/tls.rs              rustls ClientConfig(ring)、憑證來源 trait CertSource → 每次握手挑選:PemFiles、WindowsStore(LocalMachine\My + rustls-cng,私鑰留在 CNG);pick_device_cert 挑選規則
-│     │  ├─ src/transport.rs        post_json(path)/ connect_ws(path),User-Agent 由呼叫端提供;錯誤分類(被拒 10 分鐘 / 429 依 Retry-After / 其他指數退避)、離線原因分類 reason()、底層錯誤串接
+│     │  ├─ src/tls.rs              rustls ClientConfig(ring)、憑證來源 trait CertSource → 每次握手挑選:PemFiles、WindowsStore(LocalMachine\My + rustls-cng,私鑰留在 CNG);pick_device_cert 挑選規則;device_cert_not_after(診斷)
+│     │  ├─ src/transport.rs        post_json(path)/ post_bytes(指令附檔)/ get_status(診斷)/ connect_ws(path),User-Agent 由呼叫端提供;錯誤分類(被拒 10 分鐘 / 429 依 Retry-After / 其他指數退避)、離線原因分類 reason()、底層錯誤串接
 │     │  ├─ src/backoff.rs          1 秒起、上限 2 分鐘、±20%;啟動延遲
 │     │  ├─ src/envelope.rs         WebSocket 信封 {v, type, id, body}
 │     │  ├─ src/stop.rs             StopSignal / with_grace / wait(停止 30 秒、關機 5 秒收尾)
@@ -82,10 +84,11 @@ RustIt/
    ├─ src/server.ts                 啟動兩個 listener:51240 管理 API、51241 Agent 通道
    ├─ src/config.ts                 部署區設定;dev 旁路(非 dev 設定即失敗)、test / prod 機密只收 _FILE
    ├─ src/mgmt-app.ts               :51240 X-Internal-Token、OpenAPI(x-permission)、setupGateway 監控與自動註冊
-   ├─ src/agent-app.ts              :51241 裝置身分 hook(x-client-cert-*、信任來源)、/agent/v1/inventory、/sync、/events、/agent/v1/ws;回報同時處理上限 429 ITA_BUSY(A3)
+   ├─ src/agent-app.ts              :51241 裝置身分 hook(x-client-cert-*、信任來源)、/agent/v1/inventory、/sync、/events、/agent/v1/commands/{id}/files、/agent/v1/ws;回報同時處理上限 429 ITA_BUSY(A3)
    ├─ src/routes/devices.ts         GET /v1/devices、/v1/devices/{deviceId}(endpoint.device.read)
-   ├─ src/routes/commands.ts        指令 API(P4):POST basic-commands / batches/basic-commands / cancel(endpoint.command.basic)、GET commands / batches(endpoint.device.read)
+   ├─ src/routes/commands.ts        指令 API(P4):POST basic-commands / batches/basic-commands / cancel(endpoint.command.basic)、GET commands / batches、附檔下載 commands/{id}/files/{fileId}(endpoint.device.read)
    ├─ src/commands/kinds.ts         指令類型表:等級、有效期限 / 逾時、params schema(docs/contracts/command-kinds.md)
+   ├─ src/services/command-files.ts 指令附檔(P4-2):Agent 上傳(SHA-256、20 MB、裝置與狀態檢查)→ COMMAND_FILES_DIR + ita.command_file;下載、每小時清除到期檔
    ├─ src/services/command-dispatcher.ts 指令狀態機:寫 SQL → 在線推送、重連補送、斷線退回、command_update / ack、逾期與逾時掃描、批次限流
    ├─ src/services/device-service.ts 寫入順序、hash 比對、降級、在線狀態、離線補傳比對、端點事件、時鐘偏差與硬體指紋(唯一的業務邏輯層)
    ├─ src/stores/                   types.ts 介面;sql-store(mssql)、sql-command-store(指令,共用連線池)、mongo-store、redis-store
@@ -94,7 +97,7 @@ RustIt/
    ├─ db/dba/                       建庫 T-SQL(DBA 以 sa 執行,AI 不執行)
    ├─ db/migrations/                0001_init.sql:ita.device、device_inventory、device_nic、device_event;0002_sync_event.sql:硬體指紋、時鐘偏差、退役、端點事件欄位(P2);0003_command.sql:ita.command、command_batch、command_file(P4)
    ├─ deploy/docker-compose.dev.yml 本機 Mongo 7 / Redis 7(只綁 127.0.0.1)
-   ├─ deploy/docker-compose.yml     測試區:endpoint-server(Gateway 網路)+ ita-mongo / ita-redis(內部網路)
+   ├─ deploy/docker-compose.yml     測試區:endpoint-server(Gateway 網路,volume ita_command_files)+ ita-mongo / ita-redis(內部網路)
    ├─ deploy/host2-set-secrets.sh   主機 2 機密、臨時憑證、Gateway API Key、ita.env(需求方執行)
    ├─ Dockerfile                    建置 context 為 RustIt 根目錄(含 docs/contracts;根目錄 .dockerignore 白名單)
    ├─ test/                         單元與契約測試(記憶體儲存);test/int/ 整合測試(真實三種儲存)

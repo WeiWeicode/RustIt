@@ -218,6 +218,7 @@ async fn session(
                                         warn!("本機時鐘與主機相差 {} 秒,請檢查時間同步", skew / 1000);
                                     }
                                     shared.clock_skew_ms.store(ack.clock_skew_ms.unwrap_or(0), Ordering::Relaxed);
+                                    shared.clock_known.store(true, Ordering::Relaxed);
                                     apply_settings(shared, &ack, settings);
                                     let p = Duration::from_secs(ack.heartbeat_interval_sec.clamp(5, 300));
                                     if p != period {
