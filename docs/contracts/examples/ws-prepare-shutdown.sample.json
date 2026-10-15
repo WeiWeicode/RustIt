@@ -1,0 +1,8 @@
+{
+  "v": 1,
+  "type": "prepare_shutdown",
+  "id": "8d4a0e3f-6b5c-4a8d-9f7e-3c4d5e6f7a03",
+  "body": {
+    "reason": "server_restart"
+  }
+}

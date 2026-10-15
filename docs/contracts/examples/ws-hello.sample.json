@@ -10,6 +10,8 @@
     "ips": [
       "192.0.2.10"
     ],
-    "boot_time": 1791244800
+    "boot_time": 1791244800,
+    "agent_time": "2026-10-06T08:00:00.120Z",
+    "hw_fingerprint": "b1946ac92492d2347c6235b4d2611184e1c4b6d4a1f0e8f3c2b7a69d5e4f3021"
   }
 }

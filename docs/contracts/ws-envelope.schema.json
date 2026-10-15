@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://giganexus.local/rustit/contracts/ws-envelope.schema.json",
   "title": "WebSocket GET /agent/v1/ws 訊息信封",
-  "description": "JSON 文字訊息,共用信封 {v, type, id, body}(Gateway ENDPOINT-AGENT-GUIDE §5.6)。回覆類訊息(hello_ack、heartbeat_ack、unsupported)沿用被回覆訊息的 id。收到不認得的 type 回 unsupported;不認得的欄位忽略。單則訊息上限 1 MB(§5.5)。Server 停用裝置時以 close code 4403 關閉(§5.4)。",
+  "description": "JSON 文字訊息,共用信封 {v, type, id, body}(Gateway ENDPOINT-AGENT-GUIDE §5.6)。回覆類訊息(hello_ack、heartbeat_ack、unsupported)沿用被回覆訊息的 id。收到不認得的 type 回 unsupported(command 的信封 id = command_id,舊版 Agent 回 unsupported 時主機據此設為 failed UNSUPPORTED_COMMAND);不認得的欄位忽略。單則訊息上限 1 MB(§5.5)。Server 停用裝置時以 close code 4403 關閉(§5.4)。",
   "type": "object",
   "required": ["v", "type", "id"],
   "properties": {
@@ -22,6 +22,22 @@
     {
       "if": { "properties": { "type": { "const": "unsupported" } } },
       "then": { "required": ["body"], "properties": { "body": { "$ref": "#/definitions/UnsupportedBody" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "command" } } },
+      "then": { "required": ["body"], "properties": { "body": { "$ref": "#/definitions/CommandBody" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "command_update" } } },
+      "then": { "required": ["body"], "properties": { "body": { "$ref": "#/definitions/CommandUpdateBody" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "command_update_ack" } } },
+      "then": { "required": ["body"], "properties": { "body": { "$ref": "#/definitions/CommandUpdateAckBody" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "prepare_shutdown" } } },
+      "then": { "required": ["body"], "properties": { "body": { "$ref": "#/definitions/PrepareShutdownBody" } } }
     }
   ],
   "definitions": {
@@ -35,7 +51,13 @@
         "os_name": { "type": "string" },
         "os_version": { "type": "string" },
         "ips": { "type": "array", "items": { "type": "string" } },
-        "boot_time": { "type": "integer", "minimum": 0, "description": "Unix 秒" }
+        "boot_time": { "type": "integer", "minimum": 0, "description": "Unix 秒" },
+        "agent_time": { "type": "string", "format": "date-time", "description": "送出 hello 時的端點時間(UTC);Server 據此記錄時鐘偏差 clock_skew_ms(PLATFORM-PLAN A2)" },
+        "hw_fingerprint": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{64})?$",
+          "description": "硬體指紋:SHA-256(\"rustit-hw-v1|\" + BIOS 序號 + \"|\" + 系統 UUID,兩者先去除前後空白、轉大寫;UTF-8),兩者皆為空白或廠商預設值時為空字串。與既有裝置相同時 Server 標記「疑似同一台」,由 IT 確認合併,不自動合併(A1)"
+        }
       }
     },
     "HelloAckBody": {
@@ -45,14 +67,26 @@
       "properties": {
         "device_id": { "type": "string", "format": "uuid" },
         "heartbeat_interval_sec": { "type": "integer", "minimum": 5 },
-        "server_time": { "type": "string", "format": "date-time" }
+        "server_time": { "type": "string", "format": "date-time" },
+        "clock_skew_ms": { "type": "integer", "description": "agent_time − server_time(毫秒);hello 沒帶 agent_time 時省略" },
+        "settings_version": { "type": "integer", "minimum": 0, "description": "主機下發設定的版本;與 Agent 本機保存的相同時可忽略 settings" },
+        "settings": { "$ref": "#/definitions/AgentSettings" }
+      }
+    },
+    "AgentSettings": {
+      "description": "主機下發設定(PLATFORM-PLAN §4.2「設定分三層」第二層)。Agent 持久化在本機 store,離線或重開機時用最後一次收到的值;從未收過用程式內預設值。不認得的欄位忽略",
+      "type": "object",
+      "properties": {
+        "inventory_interval_sec": { "type": "integer", "minimum": 300, "maximum": 86400, "description": "資產蒐集間隔(秒)" },
+        "usb_events": { "type": "boolean", "description": "是否回報 USB 儲存裝置插拔事件" }
       }
     },
     "HeartbeatBody": {
       "description": "Agent → Server,每 heartbeat_interval_sec(預設 30)秒一則;連續 3 次沒收到判定離線(§5.3)",
       "type": "object",
       "properties": {
-        "outbox_pending": { "type": "integer", "minimum": 0, "description": "本機暫存中尚未被確認的快照數(M5 起有值)" },
+        "outbox_pending": { "type": "integer", "minimum": 0, "description": "本機暫存中尚未被確認的快照數(P2 起有值)" },
+        "events_pending": { "type": "integer", "minimum": 0, "description": "本機暫存中尚未送出的事件數(P2)" },
         "last_inventory_seq": { "type": "integer", "minimum": 0, "description": "最後一次被確認的 agent_seq" }
       }
     },
@@ -65,6 +99,60 @@
       "type": "object",
       "required": ["type"],
       "properties": { "type": { "type": "string", "description": "不認得的訊息類型" } }
+    },
+    "CommandBody": {
+      "description": "Server → Agent:指令(指南 §8.4;類型與 params 見 command-kinds.md)。Agent 以 command_id 去重(至少送達一次);過期(以 hello_ack.clock_skew_ms 換算主機時間)回 failed EXPIRED 不執行;不認得的 kind 回 failed UNSUPPORTED_COMMAND",
+      "type": "object",
+      "required": ["command_id", "kind", "expires_at"],
+      "properties": {
+        "command_id": { "type": "string", "format": "uuid", "description": "與信封 id 相同" },
+        "kind": { "type": "string", "pattern": "^[a-z][a-z0-9_]*([.][a-z][a-z0-9_]*)+$", "maxLength": 64 },
+        "params": { "type": "object", "description": "依 kind 定義(command-kinds.md);不含機密" },
+        "expires_at": { "type": "string", "format": "date-time", "description": "主機時間;Agent 確認收到(acked)前超過即不執行" },
+        "issued_by": { "type": "string", "maxLength": 64, "description": "操作人工號(Agent 寫本機日誌)" },
+        "issued_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "CommandUpdateBody": {
+      "description": "Agent → Server:指令進度與結果。結果先寫本機,收到 command_update_ack 才刪除;斷線則重連(hello_ack)後重送最後狀態。主機只接受往前的狀態,終態不再改變",
+      "type": "object",
+      "required": ["command_id", "state"],
+      "properties": {
+        "command_id": { "type": "string", "format": "uuid" },
+        "state": { "type": "string", "enum": ["acked", "running", "succeeded", "failed"] },
+        "progress": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "result": { "type": "object", "description": "結果摘要(序列化後 4,000 字元內;超過主機只記大小);大量資料走 HTTPS" },
+        "error_code": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "UNSUPPORTED_COMMAND、EXPIRED、INVALID_PARAMS、NO_ACTIVE_SESSION、NOT_RUNNING_AS_SERVICE、EXECUTION_FAILED(command-kinds.md)"
+        },
+        "error_message": { "type": "string", "maxLength": 1000 },
+        "occurred_at": { "type": "string", "format": "date-time", "description": "端點時間" }
+      }
+    },
+    "CommandUpdateAckBody": {
+      "description": "Server → Agent,沿用 command_update 的信封 id。accepted=false:主機不採用(不屬於此裝置、找不到、已是終態),Agent 一樣視為送達、不再重送。SQL 無法寫入時主機不回 ack,Agent 稍後重送",
+      "type": "object",
+      "required": ["command_id", "accepted"],
+      "properties": {
+        "command_id": { "type": "string", "format": "uuid" },
+        "accepted": { "type": "boolean" },
+        "state": {
+          "type": "string",
+          "enum": ["queued", "sent", "acked", "running", "succeeded", "failed", "canceled", "expired"],
+          "description": "主機記錄的目前狀態"
+        }
+      }
+    },
+    "PrepareShutdownBody": {
+      "description": "Server → Agent:主機即將關閉連線(主機重啟;P5/P6 升級沿用)。Agent 送完待送的 command_update,以 1000 關閉,隨機 0–30 秒(或 reconnect_after_sec)後重連",
+      "type": "object",
+      "required": ["reason"],
+      "properties": {
+        "reason": { "type": "string", "maxLength": 64, "description": "server_restart、upgrade …" },
+        "reconnect_after_sec": { "type": "integer", "minimum": 0, "maximum": 3600 }
+      }
     }
   }
 }

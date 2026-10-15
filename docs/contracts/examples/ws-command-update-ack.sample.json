@@ -1,0 +1,10 @@
+{
+  "v": 1,
+  "type": "command_update_ack",
+  "id": "7c3f9d2e-5a4b-4f7c-8e6d-2b3c4d5e6f02",
+  "body": {
+    "command_id": "5b2e8c1d-4f3a-4e6b-9d7c-1a2b3c4d5e01",
+    "accepted": true,
+    "state": "succeeded"
+  }
+}

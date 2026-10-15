@@ -5,6 +5,12 @@
   "body": {
     "device_id": "6f1d3a52-3b1e-4c7a-9a41-2d8f0c5e7b90",
     "heartbeat_interval_sec": 30,
-    "server_time": "2026-10-06T08:00:00.500Z"
+    "server_time": "2026-10-06T08:00:00.500Z",
+    "clock_skew_ms": -380,
+    "settings_version": 1,
+    "settings": {
+      "inventory_interval_sec": 3600,
+      "usb_events": true
+    }
   }
 }

@@ -1,7 +1,7 @@
 # 專案地圖 — RustIt (企業端點資產管理與控管平台)
 
-> **最後更新**：2026-10-07(M4 測試區接通:ItAgentBack 容器化與 CI 部署、Agent 經 Gateway :9443 回報)  
-> **目前階段**：階段 1 MVP·資產蒐集與效能評估驗證（`collector`、`demo` [Tauri]、`native` [egui] 已實作完成）。  
+> **最後更新**：2026-10-15(P4-1 指令通道:migration 0003、契約 command / command_update / command_update_ack / prepare_shutdown 與 `command-kinds.md`;ItAgentBack `command-dispatcher`、`routes/commands.ts`、`sql-command-store`;Agent `command.rs`(inventory.collect、agent.restart、message.show)、本機 `command_log`)。2026-10-14(P2 第二批 Agent:本機加密暫存 `store.rs` / `crypto.rs`、連線紀錄與 offline_period `conn.rs`、事件佇列 `events.rs`、USB 插拔 `usb.rs`、資產暫存與 `/sync` 補傳、429 依 Retry-After、主機下發設定;collector `removable_volumes`)。2026-10-14(P2 第一批主機端:契約 `event.schema.json`、hello / hello_ack 擴充、`/sync` 加 `skip`;ItAgentBack `/agent/v1/sync`、`/agent/v1/events`、429 ITA_BUSY、時鐘偏差與硬體指紋;migration 0002)。2026-10-14(P1 收尾:測試 VM 裝置憑證腳本 `installer/host2-issue-test-device-cert.sh`;`.cargo/config.toml` 靜態連結 C 執行階段)。2026-10-13(P1:監控 MSI(WiX v5,installer/);WMI 查詢逾時與蒐集背景優先權;Windows 憑證存放區 `store_issuer`(PoC 實測通過);抽出 `rustit-common`、移除 `native`;P1 第一批:Agent Windows 服務化 `service` / `install` / `uninstall`、檔案日誌;第二階段計畫 PLATFORM-PLAN v0.4:監控服務與使用者端程式分開、本機持久化;交接文件改寫;Demo 將改造為 desktop、native 將移除)。2026-10-07(M4 測試區接通:ItAgentBack 容器化與 CI 部署、Agent 經 Gateway :9443 回報)  
+> **目前階段**：基本階段完成(Agent 前景執行 → `:9443` → ItAgentBack → GigaItApp 電腦清單,測試區運作);第二階段 [PLATFORM-PLAN.md](PLATFORM-PLAN.md) P0 定案、**P1 常駐完成**(服務化、監控 MSI,測試 VM 驗證通過);下一步 P2 本機持久化,P3、P8-1 可並行。  
 > **上位規範**：全專案總圖 [PROJECT-MAP.md](../../PROJECT-MAP.md)、Gateway 規範 [giga-api-gateway-bff/docs/](../../giga-api-gateway-bff/docs/)。
 
 ---
@@ -16,11 +16,13 @@ RustIt/
 ├─ .dockerignore                    ItAgentBack 映像檔建置 context 白名單
 ├─ docs/                            兩個子專案共用的文件(Gateway 等其他專案以 ../RustIt/docs/... 參照,不搬動)
 │  ├─ PRD.md                        產品需求說明 (對標 IP-guard/SmartIT，四階段里程碑)
-│  ├─ INTEGRATION-PLAN.md           整合計畫:Agent → Node.js Endpoint Server → GigaItApp 電腦清單(目標、階段、待決)
-│  ├─ HANDOFF.md                    交接:目前進度、已決定事項、需先同意的跨 repo 動作
+│  ├─ PLATFORM-PLAN.md              第二階段計畫:常駐服務、本機持久化、監測、指令、升級、軟體派送、使用者端程式(P0–P8)
+│  ├─ INTEGRATION-PLAN.md           基本階段整合計畫(M0–M4 完成;M5 擴充為 PLATFORM-PLAN P2)
+│  ├─ HANDOFF.md                    交接:目前狀態、下一步、已決定事項、需先同意的動作
 │  ├─ contracts/                    Agent ↔ Server 資料契約(JSON Schema + 去識別化範例;兩端契約測試共用)
 │  │  ├─ inventory.schema.json      POST /agent/v1/inventory
-│  │  ├─ sync.schema.json           POST /agent/v1/sync(請求與回應,M5)
+│  │  ├─ sync.schema.json           POST /agent/v1/sync(請求與回應;need / skip,P2)
+│  │  ├─ event.schema.json          POST /agent/v1/events(offline_period、usb_*、agent_started、local_overflow;P2)
 │  │  ├─ ws-envelope.schema.json    WebSocket 信封與 hello / heartbeat / heartbeat_ack
 │  │  └─ examples/                  去識別化範例(假的使用者、序號、MAC、IP)
 │  ├─ DevelopmentProcess/           修正紀錄(NewFeatures.md 等)
@@ -31,50 +33,66 @@ RustIt/
 │     ├─ 0003-code-signing-pki.md   程式碼簽章與 PKI
 │     └─ 0004-node-endpoint-server.md Endpoint Server 改用 Node.js(Rust 只做端點)
 ├─ RustAgent/                       Rust:端點電腦上的程式(Cargo workspace)
-│  ├─ Cargo.toml                    Workspace 設定 (collector, demo, native)
+│  ├─ Cargo.toml                    Workspace 設定 (agent, collector, common, demo)
 │  ├─ Cargo.lock
-│  ├─ dist/                         編譯成品存放目錄 (RustIt-Demo.exe, RustIt-Native.exe, rustit-agent-test/ 測試區 Agent 套件,不進版控)
-│  ├─ scripts/
-│  │  └─ bench.ps1                  效能取樣腳本 (量測記憶體、CPU、行程與執行緒)
+│  ├─ .cargo/config.toml            靜態連結 C 執行階段(+crt-static;乾淨的 Windows 不需安裝 VC++ 可轉散發套件)
+│  ├─ dist/                         編譯成品存放目錄 (RustIt-Demo.exe, rustit-agent-test/ 等測試區 Agent 套件、msi/ 建置的 MSI,不進版控)
+│  ├─ installer/                    監控 MSI(WiX v5):agent.wxs(服務、程式與 ProgramData 目錄 ACL)、build-agent-msi.ps1(依部署區建置,設定在建置時寫入)、host2-issue-test-device-cert.sh(主機 2 以臨時 Agent CA 為測試 VM 簽 PFX,使用者執行)
 │  ├─ docs/
-│  │  ├─ ui-performance-comparison.md egui 原生 vs WebView2 效能實測比較報告
+│  │  ├─ ui-performance-comparison.md egui 原生 vs WebView2 效能實測比較(紀錄;native 已於 P1 移除)
 │  │  └─ images/                    介面截圖
 │  └─ crates/
 │     ├─ collector/                 端點資料蒐集核心庫 (Library)
 │     │  ├─ Cargo.toml              相依：wmi, winreg, sysinfo
 │     │  └─ src/
-│     │     ├─ lib.rs               對外統一介面 (ComputerInfo, collect() 進入點)
+│     │     ├─ lib.rs               對外統一介面 (ComputerInfo, collect() 進入點;蒐集期間進入背景模式)
+│     │     ├─ background.rs        蒐集時執行緒進入 Windows 背景模式(低 CPU / I/O 優先權),結束時恢復
 │     │     ├─ registry.rs          登錄檔掃描 (已安裝軟體 Uninstall 機碼、USBSTOR、RustDesk)
-│     │     └─ wmi_query.rs         WMI / CIM 查詢 (主機板 UUID、BIOS、CPU、磁碟、網卡、防毒)
-│     ├─ demo/                      WebView2 概念驗證版 (Tauri)
+│     │     └─ wmi_query.rs         WMI / CIM 查詢 (主機板 UUID、BIOS、CPU、磁碟、網卡、防毒);每項在獨立執行緒、逾時 15 秒,逾時後略過其餘 WMI 項目
+│     ├─ demo/                      WebView2 概念驗證版 (Tauri;P8 改名為 desktop 作為使用者端程式,PLATFORM-PLAN §3.3)
 │     │  ├─ src/ main.rs、deploy.rs Tauri 啟動與指令綁定;軟體派送模擬與雜湊校驗
 │     │  └─ ui/                     前端 HTML/CSS/JS (Liquid Glass 玻璃擬態)
-│     ├─ native/                    原生高效能 GUI 版 (egui;main / app / data / theme / widgets / pages / perf)
-│     ├─ agent/                     端點 Agent(rustit-agent run --config agent.toml;前景執行,服務化屬後續)
+│     ├─ agent/                     端點 Agent:rustit-agent run(前景,開發)/ service(Windows 服務 GigaNexusAgent)/ install、uninstall(開發測試,正式用 MSI)
 │     │  ├─ agent.dev.toml / agent.example.toml  本機直連 ItAgentBack / 測試區經 :9443 的設定範本
-│     │  ├─ src/main.rs             只組裝:參數、日誌、Ctrl+C
-│     │  ├─ src/lib.rs              啟動隨機延遲 → 資產回報與 WebSocket 兩個工作
-│     │  ├─ src/config.rs           agent.toml 解析與檢查(http 只允許本機、dev 模擬憑證標頭)
-│     │  ├─ src/tls.rs              rustls ClientConfig(ring)、憑證來源 trait CertSource(本階段 PEM 檔)
-│     │  ├─ src/transport.rs        HTTPS 回報與 WebSocket 連線,錯誤分類(被拒 10 分鐘 / 其他指數退避)
-│     │  ├─ src/inventory.rs        蒐集 → POST /agent/v1/inventory 迴圈
-│     │  ├─ src/ws.rs               hello / 30 秒 heartbeat / unsupported、斷線重連
-│     │  ├─ src/protocol.rs         契約型別、content_hash
-│     │  ├─ src/backoff.rs          1 秒起、上限 2 分鐘、±20%;啟動延遲
+│     │  ├─ src/main.rs             只組裝:子指令、日誌、Ctrl+C
+│     │  ├─ src/lib.rs              開啟本機暫存 → 延續 / 結束上次的離線期間、記 agent_started → 啟動隨機延遲 → 資產回報、WebSocket、事件、USB 四個工作;Shared(連線成功 / 失敗、停用狀態);run_blocking
+│     │  ├─ src/service.rs          Windows 服務:SCM 進入點、狀態回報(啟動中 / 執行中 / 停止中)、每次啟動自行套用失敗復原 10/30/60 秒、開發用 install / uninstall;agent.restart 以結束代碼 3 停止
+│     │  ├─ src/command.rs          指令執行器(P4):command_id 去重、過期不執行、結果先寫本機;inventory.collect / agent.restart / message.show(WTSSendMessage)
+│     │  ├─ src/inventory.rs        蒐集 → 本機暫存 → 單份 POST /agent/v1/inventory、多份先 /sync(刪 skip、傳 need);停用時暫停蒐集;間隔依主機設定
+│     │  ├─ src/store.rs            本機持久化 state\store.db(SQLite):kv、outbox_inventory / outbox_event(加密、上限)、conn_log(30 天)、command_log(指令去重與待回報狀態,加密,7 天)
+│     │  ├─ src/crypto.rs           AES-256-GCM;金鑰以 DPAPI 執行帳號範圍(服務 = SYSTEM)+ 附加熵保護存 state\store.key(換電腦或一般使用者無法解開)
+│     │  ├─ src/conn.rs             連線紀錄:失敗記 conn_log,恢復時(≥ 60 秒)寫 offline_period;服務重啟(10 分鐘內)延續同一段
+│     │  ├─ src/events.rs           事件佇列(本機暫存)→ 批次 POST /agent/v1/events
+│     │  ├─ src/usb.rs              每 10 秒比對可移除磁碟區 → usb_inserted / usb_removed
+│     │  ├─ src/ws.rs               hello(端點時間、硬體指紋)/ 30 秒 heartbeat(暫存數)/ unsupported、hello_ack 主機設定寫入本機、斷線重連、停止時 close 1001;command 交給執行器、command_update 重送與 ack、prepare_shutdown
+│     │  ├─ src/protocol.rs         Agent 契約型別(inventory、hello / hello_ack、sync、events、AgentSettings)、content_hash、hw_fingerprint、通道路徑與 User-Agent
 │     │  └─ tests/contract.rs       以 docs/contracts 的 JSON Schema 驗證送出的 JSON
-│     └─ tray/ (規劃中)              托盤程式 (一般使用者介面：報修、公告、設備自查)
+│     ├─ common/                    rustit-common:Agent 與 Watchdog 共用(PLATFORM-PLAN §3.1;P2 加入本機持久化、P5 加入具名管道)
+│     │  ├─ src/config.rs           agent.toml 解析與檢查(http 只允許本機、dev 模擬憑證標頭、選用 log_level;[tls] 裝置憑證 PEM 檔或 store_issuer 二選一)
+│     │  ├─ src/tls.rs              rustls ClientConfig(ring)、憑證來源 trait CertSource → 每次握手挑選:PemFiles、WindowsStore(LocalMachine\My + rustls-cng,私鑰留在 CNG);pick_device_cert 挑選規則
+│     │  ├─ src/transport.rs        post_json(path)/ connect_ws(path),User-Agent 由呼叫端提供;錯誤分類(被拒 10 分鐘 / 429 依 Retry-After / 其他指數退避)、離線原因分類 reason()、底層錯誤串接
+│     │  ├─ src/backoff.rs          1 秒起、上限 2 分鐘、±20%;啟動延遲
+│     │  ├─ src/envelope.rs         WebSocket 信封 {v, type, id, body}
+│     │  ├─ src/stop.rs             StopSignal / with_grace / wait(停止 30 秒、關機 5 秒收尾)
+│     │  ├─ src/logging.rs          服務模式檔案日誌 <前綴>-YYYY-MM-DD.log:每日一檔、保留 14 天、單日 10 MB;第三方套件只收 warn 以上
+│     │  └─ src/paths.rs            %ProgramData%\GigaNexus\Agent(agent.toml、logs\)
+│     ├─ watchdog/ (規劃,P5)        GigaNexusWatchdog 服務:看守 Agent、上報、升級與還原
+│     └─ desktop/ (規劃,P8)         使用者端程式(由 demo 改名):托盤 + 視窗,我的電腦(電腦名稱、IP、登入人員)、公告通知、嵌入 Gateway 網頁應用;登入者身分,與監控服務分開
 └─ ItAgentBack/                     Node.js(Fastify + TypeScript):Endpoint Server(ADR 0004);gateway.project = RustIt
    ├─ src/server.ts                 啟動兩個 listener:51240 管理 API、51241 Agent 通道
    ├─ src/config.ts                 部署區設定;dev 旁路(非 dev 設定即失敗)、test / prod 機密只收 _FILE
    ├─ src/mgmt-app.ts               :51240 X-Internal-Token、OpenAPI(x-permission)、setupGateway 監控與自動註冊
-   ├─ src/agent-app.ts              :51241 裝置身分 hook(x-client-cert-*、信任來源)、/agent/v1/inventory、/agent/v1/ws
+   ├─ src/agent-app.ts              :51241 裝置身分 hook(x-client-cert-*、信任來源)、/agent/v1/inventory、/sync、/events、/agent/v1/ws;回報同時處理上限 429 ITA_BUSY(A3)
    ├─ src/routes/devices.ts         GET /v1/devices、/v1/devices/{deviceId}(endpoint.device.read)
-   ├─ src/services/device-service.ts 寫入順序、hash 比對、降級、在線狀態(唯一的業務邏輯層)
-   ├─ src/stores/                   types.ts 介面;sql-store(mssql)、mongo-store、redis-store
+   ├─ src/routes/commands.ts        指令 API(P4):POST basic-commands / batches/basic-commands / cancel(endpoint.command.basic)、GET commands / batches(endpoint.device.read)
+   ├─ src/commands/kinds.ts         指令類型表:等級、有效期限 / 逾時、params schema(docs/contracts/command-kinds.md)
+   ├─ src/services/command-dispatcher.ts 指令狀態機:寫 SQL → 在線推送、重連補送、斷線退回、command_update / ack、逾期與逾時掃描、批次限流
+   ├─ src/services/device-service.ts 寫入順序、hash 比對、降級、在線狀態、離線補傳比對、端點事件、時鐘偏差與硬體指紋(唯一的業務邏輯層)
+   ├─ src/stores/                   types.ts 介面;sql-store(mssql)、sql-command-store(指令,共用連線池)、mongo-store、redis-store
    ├─ src/contracts.ts              讀 ../docs/contracts(不複製)、型別
    ├─ src/db/migrator.ts、migrate.ts 手寫 SQL migration 與整合測試庫重建
    ├─ db/dba/                       建庫 T-SQL(DBA 以 sa 執行,AI 不執行)
-   ├─ db/migrations/                0001_init.sql:ita.device、device_inventory、device_nic、device_event
+   ├─ db/migrations/                0001_init.sql:ita.device、device_inventory、device_nic、device_event;0002_sync_event.sql:硬體指紋、時鐘偏差、退役、端點事件欄位(P2);0003_command.sql:ita.command、command_batch、command_file(P4)
    ├─ deploy/docker-compose.dev.yml 本機 Mongo 7 / Redis 7(只綁 127.0.0.1)
    ├─ deploy/docker-compose.yml     測試區:endpoint-server(Gateway 網路)+ ita-mongo / ita-redis(內部網路)
    ├─ deploy/host2-set-secrets.sh   主機 2 機密、臨時憑證、Gateway API Key、ita.env(需求方執行)
@@ -90,8 +108,9 @@ RustIt/
 | 層次 | 所屬元件 | 責任與主要功能 |
 | :--- | :--- | :--- |
 | **資料蒐集層 (Collector)** | `RustAgent/crates/collector` | 呼叫 Win32 API、WMI (`root\cimv2`) 與 Registry，產出結構化資產物件 (`SystemInfo`)。不依賴任何 UI。 |
-| **端點展現層 (Presentation)** | `RustAgent/crates/native` (egui)<br/>`RustAgent/crates/demo` (WebView2)<br/>`RustAgent/crates/tray` (托盤) | • `native`：極低記憶體 (<90MB)、超快啟動的原生介面，供工程師快速檢測。<br/>• `demo`：驗證複雜動畫與 Web 玻璃擬態體驗。<br/>• `tray`：常駐工作列，提供員工自助報修與重要公告。 |
-| **端點後台服務 (Service)** | `RustAgent/crates/agent`(前景執行,測試區已上線;服務化規劃中) | 註冊為 Windows Service，具備 LocalSystem 權限，負責 USBSTOR 封鎖、軟體背景安裝、RustDesk 守護。 |
+| **端點展現層 (Presentation)** | `RustAgent/crates/native` (egui)<br/>`RustAgent/crates/demo` (WebView2) | 示範用。`demo` 將改造為使用者端程式 `desktop`(P8);`native` 將移除(P1);IT 畫面改到 GigaItApp(PLATFORM-PLAN §3.3)。 |
+| **使用者層 (User)** | `RustAgent/crates/desktop`(規劃 P8) | 登入者身分的托盤 + 視窗:公告通知(BFF `/ws/notify`)、我的電腦(電腦名稱、IP、登入人員自己讀;Agent 狀態讀唯讀管道)、報修 / BPM / 信箱 / AI 等 Gateway 網頁入口;結束它不影響監控(PLATFORM-PLAN §4.7)。 |
+| **端點後台服務 (Service)** | `RustAgent/crates/agent`(前景執行,測試區已上線;服務化 P1)<br/>`RustAgent/crates/watchdog`(規劃 P5) | Windows 服務(LocalSystem):資產回報、本機持久化與離線紀錄(P2)、健康與事件、固定類型指令、軟體背景安裝(P7);Watchdog 看守與升級(P5、P6)。USB 控管、RustDesk 屬路線圖。 |
 | **通訊與傳輸層 (Transport)** | `agent` ➔ Gateway | 以 X.509 裝置憑證透過 Gateway `:9443` (mTLS) 以 HTTPS 回報資產、維持一條 WebSocket 接收指令與心跳（2026-10-01 決定，不用 gRPC；ADR 0001）。 |
 
 ---
@@ -103,7 +122,6 @@ flowchart LR
     subgraph RustIt_Host ["Windows 端點 (網域電腦)"]
         Collector["collector 函式庫"]
         Agent["RustIt Agent (服務)"]
-        Tray["RustIt 托盤 (員工)"]
         RDC["RustDesk Client"]
     end
 
@@ -127,7 +145,7 @@ flowchart LR
     Collector --> Agent
     Agent -->|"mTLS HTTPS / WSS"| Port9443 --> EPS
     Agent -->|"自動註冊與配置"| RDS
-    Tray -.->|"線上報修工單"| Portal
+    Portal -.->|"我的電腦(路線圖)"| Port443_API
 
     ItApp -->|"查設備: /api/endpoint/devices"| Port443_API --> BFF --> EPS
     ItApp -->|"發起遠端協助"| RDC <--> RDS
@@ -137,16 +155,12 @@ flowchart LR
 1. **對應 `giga-api-gateway-bff`**：
    - Agent 走 Gateway 專用端口 `:9443`，透過 mTLS 認證裝置身分，與 `Endpoint Server` 長連線。
    - 瀏覽器管理請求走 Gateway `:443` 的 `/api/endpoint/*`，經由 BFF 驗證 `endpoint.device.read` 後轉發。
-   - **後期待辦（Agent 上線前，W6）**：Gateway 端 `:9443` 目前仍是 gRPC 版，需改寫為 HTTPS / WebSocket，與本專案 W6-1 訊息協定一起進行：
-     - `../giga-api-gateway-bff/nginx/conf.d/agent.conf`：`grpc_pass` 改為 `proxy_pass https://` + WebSocket 升級；環境變數 `ENDPOINT_GRPC_UPSTREAM` 改名 `ENDPOINT_AGENT_UPSTREAM`。
-     - Gateway E2E `bff/test/e2e/06-websocket-agent.test.ts` 與模擬服務 `tools/mock-upstream/endpoint.js` 改為 HTTPS / WebSocket。
-     - CRL 定期更新、200 條 WebSocket 壓測。
-     - 規格與清單見 `../giga-api-gateway-bff/docs/ENDPOINT-AGENT-GUIDE.md` §4、§10（G0、G1、G3）、§11。
+   - `:9443` 已改為 HTTPS / WebSocket(2026-10-07,指南 G0)。**上線前仍待辦**:CRL 定期更新(G1)、200 條 WebSocket 壓測(G3)、防火牆改端點網段;見 `../giga-api-gateway-bff/docs/ENDPOINT-AGENT-GUIDE.md` §10、§11 與 PLATFORM-PLAN §8。
 2. **對應 `GigaItApp`**：
-   - `GigaItApp` 的「端點管理 ➔ 電腦清單」頁面直接呈現 `RustIt` 回報的硬體、軟體與資安狀態。
-   - IT 在 `GigaItApp` 點擊連線時，可自動帶入 `RustIt` 管理之電腦的 RustDesk 授權 ID 與密碼連線。
+   - `GigaItApp` 的「端點管理 ➔ 電腦清單」頁面直接呈現 `RustIt` 回報的硬體、軟體與資安狀態;第二階段加入詳情分 Tab、指令紀錄、告警、軟體派送、Agent 版本(PLATFORM-PLAN §7)。
+   - RustDesk 一鍵連線屬路線圖(PLATFORM-PLAN §9)。
 3. **對應 `giga-Portal`**：
-   - 使用者透過 `RustIt Tray` 進行問題報修時，自動綁定資產唯一 ID（BIOS + 主機板 UUID），直接連動到 `giga-Portal` 待辦與服務中心。
+   - 使用者端程式(托盤)以使用者登入經 `:443` 嵌入入口網與其他應用;公告沿用 BFF 通知中心;「我的電腦」先在使用者端程式提供,入口網版本屬路線圖(PLATFORM-PLAN §4.6、§4.7)。
 
 ---
 
@@ -155,16 +169,13 @@ flowchart LR
 | 開發任務 | 主要修改目錄與檔案 | 備註 |
 | :--- | :--- | :--- |
 | **新增硬體/軟體蒐集項目** | `RustAgent/crates/collector/src/wmi_query.rs`、`registry.rs`、`lib.rs` | 擴充結構體欄位，注意相容 Windows 10/11 |
-| **調整 egui 原生介面版面** | `RustAgent/crates/native/src/pages.rs` | 調整各分頁 layout、文字與圖表排版 |
-| **微調原生版玻璃擬態與色彩** | `RustAgent/crates/native/src/theme.rs`、`widgets.rs` | 調整透明度、邊框、高光與陰影數值 |
 | **調整 WebView2 Demo 介面** | `RustAgent/crates/demo/ui/` (`index.html`, `style.css`, `app.js`) | 免編譯，可用 `python -m http.server` 即時預覽 |
-| **軟體靜默派送規則** | `RustAgent/crates/demo/src/deploy.rs`，參照 [0002 號架構決策](decisions/0002-software-deployment.md) | 支援 MSI, Inno Setup, NSIS 等靜默參數 |
-| **效能評估取樣** | `RustAgent/scripts/bench.ps1` | `powershell -File scripts/bench.ps1 -Runs 3` |
+| **軟體靜默派送規則** | 參考實作 `RustAgent/crates/demo/src/deploy.rs`(P7 移植到 `agent`),參照 [0002 號架構決策](decisions/0002-software-deployment.md) | 支援 MSI, Inno Setup, NSIS 等靜默參數 |
 | **改 Agent ↔ Server 訊息格式** | `docs/contracts/`(schema + 範例)→ `RustAgent/crates/agent/src/protocol.rs` → `ItAgentBack/src/contracts.ts` | 只新增欄位;兩端契約測試一起更新(AGENT.md §7.3) |
 | **改回報寫入順序、降級、在線判斷** | `ItAgentBack/src/services/device-service.ts` | 路由與 store 不放業務邏輯 |
 | **改資料表** | 新增 `ItAgentBack/db/migrations/000N_*.sql`(SQL Server 2012 語法)、`ItAgentBack/docs/DB_SCHEMA.md` | 已套用的 migration 不可修改 |
 | **新增管理 API** | `ItAgentBack/src/routes/`、`src/openapi.ts`(`x-permission`、`x-gherkin`) | 需配合 GigaItApp `gateway-rbac.yaml` 的 `includes` |
-| **改 Agent 連線、心跳、重試** | `RustAgent/crates/agent/src/ws.rs`、`transport.rs`、`backoff.rs` | 規範 ENDPOINT-AGENT-GUIDE §4.2、§6 |
+| **改 Agent 連線、心跳、重試** | `RustAgent/crates/agent/src/ws.rs`;共用的 `RustAgent/crates/common/src/transport.rs`、`backoff.rs`(Watchdog 也會用) | 規範 ENDPOINT-AGENT-GUIDE §4.2、§6 |
 
 ---
 
@@ -179,12 +190,5 @@ flowchart LR
 - **執行測試**：
   ```bash
   cd RustAgent
-  cargo run -p rustit-native    # 原生 egui 高效能版
   cargo run -p rustit-demo      # WebView2 完整特效版
-  ```
-- **效能並排量測 (Benchmark)**：
-  ```bash
-  cd RustAgent
-  cargo build --release -p rustit-native -p rustit-demo
-  powershell -ExecutionPolicy Bypass -File scripts/bench.ps1 -Runs 3
   ```

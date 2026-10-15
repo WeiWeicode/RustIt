@@ -43,7 +43,7 @@ before(async () => {
   const ctx = { log: app.log, requestId: 'seed' };
   const device = await env.service.identify(ctx, 'O=GigaNexus Dev,CN=PC-EXAMPLE-01', '574f45a0357c7d134a9e2f78cd7ed4dc0444ee77');
   await env.service.ingestInventory(ctx, device, inventoryRequest());
-  await env.service.connected(ctx, device, { close() {}, terminate() {} });
+  await env.service.connected(ctx, device, { send() {}, close() {}, terminate() {} });
 });
 
 after(async () => {

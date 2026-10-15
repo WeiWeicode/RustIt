@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "type": "command_update",
+  "id": "7c3f9d2e-5a4b-4f7c-8e6d-2b3c4d5e6f02",
+  "body": {
+    "command_id": "5b2e8c1d-4f3a-4e6b-9d7c-1a2b3c4d5e01",
+    "state": "succeeded",
+    "progress": 100,
+    "result": { "session_id": 1, "shown_via": "wts" },
+    "occurred_at": "2026-10-06T08:00:01.250Z"
+  }
+}

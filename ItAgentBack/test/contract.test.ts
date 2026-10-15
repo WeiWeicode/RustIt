@@ -13,7 +13,7 @@ import { CONTRACTS_DIR, example } from './helpers.js';
 
 const addFormats = ((addFormatsModule as unknown as { default?: unknown }).default ?? addFormatsModule) as (a: Ajv) => Ajv;
 const ajv = addFormats(new Ajv({ strict: true, allErrors: true }));
-for (const name of ['inventory', 'ws-envelope', 'sync'] as const) ajv.addSchema(loadContract(name, CONTRACTS_DIR));
+for (const name of ['inventory', 'ws-envelope', 'sync', 'event'] as const) ajv.addSchema(loadContract(name, CONTRACTS_DIR));
 
 function check(ref: string, file: string) {
   const validate = ajv.getSchema(ref);
@@ -26,14 +26,20 @@ describe('資料契約範例', () => {
   it('每個範例都有對應的 schema 檢查', () => {
     const files = readdirSync(path.join(CONTRACTS_DIR, 'examples')).sort();
     assert.deepEqual(files, [
+      'event-response.sample.json',
+      'event.sample.json',
       'inventory-response.sample.json',
       'inventory.sample.json',
       'sync-response.sample.json',
       'sync.sample.json',
+      'ws-command-update-ack.sample.json',
+      'ws-command-update.sample.json',
+      'ws-command.sample.json',
       'ws-heartbeat-ack.sample.json',
       'ws-heartbeat.sample.json',
       'ws-hello-ack.sample.json',
       'ws-hello.sample.json',
+      'ws-prepare-shutdown.sample.json',
       'ws-unsupported.sample.json',
     ]);
   });
@@ -43,13 +49,36 @@ describe('資料契約範例', () => {
     check(`${CONTRACT_IDS.inventory}#/definitions/InventoryResponse`, 'inventory-response.sample.json');
   });
 
-  it('sync 請求與回應(M5)', () => {
+  it('event 請求與回應(P2):offline_period / usb_* 缺必要 data 不通過;不認得的 type 通過', () => {
+    check(CONTRACT_IDS.event, 'event.sample.json');
+    check(`${CONTRACT_IDS.event}#/definitions/EventsResponse`, 'event-response.sample.json');
+    const validate = ajv.getSchema(CONTRACT_IDS.event)!;
+    const base = { event_id: '3b9d2f5e-7c41-4a8e-9f06-1d2c3b4a5e61', occurred_at: '2026-10-06T09:00:00Z' };
+    assert.equal(validate({ events: [{ ...base, type: 'offline_period', data: { started_at: '2026-10-06T09:00:00Z' } }] }), false);
+    assert.equal(validate({ events: [{ ...base, type: 'usb_inserted' }] }), false);
+    assert.ok(validate({ events: [{ ...base, type: 'future_event', data: { x: 1 } }] }));
+    assert.equal(validate({ events: [] }), false);
+  });
+
+  it('sync 請求與回應(P2)', () => {
     check(CONTRACT_IDS.sync, 'sync.sample.json');
     check(`${CONTRACT_IDS.sync}#/definitions/SyncResponse`, 'sync-response.sample.json');
   });
 
   it('WebSocket 信封:hello / hello_ack / heartbeat / heartbeat_ack / unsupported', () => {
     for (const f of ['ws-hello', 'ws-hello-ack', 'ws-heartbeat', 'ws-heartbeat-ack', 'ws-unsupported']) check(CONTRACT_IDS.wsEnvelope, `${f}.sample.json`);
+  });
+
+  it('WebSocket 指令(P4):command / command_update / command_update_ack / prepare_shutdown;缺必要欄位、未知 state 不通過', () => {
+    for (const f of ['ws-command', 'ws-command-update', 'ws-command-update-ack', 'ws-prepare-shutdown']) check(CONTRACT_IDS.wsEnvelope, `${f}.sample.json`);
+    const validate = compileWsEnvelope(CONTRACTS_DIR);
+    const cmd = example<{ body: Record<string, unknown> }>('ws-command.sample.json');
+    const { expires_at: _e, ...noExpiry } = cmd.body;
+    assert.equal(validate({ ...cmd, body: noExpiry }), false);
+    assert.equal(validate({ ...cmd, body: { ...cmd.body, kind: 'rm -rf' } }), false);
+    const upd = example<{ body: Record<string, unknown> }>('ws-command-update.sample.json');
+    assert.equal(validate({ ...upd, body: { ...upd.body, state: 'canceled' } }), false);
+    assert.ok(validate({ ...upd, body: { ...upd.body, future: 1 } }));
   });
 
   it('相容規則:不認得的欄位與 type 通過信封驗證;已知 type 缺必要欄位不通過', () => {

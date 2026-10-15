@@ -1,0 +1,80 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://giganexus.local/rustit/contracts/event.schema.json",
+  "title": "POST /agent/v1/events 請求",
+  "description": "端點事件(PLATFORM-PLAN §4.2):Agent 先寫本機 outbox_event,連得上時批次送出,Server 確認後才從本機刪除。event_id 由 Agent 產生(UUID),Server 以 (裝置, event_id) 去重,重送不產生重複資料。occurred_at 是端點上的發生時間,Server 另記 received_at。不認得的 type 照常保存(data 原樣),供之後版本解讀。",
+  "type": "object",
+  "required": ["events"],
+  "properties": {
+    "events": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": { "$ref": "#/definitions/Event" }
+    }
+  },
+  "definitions": {
+    "Event": {
+      "type": "object",
+      "required": ["event_id", "type", "occurred_at"],
+      "properties": {
+        "event_id": { "type": "string", "format": "uuid" },
+        "type": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$" },
+        "occurred_at": { "type": "string", "format": "date-time" },
+        "data": { "type": "object", "description": "依 type 而定;序列化後上限 4,000 字元" }
+      },
+      "allOf": [
+        { "if": { "properties": { "type": { "const": "offline_period" } } }, "then": { "required": ["data"], "properties": { "data": { "$ref": "#/definitions/OfflinePeriod" } } } },
+        { "if": { "properties": { "type": { "enum": ["usb_inserted", "usb_removed"] } } }, "then": { "required": ["data"], "properties": { "data": { "$ref": "#/definitions/UsbVolume" } } } },
+        { "if": { "properties": { "type": { "const": "local_overflow" } } }, "then": { "required": ["data"], "properties": { "data": { "$ref": "#/definitions/LocalOverflow" } } } }
+      ]
+    },
+    "OfflinePeriod": {
+      "description": "Agent 連不上主機的一段期間(主機有回應的 429 / 400 不算);恢復後送出一筆,不到 60 秒的短暫中斷不送。occurred_at = started_at。期間內 Agent 重啟(10 分鐘內)視為同一段;停止超過 10 分鐘(關機)則以最後一次嘗試結束,停止的時間不算,由主機以最後心跳判斷",
+      "type": "object",
+      "required": ["started_at", "ended_at", "reason", "retries"],
+      "properties": {
+        "started_at": { "type": "string", "format": "date-time" },
+        "ended_at": { "type": "string", "format": "date-time" },
+        "reason": {
+          "type": "string",
+          "enum": ["network", "dns", "tls", "rejected", "server_busy", "server_error", "unknown"],
+          "description": "期間最主要(次數最多)的原因:network 連不上 / 逾時、dns 名稱解析失敗、tls 握手或憑證驗證失敗、rejected 主機拒絕(HTTP 401 / 403 憑證或身分;400 內容錯誤與裝置停用 / 退役(403 ITA_DEVICE_DISABLED / RETIRED、close 4403)主機有回應,不算離線)、server_busy 保留(目前 429 不算離線)、server_error 5xx"
+        },
+        "retries": { "type": "integer", "minimum": 0, "description": "期間失敗的連線嘗試次數" },
+        "last_error": { "type": "string", "maxLength": 300, "description": "最後一次錯誤摘要(不含個資與憑證內容)" }
+      }
+    },
+    "UsbVolume": {
+      "description": "USB 儲存裝置(可移除磁碟區)插入或移除",
+      "type": "object",
+      "required": ["drive"],
+      "properties": {
+        "drive": { "type": "string", "description": "磁碟機代號,例 E:" },
+        "label": { "type": "string" },
+        "file_system": { "type": "string" },
+        "total": { "type": "integer", "minimum": 0, "description": "容量(位元組)" },
+        "serial": { "type": "string", "description": "磁碟區序號(十六進位)" }
+      }
+    },
+    "LocalOverflow": {
+      "description": "本機暫存達上限,丟棄最舊的資料",
+      "type": "object",
+      "required": ["store", "dropped"],
+      "properties": {
+        "store": { "type": "string", "enum": ["outbox_inventory", "outbox_event"] },
+        "dropped": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "EventsResponse": {
+      "title": "POST /agent/v1/events 回應(200)",
+      "description": "accepted:已保存(含先前已收過)的 event_id,Agent 據此從本機刪除",
+      "type": "object",
+      "required": ["accepted"],
+      "properties": {
+        "accepted": { "type": "array", "items": { "type": "string", "format": "uuid" } },
+        "server_time": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

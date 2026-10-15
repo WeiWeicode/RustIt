@@ -2,6 +2,7 @@
 
 > **狀態**:計畫 v0.4(2026-10-07)。**M0–M4 完成,基本階段的 1、3 已在測試區達成**(我的電腦經 `:9443` 回報、測試區 GigaItApp 電腦清單看得到);2 的「本機加密暫存與補傳」屬 M5,需求方決定延後。進度與每個 commit 見 `DevelopmentProcess/NewFeatures.md`。
 > **時程以 NexusPlan 甘特圖為準**:基本階段 M0–M5 已登記為 W6-7 ~ W6-12(2026-10-06 ~ 10-07,需求方要求兩天內完成基礎功能);W6 原有的高階工作(W6-1 ~ W6-M)維持原排程,**進階功能待員工入口網與 GigaItApp 功能完善後再做**。本文只列順序與完成條件,不列日期。
+> **後續**:第二階段(常駐服務、本機持久化、監測、指令、升級、軟體派送、使用者端程式)見 [PLATFORM-PLAN.md](PLATFORM-PLAN.md);M5 擴充為其 P2。本文件保留為基本階段的紀錄,§3(儲存分工)、§4(離線比對)仍有效。
 > **上位規範**:`../../giga-api-gateway-bff/docs/ENDPOINT-AGENT-GUIDE.md`(通道、權限、API 草案)、`BACKEND-GUIDE.md`(port、內部 Token、OpenAPI 註冊)、`DATABASE.md` §0(SQL Server 2012 限制)。
 > **相關決策**:[0004 Endpoint Server 改用 Node.js(`ItAgentBack`)](decisions/0004-node-endpoint-server.md)。
 
@@ -131,7 +132,7 @@ flowchart LR
 | 項目 | 規則 |
 | --- | --- |
 | 位置 | `%ProgramData%\GigaNexus\Agent\store.db`(ACL 只允許 SYSTEM、Administrators,指南 §6.1);dev 用工作目錄 |
-| 引擎 | SQLite(`rusqlite`,bundled)。**欄位內容以 AES-256-GCM 加密**(`aes-gcm`),金鑰由 Windows **DPAPI(電腦範圍)** 保護後存檔;dev 用金鑰檔。**不採 SQLCipher**:在 Windows 建置需編譯 OpenSSL(Perl / NASM),增加部署與 CI 負擔;應用層加密對本需求足夠(D4 已確認) |
+| 引擎 | SQLite(`rusqlite`,bundled)。**欄位內容以 AES-256-GCM 加密**(`aes-gcm`),金鑰由 Windows **DPAPI** 保護(P2 實作為執行帳號範圍,見 PLATFORM-PLAN §4.2) 保護後存檔;dev 用金鑰檔。**不採 SQLCipher**:在 Windows 建置需編譯 OpenSSL(Perl / NASM),增加部署與 CI 負擔;應用層加密對本需求足夠(D4 已確認) |
 | 內容 | `outbox`(尚未被後端確認的快照:`agent_seq`、`collected_at`、`content_hash`、加密 payload)、`state`(`device_id`、最後被確認的 `seq` / `hash`、後端回傳的設定) |
 | 容量 | outbox 上限(例如 50 份或 20 MB),滿了丟最舊;相同 `content_hash` 連續出現只保留一份 |
 | 日誌 | 不寫 payload、金鑰、Token |

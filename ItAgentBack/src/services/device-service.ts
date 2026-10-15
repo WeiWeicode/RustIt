@@ -7,11 +7,28 @@
  *   在線狀態只由 WebSocket 與心跳決定(指南 §5.3):連線即在線,每則心跳續期 3 個間隔(90 秒),關閉或逾時即離線。
  *     Redis 是在線狀態的來源(之後多實例共用);Redis 無法使用時退回本實例的連線表。
  *     SQL 的 last_seen_at 每 5 分鐘最多落盤一次,避免每次心跳都寫庫。
+ *   離線補傳 POST /agent/v1/sync(PLATFORM-PLAN §4.2、INTEGRATION-PLAN §4.2):與目前資料同 hash、或 Mongo 已有同 agent_seq 的列入 skip;
+ *     其餘同 hash 只取最新一份,依 collected_at 由舊到新列入 need(單次最多 20 筆,A3),Agent 再逐筆 POST /inventory。
+ *   端點事件 POST /agent/v1/events:以 (裝置, event_id) 去重寫入 ita.device_event(occurred_at = 端點時間,另記 received_at)。
+ *   hello:記錄時鐘偏差(超過 ±5 分鐘寫 clock_skew 事件,A2)、硬體指紋(與其他裝置相同時寫 suspected_duplicate,不自動合併,A1)。
  */
 import type { FastifyBaseLogger } from 'fastify';
-import { type ComputerInfo, type HelloBody, type InventoryRequest, type InventoryResponse } from '../contracts.js';
+import { createHash, randomUUID } from 'node:crypto';
+import {
+  type AgentSettings,
+  type ComputerInfo,
+  type EventsRequest,
+  type EventsResponse,
+  type HelloAckBody,
+  type HelloBody,
+  type InventoryRequest,
+  type InventoryResponse,
+  type SyncRequest,
+  type SyncResponse,
+} from '../contracts.js';
 import { AppError, storageUnavailable } from '../errors.js';
-import type { DeviceRecord, DeviceRow, DeviceStore, OnlineInfo, SnapshotStore, StateStore } from '../stores/types.js';
+import type { CommandChannel } from './command-dispatcher.js';
+import type { AgentEvent, DeviceRecord, DeviceRow, DeviceStore, OnlineInfo, SnapshotStore, StateStore, TouchPatch } from '../stores/types.js';
 
 /** 一則請求或一條 WebSocket 的日誌與追蹤(指南 §5.7:x-request-id、DN、指紋) */
 export interface Ctx {
@@ -21,6 +38,8 @@ export interface Ctx {
 
 /** WebSocket 連線的最小介面(測試可用假物件) */
 export interface AgentConnection {
+  /** 送出一則 JSON 文字訊息(指令推送,P4) */
+  send(text: string): void;
   close(code: number, reason: string): void;
   terminate(): void;
 }
@@ -62,6 +81,8 @@ export interface DeviceDetail extends DeviceSummary {
 
 export interface DeviceServiceOptions {
   heartbeatIntervalSec: number;
+  /** 主機下發設定(hello_ack.settings);省略用預設值 */
+  settings?: AgentSettings;
   /** SQL last_seen_at 落盤間隔(毫秒) */
   touchIntervalMs?: number;
   now?: () => Date;
@@ -70,6 +91,21 @@ export interface DeviceServiceOptions {
 /** RFC 2253 DN 取 CN,作為登錄時的電腦名稱(收到 hello / inventory 後改為實際電腦名稱) */
 export function cnOf(dn: string): string {
   return /(?:^|,)\s*CN=([^,]+)/i.exec(dn)?.[1]?.trim() || dn;
+}
+
+export const DEFAULT_SETTINGS: AgentSettings = { inventory_interval_sec: 3600, usb_events: true };
+/** 時鐘偏差告警門檻 ±5 分鐘(A2) */
+export const CLOCK_SKEW_ALERT_MS = 5 * 60_000;
+/** /sync 單次最多要求上傳的快照數(A3) */
+export const SYNC_NEED_LIMIT = 20;
+/** device_event.data 上限 */
+const EVENT_DATA_MAX = 4000;
+
+/** 設定內容的版本號:內容不變則版本不變(Agent 依此判斷是否要更新本機保存的設定) */
+export function settingsVersion(settings: AgentSettings): number {
+  const keys = Object.keys(settings).sort();
+  const digest = createHash('sha256').update(JSON.stringify(settings, keys)).digest();
+  return digest.readUInt32BE(0) & 0x7fffffff;
 }
 
 const camel = (k: string) => k.replace(/_([a-z0-9])/g, (_m, c: string) => c.toUpperCase());
@@ -81,12 +117,14 @@ export function camelize(v: unknown): unknown {
   return v;
 }
 
-export class DeviceService {
+export class DeviceService implements CommandChannel {
   private readonly connections = new Map<string, LiveConnection>();
   private readonly lastTouch = new Map<number, number>();
   private readonly now: () => Date;
   private readonly touchIntervalMs: number;
   readonly heartbeatIntervalSec: number;
+  private readonly settings: AgentSettings;
+  private readonly settingsVersion: number;
 
   /** 目前在線的 WebSocket 連線數(本行程;監控心跳回報) */
   get onlineCount(): number {
@@ -100,6 +138,8 @@ export class DeviceService {
     opts: DeviceServiceOptions,
   ) {
     this.heartbeatIntervalSec = opts.heartbeatIntervalSec;
+    this.settings = opts.settings ?? DEFAULT_SETTINGS;
+    this.settingsVersion = settingsVersion(this.settings);
     this.touchIntervalMs = opts.touchIntervalMs ?? 5 * 60_000;
     this.now = opts.now ?? (() => new Date());
   }
@@ -149,6 +189,8 @@ export class DeviceService {
       device = { ...d, certFp };
     }
     if (device.status === 'disabled') throw new AppError(403, 'ITA_DEVICE_DISABLED', '此裝置已停用');
+    // 退役(A1;操作在 P3):與停用相同拒絕回報,重新啟用需 IT 處理
+    if (device.status === 'retired') throw new AppError(403, 'ITA_DEVICE_RETIRED', '此裝置已退役');
     return device;
   }
 
@@ -221,7 +263,7 @@ export class DeviceService {
     await this.soft(ctx, 'redis.setOnline', () => this.state.setOnline(device.deviceId, this.onlineInfo(live), this.offlineAfterSec));
   }
 
-  async hello(ctx: Ctx, device: DeviceRecord, body: HelloBody): Promise<{ device_id: string; heartbeat_interval_sec: number; server_time: string }> {
+  async hello(ctx: Ctx, device: DeviceRecord, body: HelloBody): Promise<HelloAckBody> {
     const at = this.now();
     const live = this.connections.get(device.deviceId);
     if (live) {
@@ -229,11 +271,103 @@ export class DeviceService {
       live.lastHeartbeatAt = at;
       await this.soft(ctx, 'redis.setOnline', () => this.state.setOnline(device.deviceId, this.onlineInfo(live), this.offlineAfterSec));
     }
+    // 比對用的舊值在寫入前取出
+    const prevSkew = device.clockSkewMs;
+    const patch: TouchPatch = { computerName: body.host_name, agentVersion: body.agent_version };
+    const agentTime = body.agent_time ? Date.parse(body.agent_time) : NaN;
+    if (Number.isFinite(agentTime)) patch.clockSkewMs = Math.max(-2_147_483_648, Math.min(2_147_483_647, agentTime - at.getTime()));
+    const hw = body.hw_fingerprint || undefined;
+    if (hw && hw !== device.hwFingerprint) patch.hwFingerprint = hw;
     // WebSocket 無法回 503,SQL 失敗只記錄;電腦名稱與版本下次 hello / inventory 再更新
-    await this.soft(ctx, 'sql.touch(hello)', () => this.sql.touch(device.id, at, { computerName: body.host_name, agentVersion: body.agent_version }));
+    const saved = await this.soft(ctx, 'sql.touch(hello)', async () => {
+      await this.sql.touch(device.id, at, patch);
+      return true;
+    });
     this.lastTouch.set(device.id, at.getTime());
-    ctx.log.info({ deviceId: device.deviceId, agentVersion: body.agent_version }, 'Agent hello');
-    return { device_id: device.deviceId, heartbeat_interval_sec: this.heartbeatIntervalSec, server_time: at.toISOString() };
+    // 偏差與指紋沒寫入時不寫事件,否則每次 hello 都會重複寫(下次 hello 再判斷)
+    if (saved) {
+      await this.checkClock(ctx, device, prevSkew, patch.clockSkewMs);
+      if (patch.hwFingerprint) await this.checkHwFingerprint(ctx, device, patch.hwFingerprint);
+    }
+    ctx.log.info({ deviceId: device.deviceId, agentVersion: body.agent_version, clockSkewMs: patch.clockSkewMs }, 'Agent hello');
+    return {
+      device_id: device.deviceId,
+      heartbeat_interval_sec: this.heartbeatIntervalSec,
+      server_time: at.toISOString(),
+      ...(patch.clockSkewMs === undefined ? {} : { clock_skew_ms: patch.clockSkewMs }),
+      settings_version: this.settingsVersion,
+      settings: this.settings,
+    };
+  }
+
+  /** 偏差由正常變成超過 ±5 分鐘時寫一筆事件(之後每次 hello 不重複寫,恢復正常再超過才再寫) */
+  private async checkClock(ctx: Ctx, device: DeviceRecord, prev: number | null, skew: number | undefined): Promise<void> {
+    if (skew === undefined || Math.abs(skew) <= CLOCK_SKEW_ALERT_MS) return;
+    if (prev !== null && Math.abs(prev) > CLOCK_SKEW_ALERT_MS) return;
+    const detail = `端點時鐘與主機相差 ${Math.round(skew / 1000)} 秒(端點 − 主機)`;
+    ctx.log.warn({ deviceId: device.deviceId, clockSkewMs: skew }, '端點時鐘偏差超過 5 分鐘');
+    await this.soft(ctx, 'sql.addEvent(clock_skew)', () => this.sql.addEvent(device, 'clock_skew', detail, ctx.requestId));
+  }
+
+  /** 指紋與其他裝置相同:疑似同一台(重灌、改名、換憑證),只寫事件由 IT 確認,不自動合併(A1) */
+  private async checkHwFingerprint(ctx: Ctx, device: DeviceRecord, hw: string): Promise<void> {
+    const same = await this.soft(ctx, 'sql.findByHwFingerprint', () => this.sql.findByHwFingerprint(hw, device.id));
+    for (const other of same ?? []) {
+      ctx.log.warn({ deviceId: device.deviceId, other: other.deviceId }, '硬體指紋與另一台裝置相同,疑似同一台');
+      await this.soft(ctx, 'sql.addEvent(suspected_duplicate)', () =>
+        this.sql.addEvent(device, 'suspected_duplicate', `與 ${other.computerName}(${other.deviceId})硬體指紋相同`, ctx.requestId),
+      );
+    }
+  }
+
+  // ---------- 離線補傳與端點事件(PLATFORM-PLAN §4.2) ----------
+
+  async sync(ctx: Ctx, device: DeviceRecord, req: SyncRequest): Promise<SyncResponse> {
+    const current = await this.sqlDo(ctx, 'inventory.current', () => this.sql.currentInventory(device.id));
+    // Mongo 無法使用時不去重,交給 /inventory 的 hash 比對與 Mongo 唯一索引
+    const items = req.pending.map((p) => ({ seq: p.agent_seq, hash: p.content_hash }));
+    const seen = (await this.soft(ctx, 'mongo.seenSnapshots', () => this.snapshots.seenSnapshots(device.deviceId, items))) ?? new Set<string>();
+    const skip: number[] = [];
+    const newest = new Map<string, { seq: number; at: number }>();
+    for (const p of req.pending) {
+      if (p.content_hash === current?.contentHash || seen.has(`${p.agent_seq}:${p.content_hash}`)) {
+        skip.push(p.agent_seq);
+        continue;
+      }
+      // 同內容只需要最新一份
+      const at = Date.parse(p.collected_at);
+      const prev = newest.get(p.content_hash);
+      if (!prev) newest.set(p.content_hash, { seq: p.agent_seq, at });
+      else if (at > prev.at || (at === prev.at && p.agent_seq > prev.seq)) {
+        skip.push(prev.seq);
+        newest.set(p.content_hash, { seq: p.agent_seq, at });
+      } else skip.push(p.agent_seq);
+    }
+    const need = [...newest.values()]
+      .sort((a, b) => a.at - b.at || a.seq - b.seq)
+      .slice(0, SYNC_NEED_LIMIT)
+      .map((x) => x.seq);
+    ctx.log.info({ deviceId: device.deviceId, pending: req.pending.length, need: need.length, skip: skip.length }, '離線補傳比對');
+    return {
+      device_id: device.deviceId,
+      need,
+      skip,
+      server_state: { status: device.status, last_hash: current?.contentHash ?? '', ...(current ? { last_seq: current.agentSeq } : {}) },
+    };
+  }
+
+  async ingestEvents(ctx: Ctx, device: DeviceRecord, req: EventsRequest): Promise<EventsResponse> {
+    const receivedAt = this.now();
+    const events: AgentEvent[] = req.events.map((e) => {
+      let data = JSON.stringify(e.data ?? {});
+      if (data.length > EVENT_DATA_MAX) data = JSON.stringify({ truncated: true, size: data.length });
+      return { eventUid: e.event_id.toLowerCase(), type: e.type, occurredAt: new Date(e.occurred_at), data };
+    });
+    await this.sqlDo(ctx, 'event.add', () => this.sql.addAgentEvents(device, events, receivedAt, ctx.requestId));
+    const types: Record<string, number> = {};
+    for (const e of events) types[e.type] = (types[e.type] ?? 0) + 1;
+    ctx.log.info({ deviceId: device.deviceId, types }, '端點事件已寫入');
+    return { accepted: req.events.map((e) => e.event_id), server_time: receivedAt.toISOString() };
   }
 
   async heartbeat(ctx: Ctx, device: DeviceRecord, body: Record<string, unknown>): Promise<{ server_time: string }> {
@@ -249,6 +383,12 @@ export class DeviceService {
       await this.soft(ctx, 'sql.touch(heartbeat)', () => this.sql.touch(device.id, at));
     }
     return { server_time: at.toISOString() };
+  }
+
+  /** 該裝置已有另一條較新的連線(conn 被取代) */
+  replaced(deviceId: string, conn: AgentConnection): boolean {
+    const current = this.connections.get(deviceId);
+    return !!current && current.conn !== conn;
   }
 
   async disconnected(ctx: Ctx, device: DeviceRecord, conn: AgentConnection): Promise<void> {
@@ -276,8 +416,31 @@ export class DeviceService {
     return n;
   }
 
-  /** 關閉服務時中斷所有 Agent 連線(Agent 會退避重連) */
-  closeAll(): void {
+  /** 指令推送通道(CommandChannel):只對本行程握有的連線(單一實例,指南 §8.4) */
+  isOnline(deviceId: string): boolean {
+    return this.connections.has(deviceId);
+  }
+
+  send(deviceId: string, type: string, id: string, body: object): boolean {
+    const live = this.connections.get(deviceId);
+    if (!live) return false;
+    try {
+      live.conn.send(JSON.stringify({ v: 1, type, id, body }));
+      return true;
+    } catch {
+      // 連線正在關閉:回 false,呼叫端留在 queued 重連後再送
+      return false;
+    }
+  }
+
+  /**
+   * 關閉服務時:先送 prepare_shutdown(Agent 送完待送結果、以 1000 關閉、隨機延遲後重連,P4),
+   * 等 graceMs 讓 Agent 送出與關閉,再中斷仍未關閉的連線
+   */
+  async closeAll(graceMs = 1000): Promise<void> {
+    const ids = [...this.connections.keys()];
+    for (const id of ids) this.send(id, 'prepare_shutdown', randomUUID(), { reason: 'server_restart' });
+    if (ids.length && graceMs > 0) await new Promise((r) => setTimeout(r, graceMs));
     for (const live of this.connections.values()) live.conn.close(1001, 'server shutting down');
     this.connections.clear();
   }

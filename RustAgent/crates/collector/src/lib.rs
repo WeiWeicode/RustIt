@@ -3,6 +3,7 @@
 //! 資料來源：sysinfo（OS、記憶體、磁碟區）、WMI（硬體、網路、防毒）、登錄檔（軟體、USB、RustDesk）。
 //! 任何單一來源失敗都不會中斷整體蒐集，錯誤會記錄在 [`ComputerInfo::warnings`]。
 
+mod background;
 mod registry;
 mod wmi_query;
 
@@ -185,7 +186,9 @@ pub struct RustDeskStatus {
 }
 
 /// 完整蒐集一次。WMI 查詢約需 1–3 秒，請在背景執行緒呼叫。
+/// 蒐集期間呼叫端執行緒進入背景模式（低 CPU / I/O 優先權），結束時恢復；單項 WMI 查詢最多等 15 秒（PLATFORM-PLAN §4.10 A6）。
 pub fn collect() -> ComputerInfo {
+    let _bg = background::BackgroundMode::enter();
     let started = Instant::now();
     let mut info = ComputerInfo::default();
     let mut warnings = Vec::new();
@@ -236,6 +239,22 @@ pub fn collect() -> ComputerInfo {
     info.warnings = warnings;
     info.collect_ms = started.elapsed().as_millis();
     info
+}
+
+/// 目前的可移除磁碟區(USB 隨身碟等)。只列舉磁碟區、不查 WMI,可頻繁呼叫(PLATFORM-PLAN §4.2 USB 插拔事件)。
+pub fn removable_volumes() -> Vec<Volume> {
+    Disks::new_with_refreshed_list()
+        .iter()
+        .filter(|d| d.is_removable())
+        .map(|d| Volume {
+            mount_point: d.mount_point().to_string_lossy().into_owned(),
+            label: d.name().to_string_lossy().into_owned(),
+            file_system: d.file_system().to_string_lossy().into_owned(),
+            total: d.total_space(),
+            available: d.available_space(),
+            removable: true,
+        })
+        .collect()
 }
 
 fn current_user() -> String {

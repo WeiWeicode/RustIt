@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://giganexus.local/rustit/contracts/sync.schema.json",
   "title": "POST /agent/v1/sync 請求",
-  "description": "Agent 連線後比對本機暫存(INTEGRATION-PLAN §4.2,M5)。Server 回覆 need(要上傳 payload 的 agent_seq),Agent 再以 POST /agent/v1/inventory 逐筆上傳;inventory 回 200 後才從暫存刪除。",
+  "description": "Agent 連線後比對本機暫存(INTEGRATION-PLAN §4.2、PLATFORM-PLAN §4.2)。Server 回覆 need(要上傳 payload 的 agent_seq)與 skip(不需上傳、可直接刪除的 agent_seq);Agent 以 POST /agent/v1/inventory 逐筆上傳 need,inventory 回 200 後才從暫存刪除。兩者都沒列到的(超過單次上限)留到下一次 /sync。",
   "type": "object",
   "required": ["pending"],
   "properties": {
@@ -25,17 +25,18 @@
   "definitions": {
     "SyncResponse": {
       "title": "POST /agent/v1/sync 回應(200)",
-      "description": "need 依 collected_at 由舊到新排序;content_hash 與目前資料相同、或 (device, agent_seq, content_hash) 已收過的不列入。server_state 以 Server 為準(裝置狀態、device_id),Agent 套用(§4.2 第 4 點)",
+      "description": "need 依 collected_at 由舊到新排序,單次最多 20 筆(PLATFORM-PLAN A3);content_hash 與目前資料相同、或 (device, agent_seq, content_hash) 已收過的列入 skip。server_state 以 Server 為準(裝置狀態、device_id),Agent 套用(INTEGRATION-PLAN §4.2 第 4 點)",
       "type": "object",
-      "required": ["device_id", "need", "server_state"],
+      "required": ["device_id", "need", "skip", "server_state"],
       "properties": {
         "device_id": { "type": "string", "format": "uuid" },
-        "need": { "type": "array", "items": { "type": "integer" } },
+        "need": { "type": "array", "maxItems": 20, "items": { "type": "integer" } },
+        "skip": { "type": "array", "items": { "type": "integer" }, "description": "已收過或與目前資料相同,Agent 可直接從暫存刪除" },
         "server_state": {
           "type": "object",
           "required": ["status", "last_hash"],
           "properties": {
-            "status": { "type": "string", "enum": ["active", "disabled"] },
+            "status": { "type": "string", "enum": ["active", "disabled", "retired"] },
             "last_hash": { "type": "string", "description": "目前資料的 content_hash;沒有資料時為空字串" },
             "last_seq": { "type": "integer" }
           }

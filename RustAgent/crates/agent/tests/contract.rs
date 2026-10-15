@@ -1,7 +1,11 @@
 //! 契約測試(AGENT.md §7.3):Agent 送出的 JSON 必須通過 RustIt/docs/contracts 的 JSON Schema,
 //! Server 的範例回應必須能被 Agent 解析。ItAgentBack 的 npm test 吃同一份範例;改契約時兩邊一起更新。
 
-use rustit_agent::protocol::{Envelope, HelloAck, HelloBody, InventoryRequest, InventoryResponse};
+use rustit_agent::protocol::{
+    CommandBody, CommandUpdate, CommandUpdateAck, Envelope, EventOut, EventsRequest,
+    EventsResponse, HelloAck, HelloBody, InventoryRequest, InventoryResponse, PrepareShutdown,
+    SyncPending, SyncRequest, SyncResponse,
+};
 use rustit_collector::{ComputerInfo, NetAdapter, Software};
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -83,10 +87,32 @@ fn ws_messages_match_schema() {
     let hello = serde_json::to_value(&hello).unwrap();
     assert_valid("ws-envelope.schema.json", &hello);
     assert_eq!(hello["body"]["ips"], json!(["192.0.2.10"]));
+    // P2:送出前填入端點時間;硬體指紋為 64 字元或空字串
+    let stamped = Envelope::new(
+        "hello",
+        json!(HelloBody::from_info(&sample_info()).stamped()),
+    );
+    let stamped = serde_json::to_value(&stamped).unwrap();
+    assert_valid("ws-envelope.schema.json", &stamped);
+    assert!(
+        stamped["body"]["agent_time"]
+            .as_str()
+            .unwrap()
+            .ends_with('Z')
+    );
+    let mut with_id = sample_info();
+    with_id.identity.bios_serial = "EXAMPLE-SN-0001".into();
+    let fp = serde_json::to_value(Envelope::new(
+        "hello",
+        json!(HelloBody::from_info(&with_id)),
+    ))
+    .unwrap();
+    assert_valid("ws-envelope.schema.json", &fp);
+    assert_eq!(fp["body"]["hw_fingerprint"].as_str().unwrap().len(), 64);
 
     let hb = Envelope::new(
         "heartbeat",
-        json!({ "outbox_pending": 0, "last_inventory_seq": 1 }),
+        json!({ "outbox_pending": 0, "events_pending": 3, "last_inventory_seq": 1 }),
     );
     assert_valid(
         "ws-envelope.schema.json",
@@ -115,6 +141,28 @@ fn server_examples_parse() {
     assert_eq!(ack.kind, "hello_ack");
     let body: HelloAck = serde_json::from_value(ack.body.unwrap()).unwrap();
     assert_eq!(body.heartbeat_interval_sec, 30);
+    let s = body.settings.expect("hello_ack 範例帶主機設定");
+    assert_eq!(
+        (
+            s.inventory_interval_sec,
+            s.usb_events,
+            body.settings_version.is_some()
+        ),
+        (Some(3600), Some(true), true)
+    );
+    let sync: SyncResponse =
+        serde_json::from_value(read("examples/sync-response.sample.json")).unwrap();
+    assert_eq!(
+        (
+            sync.need.len(),
+            sync.skip.len(),
+            sync.server_state.status.as_str()
+        ),
+        (1, 1, "active")
+    );
+    let ev: EventsResponse =
+        serde_json::from_value(read("examples/event-response.sample.json")).unwrap();
+    assert_eq!(ev.accepted.len(), 4);
     let hb_ack: Envelope =
         serde_json::from_value(read("examples/ws-heartbeat-ack.sample.json")).unwrap();
     assert_eq!(hb_ack.kind, "heartbeat_ack");
@@ -122,4 +170,97 @@ fn server_examples_parse() {
     let mut extra = read("examples/inventory-response.sample.json");
     extra["future_field"] = json!(1);
     assert!(serde_json::from_value::<InventoryResponse>(extra).is_ok());
+}
+
+/// P2:/sync 與 /events 請求(PLATFORM-PLAN §4.2)
+#[test]
+fn sync_and_events_requests_match_schema() {
+    let sync = SyncRequest {
+        last_acked_seq: 1_791_273_600_001,
+        last_acked_hash: "a".repeat(64),
+        pending: vec![SyncPending {
+            agent_seq: 1_791_273_600_002,
+            collected_at: "2026-10-06T09:00:00.000Z".into(),
+            content_hash: "b".repeat(64),
+        }],
+    };
+    assert_valid("sync.schema.json", &serde_json::to_value(&sync).unwrap());
+
+    let event = |kind: &str, data: Value| EventOut {
+        event_id: "3b9d2f5e-7c41-4a8e-9f06-1d2c3b4a5e61".into(),
+        kind: kind.into(),
+        occurred_at: "2026-10-06T09:00:05.120Z".into(),
+        data,
+    };
+    let req = EventsRequest {
+        events: vec![
+            event(
+                "offline_period",
+                json!({ "started_at": "2026-10-06T09:00:05.120Z", "ended_at": "2026-10-06T10:02:41.900Z", "reason": "network", "retries": 47, "last_error": "IO error" }),
+            ),
+            event(
+                "usb_inserted",
+                json!({ "drive": "E:", "label": "USB-EXAMPLE", "file_system": "FAT32", "total": 16 }),
+            ),
+            event("agent_started", json!({ "agent_version": "0.2.0" })),
+            event(
+                "local_overflow",
+                json!({ "store": "outbox_event", "dropped": 1 }),
+            ),
+        ],
+    };
+    let v = serde_json::to_value(&req).unwrap();
+    assert_valid("event.schema.json", &v);
+    assert_eq!(
+        v["events"][0]["type"], "offline_period",
+        "kind 以 type 送出"
+    );
+}
+
+/// P4:Agent 送出的 command_update 符合 schema;Server 的 command / command_update_ack / prepare_shutdown 範例可解析
+#[test]
+fn command_messages_match_contract() {
+    let cmd: Envelope = serde_json::from_value(read("examples/ws-command.sample.json")).unwrap();
+    assert_eq!(cmd.kind, "command");
+    let body: CommandBody = serde_json::from_value(cmd.body.unwrap()).unwrap();
+    assert_eq!(body.command_id, cmd.id, "信封 id = command_id");
+    assert_eq!(body.kind, "message.show");
+    assert!(body.params["text"].is_string());
+
+    let update = CommandUpdate {
+        command_id: body.command_id.clone(),
+        state: "failed".into(),
+        progress: None,
+        result: None,
+        error_code: Some("UNSUPPORTED_COMMAND".into()),
+        error_message: Some("此版本 Agent 不支援".into()),
+        occurred_at: "2026-10-06T08:00:01.250Z".into(),
+    };
+    assert_valid(
+        "ws-envelope.schema.json",
+        &serde_json::to_value(Envelope::new(
+            "command_update",
+            serde_json::to_value(&update).unwrap(),
+        ))
+        .unwrap(),
+    );
+    // 範例(Server 端測試同一份)可被 Agent 解析
+    let sample: Envelope =
+        serde_json::from_value(read("examples/ws-command-update.sample.json")).unwrap();
+    let parsed: CommandUpdate = serde_json::from_value(sample.body.unwrap()).unwrap();
+    assert_eq!(parsed.state, "succeeded");
+
+    let ack: Envelope =
+        serde_json::from_value(read("examples/ws-command-update-ack.sample.json")).unwrap();
+    let ack: CommandUpdateAck = serde_json::from_value(ack.body.unwrap()).unwrap();
+    assert!(ack.accepted);
+    assert_eq!(ack.command_id, body.command_id);
+
+    let ps: Envelope =
+        serde_json::from_value(read("examples/ws-prepare-shutdown.sample.json")).unwrap();
+    let ps: PrepareShutdown = serde_json::from_value(ps.body.unwrap()).unwrap();
+    assert_eq!(
+        (ps.reason.as_str(), ps.reconnect_after_sec),
+        ("server_restart", None)
+    );
 }

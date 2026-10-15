@@ -1,0 +1,87 @@
+<!--
+  GigaNexus Agent 監控 MSI(PLATFORM-PLAN §4.1、指南 §6.1)。由 build-agent-msi.ps1 建置,不要直接 wix build。
+
+  - 服務 GigaNexusAgent:LocalSystem、自動啟動;失敗復原(10 / 30 / 60 秒、1 天重設、非當機失敗也套用)由服務啟動時自行套用
+  - 程式 %ProgramFiles%\GigaNexus\Agent\rustit-agent.exe
+  - 設定 %ProgramData%\GigaNexus\Agent\(agent.toml、pki\ca.crt、logs\);ACL 只允許 SYSTEM、Administrators(不繼承)
+  - 依部署區建置(test / prod 各一個 MSI);設定內容由建置腳本產生,安裝時不需傳參數(GPO 派送不必做 transform)
+  - 解除安裝:移除服務與程式;ProgramData 的日誌保留
+
+  預處理變數(由建置腳本傳入):Version、AgentExe、AgentToml、CaFile、Env
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="GigaNexus Agent ($(var.Env))"
+           Manufacturer="GigaNexus"
+           Version="$(var.Version)"
+           UpgradeCode="507D8EF3-BE25-46DC-9F08-8490ACD4BE32"
+           Scope="perMachine"
+           Compressed="yes"
+           InstallerVersion="500">
+    <SummaryInformation Description="GigaNexus 端點 Agent(RustIt)" />
+    <MajorUpgrade DowngradeErrorMessage="已安裝較新版本的 GigaNexus Agent,請先解除安裝。" />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- 只支援 64 位元 Windows 10 1809 以上(PRD §7) -->
+    <Launch Condition="VersionNT64" Message="GigaNexus Agent 只支援 64 位元 Windows。" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="GigaNexusProgram" Name="GigaNexus">
+        <Directory Id="INSTALLDIR" Name="Agent" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="GigaNexusData" Name="GigaNexus">
+        <Directory Id="DATADIR" Name="Agent">
+          <Directory Id="PKIDIR" Name="pki" />
+          <Directory Id="LOGSDIR" Name="logs" />
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <!-- 只允許 SYSTEM、Administrators;P:不繼承上層(ProgramData 預設一般使用者可讀) -->
+    <?define DataSddl = "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" ?>
+
+    <ComponentGroup Id="AgentProgram" Directory="INSTALLDIR">
+      <Component Id="AgentExe" Bitness="always64">
+        <File Id="AgentExe" Source="$(var.AgentExe)" Name="rustit-agent.exe" KeyPath="yes" />
+        <ServiceInstall Id="AgentService"
+                        Name="GigaNexusAgent"
+                        DisplayName="GigaNexus Agent"
+                        Description="GigaNexus 端點 Agent:蒐集本機資產並經 Gateway 回報 IT 管理系統(RustIt)"
+                        Type="ownProcess"
+                        Start="auto"
+                        ErrorControl="normal"
+                        Account="LocalSystem"
+                        Arguments="service --config &quot;[DATADIR]agent.toml&quot;"
+                        Vital="yes">
+          <!-- 失敗復原(10 / 30 / 60 秒、1 天重設、非當機失敗也套用)由服務啟動時自行套用:
+               MSI 的 MsiServiceConfig 表 SDK 標示不可靠(WIX1149),Util 的 ServiceConfig 無法設定不同延遲 -->
+        </ServiceInstall>
+        <ServiceControl Id="AgentServiceControl" Name="GigaNexusAgent" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="AgentData">
+      <Component Id="DataDir" Directory="DATADIR" Guid="65D84E37-9EFA-44A2-8939-3B2F2A8B2BF1">
+        <CreateFolder>
+          <PermissionEx Sddl="$(var.DataSddl)" />
+        </CreateFolder>
+        <File Id="AgentToml" Source="$(var.AgentToml)" Name="agent.toml" KeyPath="yes" />
+      </Component>
+      <Component Id="PkiDir" Directory="PKIDIR" Guid="8828616E-A258-494A-8E70-DA16E3BCECC4">
+        <File Id="CaFile" Source="$(var.CaFile)" Name="ca.crt" KeyPath="yes" />
+      </Component>
+      <!-- logs\ 在解除安裝後保留(不列入移除) -->
+      <Component Id="LogsDir" Directory="LOGSDIR" Guid="C38A25C4-38B6-400E-ACBE-5F073194871B" Permanent="yes" KeyPath="yes">
+        <CreateFolder>
+          <PermissionEx Sddl="$(var.DataSddl)" />
+        </CreateFolder>
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="Agent" Title="GigaNexus Agent">
+      <ComponentGroupRef Id="AgentProgram" />
+      <ComponentGroupRef Id="AgentData" />
+    </Feature>
+  </Package>
+</Wix>

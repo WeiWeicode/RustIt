@@ -8,16 +8,20 @@ import type { DepStatus } from '@giganexus/backend-sdk';
 import { loadConfig } from './config.js';
 import { buildAgentApp } from './agent-app.js';
 import { buildMgmtApp } from './mgmt-app.js';
+import { CommandDispatcher } from './services/command-dispatcher.js';
 import { DeviceService } from './services/device-service.js';
 import { MongoSnapshotStore } from './stores/mongo-store.js';
 import { RedisStateStore } from './stores/redis-store.js';
+import { SqlCommandStore } from './stores/sql-command-store.js';
 import { SqlDeviceStore } from './stores/sql-store.js';
 
 const config = loadConfig();
 const sql = new SqlDeviceStore(config.sql);
 const mongo = new MongoSnapshotStore(config.mongoUrl, config.mongoDb, config.snapshotRetentionDays);
 const redis = new RedisStateStore(config.redisUrl, config.redisPrefix);
-const service = new DeviceService(sql, mongo, redis, { heartbeatIntervalSec: config.heartbeatIntervalSec });
+const service = new DeviceService(sql, mongo, redis, { heartbeatIntervalSec: config.heartbeatIntervalSec, settings: config.agentSettings });
+// 指令派送(P4):SQL 與裝置共用連線池,推送經 DeviceService 的 WebSocket 連線表
+const commands = new CommandDispatcher(new SqlCommandStore(() => sql.connection()), sql, service);
 
 const check = async (fn: () => Promise<void>) => {
   try {
@@ -46,8 +50,8 @@ const deps = (): Promise<DepStatus[]> =>
     }),
   );
 
-const mgmt = await buildMgmtApp({ config, service, readiness, deps });
-const agent = await buildAgentApp({ config, service, monitor: config.agentMonitor, deps });
+const mgmt = await buildMgmtApp({ config, service, commands, readiness, deps });
+const agent = await buildAgentApp({ config, service, commands, monitor: config.agentMonitor, deps });
 
 await mgmt.listen({ host: config.host, port: config.port });
 await agent.listen({ host: config.host, port: config.agentPort });

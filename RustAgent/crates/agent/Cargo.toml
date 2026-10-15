@@ -1,30 +1,34 @@
 [package]
 name = "rustit-agent"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2024"
-description = "GigaNexus 端點 Agent:蒐集資產 → HTTPS 回報、一條 WebSocket 心跳(RustIt INTEGRATION-PLAN M2)"
+description = "GigaNexus 端點 Agent:蒐集資產 → HTTPS 回報、一條 WebSocket 心跳;本機加密暫存與離線補傳;固定類型指令;前景或 Windows 服務執行(RustIt PLATFORM-PLAN P1、P2、P4)"
 
 [dependencies]
 rustit-collector = { path = "../collector" }
+# 設定、憑證與連線、退避、信封、停止訊號、檔案日誌、路徑(與 Watchdog 共用,PLATFORM-PLAN §3.1)
+rustit-common = { path = "../common" }
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
-# HTTP 與 WebSocket 共用同一個 rustls::ClientConfig(ENDPOINT-AGENT-GUIDE §3.4、§6.2);不使用 native-tls(私鑰必須可匯出)
-reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls-no-provider"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
-rustls-pki-types = { version = "1.15", features = ["std"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "1.1"
 sha2 = "0.10"
 hex = "0.4"
-uuid = { version = "1.26", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-fastrand = "2.5"
-url = "2.5"
 log = "0.4"
 env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+aes-gcm = "0.10"
+uuid = { version = "1.28.0", features = ["v4"] }
 
 [dev-dependencies]
 # 契約測試:以 RustIt/docs/contracts 的 JSON Schema 驗證 Agent 送出的 JSON(AGENT.md §7.3)
 jsonschema = { version = "0.58", default-features = false }
+tempfile = "3.27.0"
+
+[target."cfg(windows)".dependencies]
+# Windows 服務:SCM 進入點、安裝與失敗復原設定(PLATFORM-PLAN §4.1、指南 §6.1)
+windows-service = "0.8.1"
+# 指令 message.show:WTSSendMessage 送到主控台工作階段(P4)
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_RemoteDesktop", "Win32_UI_WindowsAndMessaging"] }

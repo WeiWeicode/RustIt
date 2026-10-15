@@ -6,14 +6,15 @@
 import sql from 'mssql';
 import type { SqlConfig } from '../config.js';
 import { primaryIpv4 } from '../contracts.js';
-import type { CurrentInventory, DeviceEventType, DeviceRecord, DeviceRow, DeviceStore, InventorySnapshot } from './types.js';
+import type { AgentEvent, CurrentInventory, DeviceEventType, DeviceRecord, DeviceRow, DeviceStore, InventorySnapshot, TouchPatch } from './types.js';
 
 const BY_AGENT = 'agent';
 
 /** 依欄位長度截斷,避免 Agent 回報的異常長字串讓整筆寫入失敗 */
 const cut = (s: string | null | undefined, n: number): string | null => (s == null || s === '' ? null : s.length > n ? s.slice(0, n) : s);
 
-const DEVICE_COLS = `d.id, d.device_id, d.cert_dn, d.cert_fp, d.computer_name, d.status, d.agent_version, d.first_seen_at, d.last_seen_at, d.last_inventory_at`;
+const DEVICE_COLS = `d.id, d.device_id, d.cert_dn, d.cert_fp, d.computer_name, d.status, d.agent_version, d.first_seen_at, d.last_seen_at, d.last_inventory_at,
+  d.hw_fingerprint, d.clock_skew_ms`;
 const SUMMARY_COLS = `${DEVICE_COLS}, i.user_name, i.domain, i.os_name, i.os_version, i.os_display_version, i.os_build, i.manufacturer, i.model, i.cpu_name, i.memory_total`;
 
 type Row = Record<string, unknown>;
@@ -25,11 +26,13 @@ function toDevice(r: Row): DeviceRecord {
     certDn: String(r.cert_dn),
     certFp: String(r.cert_fp).trim(),
     computerName: String(r.computer_name),
-    status: r.status === 'disabled' ? 'disabled' : 'active',
+    status: r.status === 'disabled' || r.status === 'retired' ? r.status : 'active',
     agentVersion: (r.agent_version as string | null) ?? null,
     firstSeenAt: r.first_seen_at as Date,
     lastSeenAt: r.last_seen_at as Date,
     lastInventoryAt: (r.last_inventory_at as Date | null) ?? null,
+    hwFingerprint: r.hw_fingerprint == null ? null : String(r.hw_fingerprint).trim(),
+    clockSkewMs: r.clock_skew_ms == null ? null : Number(r.clock_skew_ms),
   };
 }
 
@@ -78,6 +81,11 @@ export class SqlDeviceStore implements DeviceStore {
       this.connecting = null;
     });
     return this.connecting;
+  }
+
+  /** 指令儲存(SqlCommandStore)共用同一個連線池 */
+  connection(): Promise<sql.ConnectionPool> {
+    return this.ready();
   }
 
   private async request(): Promise<sql.Request> {
@@ -151,18 +159,61 @@ export class SqlDeviceStore implements DeviceStore {
       .query(`INSERT INTO ita.device_event (device_ref, event_type, cert_dn, cert_fp, detail, request_id) VALUES (@id, @type, @dn, @fp, @detail, @rid)`);
   }
 
-  async touch(deviceRef: number, at: Date, patch: { computerName?: string; agentVersion?: string } = {}): Promise<void> {
+  /** 端點事件逐筆「不存在才寫入」;同一批同時重送撞到唯一索引(2601)時重跑一次,已存在者即略過 */
+  async addAgentEvents(device: DeviceRecord, events: AgentEvent[], receivedAt: Date, requestId: string): Promise<void> {
+    if (events.length === 0) return;
+    const run = async () => {
+      const req = (await this.request())
+        .input('id', sql.Int, device.id)
+        .input('dn', sql.NVarChar(450), device.certDn)
+        .input('fp', sql.Char(40), device.certFp)
+        .input('received', sql.DateTime2(3), receivedAt)
+        .input('rid', sql.VarChar(64), cut(requestId, 64));
+      const stmts = events.map((e, k) => {
+        req
+          .input(`u${k}`, sql.UniqueIdentifier, e.eventUid)
+          .input(`t${k}`, sql.VarChar(32), e.type)
+          .input(`o${k}`, sql.DateTime2(3), e.occurredAt)
+          .input(`d${k}`, sql.NVarChar(4000), e.data);
+        return `IF NOT EXISTS (SELECT 1 FROM ita.device_event WHERE device_ref = @id AND event_uid = @u${k})
+          INSERT INTO ita.device_event (device_ref, event_type, cert_dn, cert_fp, request_id, occurred_at, received_at, event_uid, data)
+          VALUES (@id, @t${k}, @dn, @fp, @rid, @o${k}, @received, @u${k}, @d${k});`;
+      });
+      await req.query(`SET XACT_ABORT ON; BEGIN TRAN; ${stmts.join('\n')} COMMIT;`);
+    };
+    try {
+      await run();
+    } catch (err) {
+      if (!isDuplicateKey(err)) throw err;
+      await run();
+    }
+  }
+
+  async touch(deviceRef: number, at: Date, patch: TouchPatch = {}): Promise<void> {
     await (await this.request())
       .input('id', sql.Int, deviceRef)
       .input('at', sql.DateTime2(3), at)
       .input('name', sql.NVarChar(255), cut(patch.computerName, 255))
-      .input('ver', sql.VarChar(32), cut(patch.agentVersion, 32)).query(`
+      .input('ver', sql.VarChar(32), cut(patch.agentVersion, 32))
+      .input('hw', sql.Char(64), patch.hwFingerprint ?? null)
+      .input('skew', sql.Int, patch.clockSkewMs ?? null).query(`
         UPDATE ita.device
         SET last_seen_at = CASE WHEN last_seen_at < @at THEN @at ELSE last_seen_at END,
             computer_name = COALESCE(@name, computer_name),
             agent_version = COALESCE(@ver, agent_version),
+            hw_fingerprint = COALESCE(@hw, hw_fingerprint),
+            clock_skew_ms = CASE WHEN @skew IS NULL THEN clock_skew_ms ELSE @skew END,
+            clock_checked_at = CASE WHEN @skew IS NULL THEN clock_checked_at ELSE @at END,
             updated_at = SYSUTCDATETIME(), updated_by = '${BY_AGENT}'
         WHERE id = @id`);
+  }
+
+  async findByHwFingerprint(hwFingerprint: string, excludeRef: number): Promise<DeviceRecord[]> {
+    const r = await (await this.request())
+      .input('hw', sql.Char(64), hwFingerprint)
+      .input('id', sql.Int, excludeRef)
+      .query(`SELECT ${DEVICE_COLS} FROM ita.device d WHERE d.hw_fingerprint = @hw AND d.id <> @id AND d.merged_into IS NULL ORDER BY d.id`);
+    return (r.recordset as Row[]).map(toDevice);
   }
 
   async currentInventory(deviceRef: number): Promise<CurrentInventory | null> {

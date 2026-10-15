@@ -9,3 +9,5 @@ startup_jitter_sec = 30
 ca_file = "pki/ca.crt"        # 企業根 CA / 臨時 PKI 根憑證(驗證 Gateway)
 cert_file = "pki/agent.crt"   # 裝置憑證(Subject 例 O=GigaNexus Dev,CN=<電腦名稱>;EKU Client Authentication)
 key_file = "pki/agent.key"
+# 正式區改讀 Windows LocalMachine\My(私鑰不可匯出,需以服務 LocalSystem 執行;與 cert_file / key_file 二選一):
+# store_issuer = "GigaNexus Agent CA"   # 簽發者名稱含此字串;在效期內、EKU 含用戶端驗證、取到期日最晚的一張(指南 §3.4)

@@ -12,9 +12,12 @@
  *   DEV_SKIP_TOKEN            dev 專用:管理 API 不驗證 X-Internal-Token(本機 GigaItApp proxy 直連)
  *   MONITOR_URL + MONITOR_API_KEY_FILE        管理 API 的監控(giga-observe 服務 endpoint-api)
  *   AGENT_MONITOR_API_KEY_FILE(或 _KEY)      Agent 通道的監控(服務 endpoint-agent,另一把 Key;同一個 MONITOR_URL)
+ *   AGENT_INVENTORY_INTERVAL_SEC / AGENT_USB_EVENTS   主機下發給 Agent 的設定(hello_ack.settings;PLATFORM-PLAN §4.2),預設 3600 / 1
+ *   AGENT_MAX_INFLIGHT / AGENT_BUSY_RETRY_AFTER_SEC  HTTPS 回報同時處理上限,超過回 429 + Retry-After(A3),預設 32 / 30
  */
 import { readFileSync } from 'node:fs';
 import { isGatewayPort, loadGatewayEnv, loadMonitorEnv, type GatewayEnv, type MonitorEnv } from '@giganexus/backend-sdk';
+import type { AgentSettings } from './contracts.js';
 
 export interface SqlConfig {
   server: string;
@@ -51,6 +54,12 @@ export interface Config {
   heartbeatIntervalSec: number;
   /** Mongo 快照保留天數 */
   snapshotRetentionDays: number;
+  /** 主機下發設定(全部裝置相同;逐台設定待 GigaItApp 畫面) */
+  agentSettings: AgentSettings;
+  /** HTTPS 回報同時處理上限;超過回 429(A3) */
+  agentMaxInflight: number;
+  /** 429 的 Retry-After(秒) */
+  busyRetryAfterSec: number;
 }
 
 export class ConfigError extends Error {
@@ -74,6 +83,12 @@ function secret(env: NodeJS.ProcessEnv, name: string, strictFile: boolean): stri
 function required<T>(name: string, v: T | undefined | null | ''): T {
   if (v === undefined || v === null || v === '') throw new ConfigError(`${name} 未設定`);
   return v;
+}
+
+function int(name: string, raw: string | undefined, fallback: number, min: number, max: number): number {
+  const n = Number(raw ?? fallback);
+  if (!Number.isInteger(n) || n < min || n > max) throw new ConfigError(`${name} 必須是 ${min}–${max} 的整數:${raw}`);
+  return n;
 }
 
 function port(name: string, raw: string | undefined, fallback: number): number {
@@ -139,5 +154,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd?: string): 
     devSkipToken: isDev && flag(env.DEV_SKIP_TOKEN),
     heartbeatIntervalSec: 30,
     snapshotRetentionDays: Number(env.SNAPSHOT_RETENTION_DAYS ?? 90),
+    agentSettings: {
+      inventory_interval_sec: int('AGENT_INVENTORY_INTERVAL_SEC', env.AGENT_INVENTORY_INTERVAL_SEC, 3600, 300, 86400),
+      usb_events: env.AGENT_USB_EVENTS === undefined ? true : flag(env.AGENT_USB_EVENTS),
+    },
+    agentMaxInflight: int('AGENT_MAX_INFLIGHT', env.AGENT_MAX_INFLIGHT, 32, 1, 10000),
+    busyRetryAfterSec: int('AGENT_BUSY_RETRY_AFTER_SEC', env.AGENT_BUSY_RETRY_AFTER_SEC, 30, 1, 3600),
   };
 }

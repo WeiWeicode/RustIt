@@ -39,6 +39,11 @@ services:
       AGENT_TRUSTED_PROXIES: ${AGENT_TRUSTED_PROXIES:?AGENT_TRUSTED_PROXIES 必須設定(Gateway Docker 網段)}
       AGENT_TLS_CERT_FILE: /run/secrets/endpoint_server_crt
       AGENT_TLS_KEY_FILE: /run/secrets/endpoint_server_key
+      # 主機下發給 Agent 的設定(hello_ack.settings)與回報忙碌上限(PLATFORM-PLAN P2、A3)
+      AGENT_INVENTORY_INTERVAL_SEC: ${AGENT_INVENTORY_INTERVAL_SEC:-3600}
+      AGENT_USB_EVENTS: ${AGENT_USB_EVENTS:-1}
+      AGENT_MAX_INFLIGHT: ${AGENT_MAX_INFLIGHT:-32}
+      AGENT_BUSY_RETRY_AFTER_SEC: ${AGENT_BUSY_RETRY_AFTER_SEC:-30}
       # 監控(giga-observe,同一 Gateway 網路的 observe-api):管理 API 與 Agent 通道各一把 Key,架構圖上是兩個服務
       MONITOR_URL: ${MONITOR_URL:-http://observe-api:51202}
       MONITOR_API_KEY_FILE: /run/secrets/monitor_api_key

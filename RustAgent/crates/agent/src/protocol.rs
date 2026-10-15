@@ -5,7 +5,19 @@ use rustit_collector::ComputerInfo;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub use rustit_common::envelope::Envelope;
+
 pub const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// HTTPS / WebSocket 的 User-Agent(指南 §5.6)
+pub fn user_agent() -> String {
+    format!("giganexus-agent/{AGENT_VERSION}")
+}
+
+/// Agent 通道路徑(契約 `/agent/v1`)
+pub const INVENTORY_PATH: &str = "/agent/v1/inventory";
+pub const SYNC_PATH: &str = "/agent/v1/sync";
+pub const EVENTS_PATH: &str = "/agent/v1/events";
+pub const WS_PATH: &str = "/agent/v1/ws";
 
 /// `POST /agent/v1/inventory` 請求(inventory.schema.json)
 #[derive(Debug, Serialize)]
@@ -52,38 +64,6 @@ pub struct InventoryResponse {
     pub result: String,
 }
 
-/// WebSocket 信封 `{v, type, id, body}`(ws-envelope.schema.json)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Envelope {
-    pub v: u32,
-    #[serde(rename = "type")]
-    pub kind: String,
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub body: Option<serde_json::Value>,
-}
-
-impl Envelope {
-    pub fn new(kind: &str, body: serde_json::Value) -> Self {
-        Self {
-            v: 1,
-            kind: kind.to_string(),
-            id: uuid::Uuid::new_v4().to_string(),
-            body: Some(body),
-        }
-    }
-
-    /// 回覆類訊息沿用被回覆訊息的 id
-    pub fn reply(to: &Envelope, kind: &str, body: serde_json::Value) -> Self {
-        Self {
-            v: 1,
-            kind: kind.to_string(),
-            id: to.id.clone(),
-            body: Some(body),
-        }
-    }
-}
-
 /// `hello` 內容:連線後第一則(指南 §6.3 第 2 步)
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct HelloBody {
@@ -93,6 +73,11 @@ pub struct HelloBody {
     pub os_version: String,
     pub ips: Vec<String>,
     pub boot_time: u64,
+    /// 送出時的端點時間(A2);送出前由 [`HelloBody::stamped`] 填入,未填時不送
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub agent_time: String,
+    /// 硬體指紋(A1),見 [`hw_fingerprint`]
+    pub hw_fingerprint: String,
 }
 
 impl HelloBody {
@@ -107,8 +92,119 @@ impl HelloBody {
                 .map(|ip| vec![ip.to_string()])
                 .unwrap_or_default(),
             boot_time: info.system.boot_time,
+            agent_time: String::new(),
+            hw_fingerprint: hw_fingerprint(&info.identity.bios_serial, &info.identity.system_uuid),
         }
     }
+
+    /// 填入目前時間後送出
+    pub fn stamped(&self) -> Self {
+        Self {
+            agent_time: now_rfc3339(),
+            ..self.clone()
+        }
+    }
+}
+
+/// UTC、毫秒(契約的 date-time)
+pub fn now_rfc3339() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// 硬體指紋(ws-envelope HelloBody.hw_fingerprint):SHA-256("rustit-hw-v1|" + BIOS 序號 + "|" + 系統 UUID),
+/// 兩者先去除前後空白、轉大寫;兩者皆為空白或廠商預設值時回空字串(不比對,避免組裝機誤判為同一台)
+pub fn hw_fingerprint(bios_serial: &str, system_uuid: &str) -> String {
+    let bios = bios_serial.trim().to_uppercase();
+    let uuid = system_uuid.trim().to_uppercase();
+    let bios_ok = !bios.is_empty()
+        && !bios.chars().all(|c| c == '0')
+        && ![
+            "SYSTEM SERIAL NUMBER",
+            "TO BE FILLED BY O.E.M.",
+            "DEFAULT STRING",
+            "NOT SPECIFIED",
+        ]
+        .contains(&bios.as_str());
+    let uuid_ok = !uuid.is_empty()
+        && !uuid.chars().all(|c| c == '0' || c == '-')
+        && !uuid.chars().all(|c| c == 'F' || c == '-');
+    if !bios_ok && !uuid_ok {
+        return String::new();
+    }
+    hex::encode(Sha256::digest(
+        format!("rustit-hw-v1|{bios}|{uuid}").as_bytes(),
+    ))
+}
+
+/// 主機下發設定(ws-envelope AgentSettings;PLATFORM-PLAN §4.2 第二層);不認得的欄位忽略
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inventory_interval_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usb_events: Option<bool>,
+}
+
+impl AgentSettings {
+    /// 主機有設定就用主機的(下限 5 分鐘),否則用安裝設定 agent.toml 的值
+    pub fn inventory_interval(&self, install_default: std::time::Duration) -> std::time::Duration {
+        self.inventory_interval_sec
+            .map(|s| std::time::Duration::from_secs(s.clamp(300, 86_400)))
+            .unwrap_or(install_default)
+    }
+
+    pub fn usb_events(&self) -> bool {
+        self.usb_events.unwrap_or(true)
+    }
+}
+
+/// `POST /agent/v1/sync`(sync.schema.json)
+#[derive(Debug, Serialize)]
+pub struct SyncRequest {
+    pub last_acked_seq: u64,
+    pub last_acked_hash: String,
+    pub pending: Vec<SyncPending>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SyncPending {
+    pub agent_seq: u64,
+    pub collected_at: String,
+    pub content_hash: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SyncResponse {
+    pub device_id: String,
+    pub need: Vec<u64>,
+    #[serde(default)]
+    pub skip: Vec<u64>,
+    pub server_state: ServerState,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServerState {
+    pub status: String,
+}
+
+/// `POST /agent/v1/events`(event.schema.json)
+#[derive(Debug, Serialize)]
+pub struct EventsRequest {
+    pub events: Vec<EventOut>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EventOut {
+    pub event_id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub occurred_at: String,
+    pub data: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EventsResponse {
+    pub accepted: Vec<String>,
 }
 
 /// `hello_ack` 內容
@@ -116,6 +212,56 @@ impl HelloBody {
 pub struct HelloAck {
     pub device_id: String,
     pub heartbeat_interval_sec: u64,
+    #[serde(default)]
+    pub clock_skew_ms: Option<i64>,
+    #[serde(default)]
+    pub settings_version: Option<u64>,
+    #[serde(default)]
+    pub settings: Option<AgentSettings>,
+}
+
+/// `command`(ws-envelope CommandBody;P4,類型見 docs/contracts/command-kinds.md)
+#[derive(Debug, Clone, Deserialize)]
+pub struct CommandBody {
+    pub command_id: String,
+    pub kind: String,
+    #[serde(default)]
+    pub params: serde_json::Value,
+    pub expires_at: String,
+    #[serde(default)]
+    pub issued_by: Option<String>,
+}
+
+/// `command_update`(ws-envelope CommandUpdateBody)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CommandUpdate {
+    pub command_id: String,
+    /// acked / running / succeeded / failed
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    pub occurred_at: String,
+}
+
+/// `command_update_ack`(ws-envelope CommandUpdateAckBody)
+#[derive(Debug, Clone, Deserialize)]
+pub struct CommandUpdateAck {
+    pub command_id: String,
+    pub accepted: bool,
+}
+
+/// `prepare_shutdown`(ws-envelope PrepareShutdownBody)
+#[derive(Debug, Clone, Deserialize)]
+pub struct PrepareShutdown {
+    pub reason: String,
+    #[serde(default)]
+    pub reconnect_after_sec: Option<u64>,
 }
 
 #[cfg(test)]
@@ -136,10 +282,46 @@ mod tests {
     }
 
     #[test]
-    fn reply_reuses_message_id() {
-        let hb = Envelope::new("heartbeat", serde_json::json!({}));
-        let ack = Envelope::reply(&hb, "unsupported", serde_json::json!({ "type": "x" }));
-        assert_eq!(ack.id, hb.id);
-        assert_eq!(serde_json::to_value(&ack).unwrap()["type"], "unsupported");
+    fn hw_fingerprint_rules() {
+        let fp = hw_fingerprint(" example-sn-0001 ", "00000000-0000-4000-8000-000000000001");
+        assert_eq!(fp.len(), 64);
+        assert_eq!(
+            fp,
+            hw_fingerprint("EXAMPLE-SN-0001", "00000000-0000-4000-8000-000000000001"),
+            "去空白、不分大小寫"
+        );
+        assert_ne!(
+            fp,
+            hw_fingerprint("EXAMPLE-SN-0002", "00000000-0000-4000-8000-000000000001")
+        );
+        assert_eq!(
+            hw_fingerprint(
+                "To be filled by O.E.M.",
+                "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF"
+            ),
+            ""
+        );
+        assert_eq!(hw_fingerprint("", ""), "");
+        assert_eq!(
+            hw_fingerprint("Default string", "4C4C4544-0042-3510-8048-B4C04F4E4D32").len(),
+            64,
+            "UUID 有效即可"
+        );
+    }
+
+    #[test]
+    fn settings_fallback() {
+        let d = std::time::Duration::from_secs(3600);
+        assert_eq!(AgentSettings::default().inventory_interval(d), d);
+        assert!(AgentSettings::default().usb_events());
+        let s: AgentSettings =
+            serde_json::from_str(r#"{"inventory_interval_sec":60,"usb_events":false,"future":1}"#)
+                .unwrap();
+        assert_eq!(
+            s.inventory_interval(d),
+            std::time::Duration::from_secs(300),
+            "下限 5 分鐘"
+        );
+        assert!(!s.usb_events());
     }
 }

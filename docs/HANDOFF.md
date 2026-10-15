@@ -1,80 +1,98 @@
-# 交接:RustIt 整合(M0–M5 程式實作)
+# 交接:RustIt 第二階段(端點平台框架)
 
-> 建立:2026-10-06。給接手寫程式的 AI(Opus)與工程師。**先讀 `../AGENT.md`,再讀 [INTEGRATION-PLAN.md](INTEGRATION-PLAN.md)(v0.3,完整計畫與完成標準)**;本文只補「現在做到哪、哪些已決定、哪些要先問、怎麼開始」。
+> 給接手的 AI 與工程師。**先讀 `../AGENT.md`,再讀 [PLATFORM-PLAN.md](PLATFORM-PLAN.md)**(第二階段計畫、階段 P0–P8、決定事項);本文只補「現在做到哪、下一步、哪些要先問」。基本階段的完整過程見 [INTEGRATION-PLAN.md](INTEGRATION-PLAN.md) 與 [DevelopmentProcess/NewFeatures.md](DevelopmentProcess/NewFeatures.md)。
 
-## 1. 一句話目標
-
-基本階段(兩天內,甘特圖 W6-7 ~ W6-12):RustAgent 經 Gateway `:9443` 連到 ItAgentBack(Node.js)→ 寫入 SQL Server / Mongo / Redis → GigaItApp「電腦清單」看到使用者自己電腦的基本資訊。進階功能(下指令、軟體派送、遠端、控管、報修)**不做**,等員工入口網與 GigaItApp 完善後再說。
-
-## 2. 目前狀態(2026-10-06)
+## 1. 目前狀態
 
 | 項目 | 狀態 |
 | --- | --- |
-| 計畫、AGENT.md、ADR 0004、本交接文件 | ✅ 已寫,**尚未 commit**(RustIt:`AGENT.md`、`docs/INTEGRATION-PLAN.md`、`docs/HANDOFF.md`、`docs/decisions/0004-*`、`docs/DevelopmentProcess/`、`README.md`、`docs/PROJECT-MAP.md`) |
-| 跨 repo 文件同步 | ✅ 已改,**尚未 commit**:Gateway(`ENDPOINT-AGENT-GUIDE.md` v0.4、`AGENT.md`、`PROJECT-MAP.md`、`ARCHITECTURE.md`、`PRD.md`、`DevelopmentProcess/NewFeatures.md`);根目錄(`PROJECT-MAP.md`、`AGENT.md`、`GigaNexusAIPlan/architecture/workspace.json`,`npm run arch:check` 通過) |
-| 甘特圖 | ✅ 已新增 W6-7 ~ W6-12(M0–M5,10/6–10/7,進度 0%);W6 原有 W6-1 ~ W6-M 維持原排程 |
-| 程式碼 | ❌ **一行都還沒寫**:`RustAgent/crates/agent`、`ItAgentBack/`、`docs/contracts/` 都不存在;目錄尚未搬移 |
-| SQL Server 資料庫 | ❌ 尚未建立(由使用者執行,見 §4) |
-| Gateway `agent.conf` | ⚠ 仍是 gRPC 版 |
-| 倉庫分支 | 根目錄、`giga-api-gateway-bff`、`RustIt` 在 `main`;`GigaItApp` 在 `develop`。**各 repo 各自 commit**;CI 部署分支規則見記憶 `ci-deploy-branches`(BFF 推 `main:develop` 才部署) |
+| 基本階段(INTEGRATION-PLAN M0–M4、M6) | ✅ 完成:Agent 經 Gateway `:9443` 回報 ItAgentBack,GigaItApp「電腦清單」看得到 |
+| `RustAgent/crates/collector` | ✅ 硬體、軟體、網路、防毒、USB 儲存、RustDesk 狀態 |
+| `RustAgent/crates/agent`(`rustit-agent`) | ✅ 前景執行(`run`)與 **Windows 服務**(`service`;開發用 `install` / `uninstall`,P1 第一批);HTTPS 回報、WebSocket hello / 心跳、退避重連、裝置憑證(PEM 檔或 Windows `LocalMachine\My`,P1 PoC 實測通過)、服務模式檔案日誌、監控 MSI(未簽章,P1 VM 驗證通過)。**P2**:本機加密暫存 `state\store.db`(資產 / 事件 outbox、連線紀錄)、離線照常蒐集與 `/sync` 補傳、`offline_period`、USB 插拔與 `agent_started` 事件、429 依 Retry-After、主機下發設定(2026-10-15 VM 驗證通過,見下方 P2-3)。**P4-1(0.3.0,分支 `feature/p4-command`)**:指令執行器 `inventory.collect` / `agent.restart` / `message.show`、本機 `command_log` 去重與待回報狀態 |
+| `RustAgent/crates/demo` | 示範介面;**將改造為使用者端程式 `desktop`**(P8),`src/deploy.rs` 是軟體派送的參考實作(P7 移植到 Agent) |
+| `RustAgent/crates/native` | ✅ 已移除(P1;最後版本 `3ba3827`) |
+| `ItAgentBack` | ✅ 測試區(主機 2,`endpoint-server` + `ita-mongo` / `ita-redis`,CI `develop` 部署);管理 API `GET /v1/devices[/{deviceId}]`;**P4-1(分支 `feature/p4-command`,未合併)**:指令派送器與 basic 指令 API(`/v1/devices/{id}/basic-commands`、`/v1/batches/basic-commands`、`/v1/commands[/{id}[/cancel]]`、`/v1/batches/{id}`),migration 0003 已套用 `giganexus_It_Agent_test`(2026-10-15,經需求方同意);giga-observe 監控已接。**P2 主機端已上測試區**(2026-10-14,MR !10):`/sync`、`/events`、429、時鐘偏差、硬體指紋、主機下發設定;migration 0002 已套用 `giganexus_It_Agent_test` |
+| GigaItApp 電腦清單 | ✅ 清單 + 詳情(概要、磁碟、網卡) |
+| INTEGRATION-PLAN M5(離線暫存、`/sync`) | 併入 PLATFORM-PLAN P2(✅ 完成) |
+| 第二階段計畫 | ✅ `PLATFORM-PLAN.md` v0.4 **定案**(P0,2026-10-13):根目錄 `PROJECT-MAP.md` / `workspace.json`(cbf6db9)、Gateway `ENDPOINT-AGENT-GUIDE.md` v0.5(7319e87)已同步;甘特圖 W6-13 ~ W6-24(P0–P8、上線前準備),舊 W6-1 ~ W6-6、W6-12 已由新任務取代 |
+
+## 2. 下一步
+
+1. **P1 已完成**(2026-10-14 Hyper-V VM 驗證 7 項通過,見下方「P1 收尾:VM 測試」)。Win11 VM 可之後補測;VM 保留作 P2 以後的測試機(檢查點「匯入憑證」)。
+2. **P3 資料呈現**、**P8-1 使用者端外殼與我的電腦** 可並行:P3(管理 API 回完整資產 + GigaItApp 詳情分 Tab)只動後端與前端,適合交給同仁。
+3. **P2 已完成**(主機端與 Agent 端已合併 `develop`;2026-10-15 P2-3 VM 驗證 7 項通過,見下方)。驗證時發現裝置被停用期間會記成 `offline_period`(rejected),已於 0.2.1 排除(BugFix.md 2026-10-15;測試區 VM 仍為 0.2.0,下次重建 MSI 時一併升級)。**P4 指令通道進行中**(設計 `P4-COMMAND-DESIGN.md`,需求方 2026-10-15 確認):P4-1(資料表、契約、派送器、basic API、Agent 三個指令)本機驗證通過,待 MR;下一批 P4-2 `agent.diagnose` / `logs.collect` / `agent.log_level`,P4-3 GigaItApp 指令按鈕與指令紀錄、`gateway-rbac.yaml` 綁 `endpoint.command.basic`(動手前需同意;OpenAPI 註冊後才綁)。P4-1 測試區 VM 驗證需重建 0.3.0 MSI(`agent.restart` 需服務模式)。
+
+### P2-3:VM 驗證(完成標準 PLATFORM-PLAN §4.2)
+
+| 步驟 | 內容 |
+| --- | --- |
+| 準備 | Agent 分支合併後 `build-agent-msi.ps1 -Env test` 重建 MSI;VM 還原「匯入憑證」檢查點後安裝(或直接升級安裝)。確認連線後建立「P2 已安裝」檢查點 |
+| 1. 離線 1 小時 | Hyper-V 中斷 VM 網路介面卡(或 VM 內停用網卡),期間 `Restart-Service GigaNexusAgent` 一次。USB 事件**不能在 VM 驗證**:Agent 只認可移除磁碟區(`DRIVE_REMOVABLE`),附加的 VHD 是固定磁碟、第 2 代 VM 沒有軟碟或 USB 直通;改在自己的電腦以前景模式插拔真的隨身碟(另備一份 `server_url` 指向連不到位址的 agent.toml 模擬離線,兩份放同一目錄共用 `state\`) |
+| 2. 恢復 | 接回網路;主機應收到最新資產(多份時經 `/sync`)、USB 事件(occurred_at 為插拔當下)、**一筆** `offline_period`(開始 / 結束 / 原因 network、跨越服務重啟),沒有重複資料 |
+| 3. 離線重開機 | 離線狀態下重開機(停止超過 10 分鐘才開機則該段以最後嘗試結束),持久化資料仍在(`C:\ProgramData\GigaNexus\Agent\state\` 有 store.db / store.key),恢復後補傳 |
+| 4. 換電腦無法解密 | 把 `state\` 複製到另一台電腦(或開發機)以前景模式指向它啟動 → 日誌「本機暫存無法使用…改名保留並重建」,舊資料無法讀出 |
+| 5. 時鐘偏差 | VM 時間調快 10 分鐘(先關閉時間同步)→ 主機寫 `clock_skew` 事件、Agent 日誌警告 |
+| 6. 停用 | 主機將裝置設為 disabled(目前無管理 API,需以 SQL 更新 `ita.device.status`,先取得同意)→ Agent 暫停蒐集;恢復 active 後繼續 |
+| 查詢 | `ita.device_event`(event_uid 非 NULL 為端點事件)、`ita.device`(`clock_skew_ms`)。`docker logs` 在主機 2 讀不到較新的紀錄(2026-10-15 只讀到 10/14 13:13,疑似日誌輪替),以資料庫為準。VM 的 `C:\ProgramData\GigaNexus\Agent` 只允許 SYSTEM、Administrators,一般檔案總管會顯示「找不到」,改用系統管理員 PowerShell;讀日誌加 `-Encoding UTF8` |
+| 結果(2026-10-15) | **7 項全部通過**(VM `DESKTOP-1TB2UMP`,0.2.0 MSI 升級安裝)。1–2:離線 19 分鐘(中間重啟服務 2 次)與 16.7 小時各只有一筆 `offline_period`(network),恢復後 6 份離線資產經 `/sync` 全部 stored,無重複。3:離線中 Windows Update 重開機 2 次(00:27、00:37),停機不到 10 分鐘延續同一段,事件留在本機恢復後補傳。4:複製 `state\` 以登入者身分前景啟動 → DPAPI 解不開,改名 `.unreadable-…` 後重建。5:時間調快 10 分鐘 → `clock_skew_ms` 599868、`clock_skew` 事件。6:SQL 設 disabled 後重啟服務 → 三個通道 403、暫停蒐集;改回 active 後 10 分鐘內恢復。7(自己的電腦,隨身碟):連線中插拔即時送達;離線插拔後恢復,`usb_*` 的 occurred_at 為插拔當下、同一段 `offline_period`(tls) |
+
+注意:`429`、`400` 與裝置停用 / 退役(0.2.1 起)主機有回應,不算離線,停用的回應還會結束進行中的離線期間;不到 60 秒的中斷不送 `offline_period`;離線期間 Agent 重啟(10 分鐘內)延續同一段。DPAPI 改為執行帳號範圍(SYSTEM),前景模式以登入者身分建立的 `state\` 不能給服務使用(反之亦然)。
+
+### P1 收尾:VM 測試(完成標準 PLATFORM-PLAN §4.1、§4.10 A8)
+
+| 項目 | 內容 |
+| --- | --- |
+| VM | 主機 2 Hyper-V;Win10 22H2 與 Win11 各一台(先做一台也可),2 vCPU / 4 GB / 64 GB,網路接得到 `10.10.130.124:9443`(外部虛擬交換器;Default Switch 是 NAT,**已確認(2026-10-14)來源 IP 會變成主機 2 的 `10.10.130.124`**,防火牆「GigaNexus Agent 9443」要允許 `10.10.130.124`,加 VM 自己的 `172.27.x.x` 無效) |
+| 準備 | 裝好 Windows、加入網域(或先不加)、建立「乾淨」檢查點;測試用裝置憑證:由使用者在主機 2 執行 `RustAgent/installer/host2-issue-test-device-cert.sh <VM 電腦名稱>`(臨時 Agent CA 簽發,產出 `C:\Users\user\agent-certs\<電腦名稱>\` 的 PFX 與密碼檔),PFX 匯入 VM 的 `LocalMachine\My`(不加 `-Exportable`)後刪除主機 2 與 VM 上的副本 |
+| MSI | `RustAgent/installer/build-agent-msi.ps1 -Env test …` 產生 `dist/msi/GigaNexusAgent-<版本>-test.msi` |
+| 驗證 | 1. `msiexec /i … /qn /l*v install.log` 成功;2. `sc qfailure GigaNexusAgent` 為 10 / 30 / 60 秒(服務自行套用);3. 重開機後未登入也自動連線(GigaItApp 電腦清單出現 VM);4. 強制結束行程後自動重啟;5. `icacls C:\ProgramData\GigaNexus\Agent` 只有 SYSTEM、Administrators;6. `msiexec /x` 後服務與 `Program Files\GigaNexus\Agent` 移除、日誌保留;7. 還原檢查點重複安裝 |
+| 已知 | 開發機實測(2026-10-13):MSI 安裝 / 解除安裝成功、服務以 `LocalMachine\My` 憑證啟動;當時發現服務自行套用失敗復原少了 `SERVICE_START` 權限(已修,VM 驗證通過)。ACL 套用前就存在的舊日誌檔仍保有原權限,新檔案才繼承 |
+| 結果(2026-10-14) | Win10 VM `DESKTOP-1TB2UMP`(Default Switch,工作群組):**7 項全部通過**。首次安裝因缺 `VCRUNTIME140.dll` 回 1920 / 1603,改靜態連結 C 執行階段後通過(BugFix.md)。服務端紀錄:強制結束 → WebSocket 1006 → 28 秒後重連;重開機停在登入畫面即重連(關機時送 1001 正常關閉);解除安裝後 1001 且不再連線;還原檢查點重裝沿用同一 deviceId。使用者登入密碼變更不影響(電腦憑證屬 `LocalMachine`) |
+
+主機 2 注意:2026-10-13 啟用 Hyper-V 重開機後,開機排程 `WSL-GigaNexus`(以 `user` 執行 `wsl -d Ubuntu -u root --exec /bin/sleep infinity`)失敗(結果 -1),WSL 未常駐,整個測試區 Gateway 停擺;手動 `Start-ScheduledTask -TaskName WSL-GigaNexus` 後恢復。之後主機 2 重開機要確認此排程(建議為開機觸發加 1 分鐘延遲,需同意後設定)。
 
 ## 3. 已決定(不要重新討論)
 
-| # | 決定 |
-| --- | --- |
-| D1 | Endpoint Server 用 **Node.js(Fastify + TypeScript)**,放 `RustIt/ItAgentBack/`,取代 Rust Axum;Rust 只做端點(ADR 0004) |
-| D2 | 資料庫:正式 `giganexus_It_Agent`、開發 + 測試共用 `giganexus_It_Agent_test`、整合測試 `giganexus_It_Agent_poc_test`(整合測試會清空 schema,不可指向前兩者);主機 `10.10.130.220`;帳號 `ita_app` / `ita_migrate`(正式 `ita_prod_*`) |
-| D3 | `mssql` 驅動 + **手寫 SQL migration**,不用 ORM;SQL Server 2012 語法(無 JSON 函式、無 `CREATE OR ALTER`) |
-| D4 | Agent 本機離線暫存:SQLite(`rusqlite` bundled)+ AES-256-GCM 欄位加密 + DPAPI 保護金鑰;不用 SQLCipher |
-| D5 | MongoDB(快照歷史)+ Redis(在線狀態、快取)放進基本階段;**SQL Server 是唯一真相**,Mongo / Redis 可重建 |
-| D6 | 目錄:`RustIt/RustAgent/`(Rust,`git mv` 搬 `Cargo.*`、`crates/`、`scripts/`、`dist/`、`ui-performance-comparison.md`、`images/`)+ `RustIt/ItAgentBack/`;PRD、PROJECT-MAP、decisions、contracts、DevelopmentProcess 留 `RustIt/docs/`;資料夾 `RustIt` 與 `x-gateway.project: RustIt` 不變 |
-| D7 | 測試區裝置憑證先用 `giga-api-gateway-bff/deploy/gen-temp-pki.sh` 簽的 PEM |
-| D8 | 主管已同意 `giganexus_It_Agent*` 同 Gateway 做法:內網連線 `encrypt: false` |
-| D9 | `endpoint.device.read` 403 的原因是 **缺 `includes` 綁定**,不是命名錯誤(見 §5) |
-| 其他 | dev 旁路(`DEV_TRUST_CLIENT_HEADERS`、`DEV_SKIP_TOKEN`)可用,**`GW_ENV` 非 `dev` 有設定就啟動失敗**;離線暫存與比對(M5)排最後,時間不夠可整段延後 |
+| # | 決定 | 出處 |
+| --- | --- | --- |
+| D1 | Endpoint Server 用 Node.js(Fastify + TypeScript),Rust 只做端點 | ADR 0004 |
+| D2 | 資料庫:正式 `giganexus_It_Agent`、開發 + 測試共用 `giganexus_It_Agent_test`、整合測試 `giganexus_It_Agent_poc_test`;主機 `10.10.130.220`;SQL Server 2012 語法、手寫 migration、內網 `encrypt: false` | INTEGRATION-PLAN D2、D3、D8 |
+| D3 | SQL Server 是唯一真相;Mongo(快照、心跳)與 Redis(在線)可重建 | INTEGRATION-PLAN §3.1 |
+| D4 | Agent 通訊:HTTPS 回報 + 一條 WebSocket(不用 gRPC);Agent 與 Server 只靠 `docs/contracts/` 溝通 | ADR 0001、`AGENT.md` §7.3 |
+| D5 | 指令只開放固定類型,依風險拆 basic / admin 路徑,權限在 BFF 檢查 | 指南 §8.2–§8.3 |
+| D6 | Agent / Watchdog 升級不覆寫自己,由對方替換 | 指南 §6.5、§7.4 |
+| D7 | 軟體派送:安裝檔放 NAS,伺服器以 HTTPS(mTLS)提供,Agent 驗 SHA-256 與簽章者 | ADR 0002(方案 B) |
+| D8 | 本機持久化:SQLite + AES-256-GCM + DPAPI;連不上主機也要記錄(P2) | INTEGRATION-PLAN D4、PLATFORM-PLAN §4.2 |
+| D9 | 監控服務與使用者端程式分開;使用者端由 Demo 改造,egui 原生版移除 | PLATFORM-PLAN §4.8、§11 Q1–Q2 |
+| D10 | 軟體庫 NAS `\\10.10.130.31\docker-folder\RustIT\`,帳密只給後端 | PLATFORM-PLAN §4.6 |
+| D11 | 建置與簽章:Windows Runner(先放主機 2,不放 AD 主機)建置 + 人工簽章 | PLATFORM-PLAN §4.9 |
 
 ## 4. 需要使用者親自做的事(AI 不可代做)
 
-- **建庫**:AI **不用 `sa`**、不連 `10.10.130.220` 建庫。M1 開工時由 AI 產出 T-SQL(建立 `giganexus_It_Agent_test`、`giganexus_It_Agent_poc_test`、登入帳號 `ita_app` / `ita_migrate`、schema `ita`、權限;密碼用佔位字串),**貼給使用者在 SQL Server 執行**;使用者把帳密放進 `ItAgentBack/.env`(不進版控)與主機 2 機密。正式庫等 2026-12 正式區再建。
-- **輸入任何真實帳密**:瀏覽器登入 Gateway / IT 管理系統由使用者自己做(`GigaItApp/AGENT.md` §9)。
-- **任何機密**:不要印在對話或寫進 repo。
+- **資料庫**:建庫、建帳號、任何 `sa` 操作;AI 產出 T-SQL,由使用者執行。migration 由開發者電腦 `npm run db:migrate` 套用到 `giganexus_It_Agent_test`。
+- **主機 2 機密**:`ItAgentBack/deploy/host2-set-secrets.sh` 由使用者執行(密碼隱藏輸入);裝置憑證取走後刪除主機上的副本。
+- **憑證與簽章**:AD CS 範本、程式碼簽章憑證、NAS 掛載帳號由 IT / 使用者處理。
+- **任何真實帳密**:不要印在對話或寫進 repo。
 
-## 5. 權限 403 的處理(寫在計畫 M4,別提前做)
+## 5. 要先取得同意才能做的事
 
-`GigaItApp/deploy/gateway-rbac.yaml` 的 `it.endpoint-device.read`(選單)與 `it.endpoint-device.list`(Tab)沒有 `includes`,且 Gateway 內沒有 `endpoint.device.read` 這個 API 權限(要等 ItAgentBack 的 OpenAPI 註冊才會建立)。**順序**:ItAgentBack 部署到測試區並註冊 OpenAPI(`x-permission: endpoint.device.read`)→ 再把兩個節點補 `includes: [endpoint.device.read]` 並 apply。S112009 已有 `it-admin`,綁定後自動取得,不需 SQL 指派。先補綁定會讓 apply 找不到權限。
-
-## 6. 執行順序與驗收(詳見 INTEGRATION-PLAN §6)
-
-M0 目錄重整 + 契約 → M1 ItAgentBack(骨架、三種儲存、管理 API、dev 旁路)→ M2 RustAgent MVP → **M3 GigaItApp 顯示(本機閉環,三項驗收達成)** → M4 測試區接通 → M5 離線暫存與 `/sync`。每個里程碑要能獨立驗證;M3 完成就等於基本階段的 1、2、3 在本機成立。
-
-建議 commit 切法(各 repo 各自 commit,**commit 前先問使用者**):
-
-1. RustIt:先 commit 目前的文件(計畫、AGENT.md、ADR、本檔);Gateway、根目錄的文件同步也各 commit 一次。
-2. M0 的 `git mv` 搬移**單獨一個 commit**(只搬、不改內容),之後再修路徑。
-
-## 7. 要先取得同意才能做的事(Gateway `AGENT.md` §10.5)
-
-| 動作 | 狀態 |
+| 動作 | 說明 |
 | --- | --- |
-| 改文件(Gateway、根目錄、workspace.json、甘特圖) | ✅ 已同意並完成 |
-| 改 **GigaItApp 程式**(`types.ts`、`Devices.vue`、`vite.config.ts` 開發 proxy、`gateway-rbac.yaml`) | 計畫已列(§9),**動手前(M3)簡短確認一次** |
-| 改 **Gateway 程式**(`nginx/conf.d/agent.conf`、E2E `06-websocket-agent`、`tools/mock-upstream/endpoint.js`、`deploy/`、env `ENDPOINT_GRPC_UPSTREAM` → `ENDPOINT_AGENT_UPSTREAM`) | 計畫已列,**動手前(M4)簡短確認一次**;先改 mock 與 E2E,再改 Nginx,`nginx -t` 與 E2E 全綠才合併 |
-| 主機 2 部署(`test.env`、機密、容器)、推 `develop` 觸發 CI | M4 動手前確認;主機 2 建置要 `--pull`(記憶 `host2-node-image-pull`) |
-| 測試區是否可從使用者電腦連 `:9443` | M4 前先 `Test-NetConnection 10.10.130.124 -Port 9443`;不通就回報,不改防火牆 |
+| 改 GigaItApp(詳情 Tab、指令按鈕、新選單、`gateway-rbac.yaml`) | 各階段動手前簡短確認;API 權限要等 ItAgentBack 註冊 OpenAPI 後才綁 `includes` |
+| 改 Gateway(指南修訂、BFF 權限) | PLATFORM-PLAN §10、§12 |
+| 改根目錄 repo(`PROJECT-MAP.md`、`workspace.json`、甘特圖) | 根目錄 `AGENT.md` §4.4 |
+| 合併到 `develop`(觸發測試區部署)、主機 2 設定(NAS 掛載、`ita.env`) | 測試區共用,合併前提醒在群組告知 |
+| 在任何**別人**的電腦安裝 Agent 或下指令 | 只用自己的電腦測試(`AGENT.md` §5) |
 
-## 8. 開工前先讀 / 先查
+## 6. 開工前先讀 / 先查
 
-1. `../AGENT.md`(本專案準則;AI 分工、部署區、Rust 與 Node.js 規則、紀錄格式)。
-2. `INTEGRATION-PLAN.md` §3(儲存分工與寫入順序)、§4(離線比對)、§5(契約與管理 API)。
-3. `../../giga-api-gateway-bff/docs/ENDPOINT-AGENT-GUIDE.md` v0.4:§3 憑證、§4 `:9443`、§5 Server、§6 Agent、§8 管理 API。
-4. `../../giga-api-gateway-bff/samples/node-backend/`(複製為 `ItAgentBack/` 的起點,`AGENT.md` §0 要命名專案:`gateway.project = RustIt`)。
-5. `../../giga-observe/docker-compose.yml`(Mongo / Redis 不對外開 port 的做法,可照抄)。
-6. `../../GigaItApp/frontend/src/pages/endpoint/Devices.vue`、`api/types.ts`(`EndpointDevice` 只能新增欄位)。
-7. `RustAgent/crates/collector/src/lib.rs`(`ComputerInfo`,serde 輸出為 snake_case;`cargo run -p rustit-collector --example dump` 的結果含真實個資,**不可提交**,範例檔要去識別化)。
+1. `../AGENT.md`(分工、部署區、Rust 與 Node.js 規則、Git 分支)。
+2. `PLATFORM-PLAN.md`(本階段)→ 對應階段的指南章節:`../../giga-api-gateway-bff/docs/ENDPOINT-AGENT-GUIDE.md` §6(Agent)、§7(Watchdog 與管道)、§8(管理 API 與指令)。
+3. `PROJECT-MAP.md`(目錄與檔案職責)、`../ItAgentBack/docs/DB_SCHEMA.md`(資料表與寫入順序)、`contracts/README.md`(相容規則)。
+4. 測試區 Agent 套件:`RustAgent/dist/rustit-agent-test/`(exe + `agent.toml` + `pki/`,不進版控,含私鑰)。
 
-## 9. 完成後要做的收尾
+## 7. 完成後的收尾
 
-- 各 repo `docs/DevelopmentProcess/` 留紀錄(格式見 `AGENT.md` §10);改結構時同步各 `docs/PROJECT-MAP.md`;`workspace.json` 有變就 `npm run arch:check`。
-- 甘特圖:啟動 `GigaNexusAIPlan`(`node --disable-warning=ExperimentalWarning server/index.js`,http://localhost:5190),以 `POST /api/tasks/:id/progress` 更新 W6-7 ~ W6-12 進度後關閉服務(記憶 `schedule-source-gantt`)。
-- 目錄搬移完成後,根目錄 `PROJECT-MAP.md` 的 `RustIt/docs/ui-performance-comparison.md` 連結改為 `RustIt/RustAgent/docs/ui-performance-comparison.md`。
-- 更新記憶 `endpoint-agent-rust-websocket`。
+- `docs/DevelopmentProcess/` 留紀錄(格式見 `AGENT.md` §10);改結構時同步 `docs/PROJECT-MAP.md`;`../GigaNexusAIPlan/architecture/*.json` 有變就 `npm run arch:check`。
+- 甘特圖:經 API 更新對應任務進度(根目錄記憶 `schedule-source-gantt`)。
+- 本文件「目前狀態」與「下一步」隨階段更新。

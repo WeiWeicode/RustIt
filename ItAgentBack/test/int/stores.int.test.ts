@@ -11,10 +11,12 @@ import { connect, migrate, migrateConfig, resetSchema } from '../../src/db/migra
 import { DeviceService } from '../../src/services/device-service.js';
 import { MongoSnapshotStore } from '../../src/stores/mongo-store.js';
 import { RedisStateStore } from '../../src/stores/redis-store.js';
+import { SqlCommandStore } from '../../src/stores/sql-command-store.js';
 import { SqlDeviceStore } from '../../src/stores/sql-store.js';
+import { CommandDispatcher } from '../../src/services/command-dispatcher.js';
 import { MongoClient } from 'mongodb';
 import { Redis } from 'ioredis';
-import { DN, FP, inventoryRequest } from '../helpers.js';
+import { DN, FakeConnection, FP, inventoryRequest } from '../helpers.js';
 
 const env = process.env;
 const testDb = env.ITA_TEST_DB_NAME ?? '';
@@ -104,11 +106,110 @@ describe('SQL Server + Mongo + Redis', () => {
 
   it('WebSocket 在線狀態寫入 Redis(TTL),關閉後離線', async () => {
     const device = await service.identify(ctx, DN, 'c'.repeat(40));
-    const conn = { close() {}, terminate() {} };
+    const conn = { send() {}, close() {}, terminate() {} };
     await service.connected(ctx, device, conn);
     await service.heartbeat(ctx, device, { outbox_pending: 0 });
     assert.equal((await service.listDevices(ctx))[0]!.online, true);
     await service.disconnected(ctx, device, conn);
     assert.equal((await service.listDevices(ctx))[0]!.online, false);
+  });
+
+  it('P2:/sync 以 Mongo 已收過的 seq 去重;端點事件以 event_id 去重(過濾唯一索引)', async () => {
+    const device = await service.identify(ctx, DN, 'c'.repeat(40));
+    const seq = inventoryRequest().agent_seq;
+    const res = await service.sync(ctx, device, {
+      pending: [
+        { agent_seq: 1, collected_at: '2026-10-01T00:00:00Z', content_hash: 'd'.repeat(64) },
+        { agent_seq: seq + 5, collected_at: '2026-10-07T00:00:00Z', content_hash: 'e'.repeat(64) },
+      ],
+    });
+    assert.deepEqual(res.need, [seq + 5]);
+    assert.deepEqual(res.skip, [1]);
+    assert.equal(res.server_state.last_seq, seq);
+
+    const events = {
+      events: [
+        { event_id: '3b9d2f5e-7c41-4a8e-9f06-1d2c3b4a5e61', type: 'usb_inserted', occurred_at: '2026-10-06T09:30:12.004Z', data: { drive: 'E:' } },
+        { event_id: '9a4c6e1b-2d3f-4b5a-8c7d-0e1f2a3b4c52', type: 'agent_started', occurred_at: '2026-10-06T09:35:00Z', data: {} },
+      ],
+    };
+    assert.equal((await service.ingestEvents(ctx, device, events)).accepted.length, 2);
+    await service.ingestEvents(ctx, device, events);
+    const pool = await connect(migrateConfig(env, testDb));
+    try {
+      const r = await pool.request().query(`SELECT event_type, occurred_at, received_at, data FROM ita.device_event WHERE event_uid IS NOT NULL ORDER BY occurred_at`);
+      assert.equal(r.recordset.length, 2, '重送不重複');
+      assert.equal((r.recordset[0].occurred_at as Date).toISOString(), '2026-10-06T09:30:12.004Z');
+      assert.ok(r.recordset[0].received_at instanceof Date);
+      assert.equal(JSON.parse(r.recordset[0].data as string).drive, 'E:');
+    } finally {
+      await pool.close();
+    }
+  });
+
+  it('P2:hello 記錄時鐘偏差與硬體指紋;另一台同指紋時寫 suspected_duplicate', async () => {
+    const device = await service.identify(ctx, DN, 'c'.repeat(40));
+    const hw = 'f'.repeat(64);
+    const ack = await service.hello(ctx, device, { agent_version: '0.2.0', host_name: 'PC-EXAMPLE-01', agent_time: new Date(Date.now() + 600_000).toISOString(), hw_fingerprint: hw });
+    assert.ok(ack.clock_skew_ms! > 590_000);
+    const again = await sql.findByDn(DN);
+    assert.equal(again!.hwFingerprint, hw);
+    assert.ok(again!.clockSkewMs! > 590_000);
+
+    const other = await service.identify(ctx, 'O=GigaNexus Dev,CN=PC-EXAMPLE-NEW', 'd'.repeat(40));
+    await service.hello(ctx, other, { agent_version: '0.2.0', host_name: 'PC-EXAMPLE-NEW', hw_fingerprint: hw });
+    assert.deepEqual(
+      (await sql.findByHwFingerprint(hw, other.id)).map((d) => d.deviceId),
+      [device.deviceId],
+    );
+    const pool = await connect(migrateConfig(env, testDb));
+    try {
+      const r = await pool.request().query(`SELECT event_type FROM ita.device_event WHERE event_type IN ('clock_skew', 'suspected_duplicate') ORDER BY id`);
+      assert.deepEqual(
+        r.recordset.map((x) => x.event_type),
+        ['clock_skew', 'suspected_duplicate'],
+      );
+    } finally {
+      await pool.close();
+    }
+  });
+
+  it('P4:指令 SQL(0003):建立、冪等、推送與條件更新、斷線退回、逾期掃描、批次統計', async () => {
+    const commands = new CommandDispatcher(new SqlCommandStore(() => sql.connection()), sql, service);
+    const who = { sub: '1', emp: 'S000001', name: '測試人員' };
+    const device = await service.identify(ctx, DN, 'c'.repeat(40));
+    const queued = await commands.create(ctx, who, 'basic', device.deviceId, { kind: 'inventory.collect', idempotencyKey: 'int-1', expiresInSec: 60 });
+    assert.equal(queued.state, 'queued');
+    assert.equal((await commands.create(ctx, who, 'basic', device.deviceId, { kind: 'inventory.collect', idempotencyKey: 'int-1' })).commandId, queued.commandId);
+
+    const conn = new FakeConnection();
+    await service.connected(ctx, device, conn);
+    await commands.onHello(ctx, device.id);
+    assert.equal(conn.sent.filter((m) => m.type === 'command').length, 1);
+    const shown = await commands.create(ctx, who, 'basic', device.deviceId, { kind: 'message.show', params: { text: '整合測試' } });
+    assert.equal(shown.state, 'sent');
+
+    assert.deepEqual(await commands.onUpdate(ctx, device.id, { command_id: queued.commandId, state: 'acked' }), { command_id: queued.commandId, accepted: true, state: 'acked' });
+    await commands.onUpdate(ctx, device.id, { command_id: queued.commandId, state: 'running', progress: 30 });
+    await commands.onUpdate(ctx, device.id, { command_id: queued.commandId, state: 'succeeded', result: { agent_seq: 1, result: 'stored' } });
+    assert.equal((await commands.onUpdate(ctx, device.id, { command_id: queued.commandId, state: 'running' }))!.accepted, false, '終態不可再變');
+    const done = await commands.get(ctx, queued.commandId);
+    assert.deepEqual([done.state, done.progress, done.result, done.createdBy], ['succeeded', 100, { agent_seq: 1, result: 'stored' }, { emp: 'S000001', name: '測試人員' }]);
+    assert.ok(done.sentAt && done.ackedAt && done.startedAt && done.finishedAt);
+
+    // 斷線:sent 改回 queued;逾期掃描(以未來時間)設為 expired
+    await commands.onDisconnected(ctx, device.id);
+    await service.disconnected(ctx, device, conn);
+    assert.equal((await commands.get(ctx, shown.commandId)).state, 'queued');
+    const later = new CommandDispatcher(new SqlCommandStore(() => sql.connection()), sql, service, { now: () => new Date(Date.now() + 2 * 3600_000) });
+    assert.deepEqual(await later.sweep(ctx), { expired: 1, timedOut: 0 });
+    assert.equal((await commands.get(ctx, shown.commandId)).state, 'expired');
+
+    const batch = await commands.createBatch(ctx, who, 'basic', [device.deviceId], { kind: 'agent.restart' });
+    assert.equal((await commands.getBatch(ctx, batch.batchId)).counts.queued, 1);
+    const page = await commands.list(ctx, { deviceId: device.deviceId, limit: 2 });
+    assert.equal(page.items.length, 2);
+    assert.ok(page.nextCursor);
+    assert.equal((await commands.list(ctx, { deviceId: device.deviceId, cursor: page.nextCursor!, limit: 10 })).items.length, 1);
   });
 });
