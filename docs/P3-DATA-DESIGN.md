@@ -100,7 +100,7 @@ Tab 只在切換時載入(事件、軟體表格大),沿用 `DeviceCommands` 的�
 - 整合測試抓到:`LIKE N'%"software":[{%'` 的 `[` 在 SQL Server LIKE 是字元集合開頭,改為跳脫。
 - `code-reviewer`、`security-auditor` 子代理審查後的修正:合併後先關閉 WebSocket 再清理;回填改游標並在交易內鎖住資產列重讀(與資產寫入不重複、不飢餓,無法解析的記 warn);合併不覆蓋目標狀態、目標退役或來源停用 / 退役拒絕;合併取消兩台未完成的指令(避免偽造指紋取得舊裝置的排隊指令);新登錄早於舊裝置最後回報需 force;並行重送回 `alreadyMerged`;`setStatus` 交易內確認未合併;LIKE 參數長度放寬為跳脫後上限;交易後也關閉目標連線。
 - **未處理(已知)**:資料範圍依 `cos` 過濾(指南 §10 E6)仍未做,目前有 `endpoint.device.read` 即可看全部公司的電腦、有 `endpoint.command.admin` 即可管理全部;上線前必須完成(列入指南 §11)。合併路由尚未寫入指南 §8.3 表格(需 Gateway repo 同意)。
-- **部署順序**:1. 需求方同意後套用 migration 0004 到 `giganexus_It_Agent_test` → 2. RustIt 合併 develop(endpoint-server 自動註冊 OpenAPI,建立 `endpoint.command.admin`)→ 3. GigaItApp 合併 develop(rbac-test 套用 `it.endpoint-device.admin`)。GigaItApp 先部署也可用(清單相容舊回應,只是沒有分頁與新功能)。
+- **部署順序**(1、3 已完成,2026-10-16):1. migration 0004 套用到 `giganexus_It_Agent_test` → 2. RustIt 合併 develop(endpoint-server 自動註冊 OpenAPI,建立 `endpoint.command.admin`)→ 3. GigaItApp 合併 develop(rbac-test 套用 `it.endpoint-device.admin`)。GigaItApp 先部署也可用(清單相容舊回應,只是沒有分頁與新功能)。
 
 ## 7. 決定事項(2026-10-16)
 
