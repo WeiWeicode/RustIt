@@ -2,6 +2,10 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-16 E6 資料範圍依公司(`cos`)過濾 設計草案
+- 內容:資安稽核 M2(有 `endpoint.device.read` 看得到全部公司、有 admin 管得到全部公司;指南 §8.2、§10.2 E6)。盤點 Token(`cos` 為公司名稱陣列、`roles` 為角色代碼)與 13 條管理 API 的查找點;§2 列 9 項待需求方決定(電腦歸屬依據建議「憑證 DN → 回報網域 → 未指定,IT 手動優先」;全部公司角色建議設定檔 `ENDPOINT_SCOPE_ALL_ROLES`,測試區先 `it-admin`);§3 以建議方案設計 migration 0005(`ita.device.company`、`company_source`)、`MgmtCtx` 型別強制範圍、範圍外一律 404、新路由 `PUT /v1/devices/{id}/company`;§5 測試計畫(每條路由三種 Token、404 本文與不存在相同、路由清單比對)。
+- 檔案:`docs/E6-COMPANY-SCOPE-DESIGN.md`(新)
+
 ## 2026-10-16 P3 資料呈現:管理 API 分頁與篩選、事件、下載 JSON、停用 / 退役、合併(ItAgentBack)
 - 內容:依 `P3-DATA-DESIGN.md`(需求方 2026-10-16 確認:現在做分頁、P3-1 ~ P3-3 由 Claude 一起做)。migration 0004 `ita.device_software`(資產寫入時替換、啟動時回填);`GET /v1/devices` 分頁(`page`、`pageSize` ≤ 200,回 `total`)與篩選(關鍵字:名稱 / 使用者 / IP / MAC / 裝置代碼;軟體名稱;OS;在線;狀態,預設不列退役與已合併);詳情加 `suspectedDuplicates`、`clockSkewMs`、`mergedInto`、`retiredAt`;`GET /events`(游標)、`GET /inventory.json`;`PUT /status`、`POST /merge`(`endpoint.command.admin`,OpenAPI 宣告此權限)。子代理審查後修正見設計 §6.1。**行為變更**:清單預設每頁 50 台、不含退役與已合併(GigaItApp 同步改分頁;舊版前端只會看到第一頁)。
 - 檔案:`ItAgentBack/db/migrations/0004_device_software.sql`、`src/routes/devices.ts`、`src/services/device-service.ts`、`src/stores/sql-store.ts`、`types.ts`、`mongo-store.ts`、`redis-store.ts`、`src/openapi.ts`、`src/server.ts`、`test/devices.test.ts`(新)、`test/helpers.ts`、`test/mgmt-app.test.ts`、`test/int/stores.int.test.ts`;文件 `ItAgentBack/docs/DB_SCHEMA.md`、`docs/PROJECT-MAP.md`、`docs/P3-DATA-DESIGN.md`、`docs/HANDOFF.md`
