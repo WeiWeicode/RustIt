@@ -60,15 +60,25 @@ describe('OpenAPI(BACKEND-GUIDE.md §6.1)', () => {
     const declared = new Set(doc['x-permissions'].map((p: { code: string }) => p.code));
     assert.ok(declared.has('endpoint.device.read'));
     const ops = Object.values(doc.paths as Record<string, Record<string, Record<string, unknown>>>).flatMap((p) => Object.values(p));
-    assert.equal(ops.length, 2);
+    // 管理等級(P3):裝置狀態與合併;其餘為查詢
+    const ADMIN_OPS = ['endpoint.device.status', 'endpoint.device.merge'];
+    assert.equal(ops.length, 6);
     for (const op of ops) {
       const id = String(op.operationId);
       assert.match(id, CODE);
       assert.ok(op.summary && typeof op.description === 'string');
       assert.ok(typeof op['x-gherkin'] === 'string' && /^場景[::]/m.test(op['x-gherkin']), `${id} 缺少 x-gherkin`);
-      assert.equal(op['x-permission'], 'endpoint.device.read');
+      assert.equal(op['x-permission'], ADMIN_OPS.includes(id) ? 'endpoint.command.admin' : 'endpoint.device.read', id);
+      assert.ok(declared.has(op['x-permission'] as string), `${id} 的權限未宣告`);
     }
-    assert.deepEqual(Object.keys(doc.paths).sort(), ['/v1/devices', '/v1/devices/{deviceId}']);
+    assert.deepEqual(Object.keys(doc.paths).sort(), [
+      '/v1/devices',
+      '/v1/devices/{deviceId}',
+      '/v1/devices/{deviceId}/events',
+      '/v1/devices/{deviceId}/inventory.json',
+      '/v1/devices/{deviceId}/merge',
+      '/v1/devices/{deviceId}/status',
+    ]);
   });
 });
 

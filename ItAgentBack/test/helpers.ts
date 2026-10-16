@@ -7,10 +7,12 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { primaryIpv4, type InventoryRequest } from '../src/contracts.js';
+import { AppError } from '../src/errors.js';
 import { CommandDispatcher } from '../src/services/command-dispatcher.js';
 import { CommandFileService } from '../src/services/command-files.js';
 import { DeviceService } from '../src/services/device-service.js';
 import type {
+  Actor,
   AgentEvent,
   BatchRecord,
   CommandFileRecord,
@@ -21,11 +23,15 @@ import type {
   CommandState,
   CommandStore,
   CurrentInventory,
+  DeviceEventRecord,
   DeviceEventType,
+  DeviceFilter,
   DeviceRecord,
   DeviceRow,
+  DeviceStatus,
   DeviceStore,
   InventorySnapshot,
+  MergeResult,
   NewBatch,
   NewCommand,
   NewCommandFile,
@@ -53,11 +59,16 @@ class Failable {
   }
 }
 
+/** 清單不篩選、第一頁(測試用) */
+export const LIST_ALL = { statuses: [], page: 1, pageSize: 50 };
+
 export class MemoryDeviceStore extends Failable implements DeviceStore {
-  devices: DeviceRecord[] = [];
+  devices: (DeviceRecord & { mergedInto?: number | null; retiredAt?: Date | null })[] = [];
   inventories = new Map<number, InventorySnapshot>();
-  events: { deviceRef: number | null; type: DeviceEventType; detail: string }[] = [];
-  agentEvents: (AgentEvent & { deviceRef: number; receivedAt: Date })[] = [];
+  events: { id?: number; deviceRef: number | null; type: DeviceEventType; detail: string }[] = [];
+  agentEvents: (AgentEvent & { id?: number; deviceRef: number; receivedAt: Date })[] = [];
+  /** 主機稽核與端點事件共用的寫入順序(對應 device_event.id) */
+  private eventSeq = 0;
 
   async ping() {
     this.hit('ping');
@@ -84,22 +95,22 @@ export class MemoryDeviceStore extends Failable implements DeviceStore {
       clockSkewMs: null,
     };
     this.devices.push(d);
-    this.events.push({ deviceRef: d.id, type: 'registered', detail: '' });
+    this.events.push({ id: ++this.eventSeq, deviceRef: d.id, type: 'registered', detail: '' });
     return { ...d };
   }
   async updateFingerprint(device: DeviceRecord, certFp: string) {
     this.hit('updateFingerprint');
     this.byId(device.id).certFp = certFp;
-    this.events.push({ deviceRef: device.id, type: 'fingerprint_changed', detail: device.certFp });
+    this.events.push({ id: ++this.eventSeq, deviceRef: device.id, type: 'fingerprint_changed', detail: device.certFp });
   }
   async addEvent(device: DeviceRecord | null, type: DeviceEventType, detail: string) {
     this.hit('addEvent');
-    this.events.push({ deviceRef: device?.id ?? null, type, detail });
+    this.events.push({ id: ++this.eventSeq, deviceRef: device?.id ?? null, type, detail });
   }
   async addAgentEvents(device: DeviceRecord, events: AgentEvent[], receivedAt: Date) {
     this.hit('addAgentEvents');
     for (const e of events)
-      if (!this.agentEvents.some((x) => x.deviceRef === device.id && x.eventUid === e.eventUid)) this.agentEvents.push({ ...e, deviceRef: device.id, receivedAt });
+      if (!this.agentEvents.some((x) => x.deviceRef === device.id && x.eventUid === e.eventUid)) this.agentEvents.push({ ...e, id: ++this.eventSeq, deviceRef: device.id, receivedAt });
   }
   async touch(deviceRef: number, at: Date, patch: TouchPatch = {}) {
     this.hit('touch');
@@ -112,7 +123,7 @@ export class MemoryDeviceStore extends Failable implements DeviceStore {
   }
   async findByHwFingerprint(hwFingerprint: string, excludeRef: number) {
     this.hit('findByHwFingerprint');
-    return this.devices.filter((d) => d.hwFingerprint === hwFingerprint && d.id !== excludeRef).map((d) => ({ ...d }));
+    return this.devices.filter((d) => d.hwFingerprint === hwFingerprint && d.id !== excludeRef && !d.mergedInto).map((d) => ({ ...d }));
   }
   async currentInventory(deviceRef: number): Promise<CurrentInventory | null> {
     this.hit('currentInventory');
@@ -134,7 +145,7 @@ export class MemoryDeviceStore extends Failable implements DeviceStore {
     d.lastSeenAt = at;
     d.lastInventoryAt = at;
   }
-  private row(d: DeviceRecord): DeviceRow {
+  private row(d: MemoryDeviceStore["devices"][number]): DeviceRow {
     const s = this.inventories.get(d.id)?.inventory;
     const ip = s ? primaryIpv4(s.network) : null;
     return {
@@ -148,11 +159,102 @@ export class MemoryDeviceStore extends Failable implements DeviceStore {
       cpuName: s?.cpu.name ?? null,
       memoryTotal: s?.memory_total ?? null,
       ips: ip ? [ip] : [],
+      suspectedDuplicate:
+        !!d.hwFingerprint && this.devices.some((o) => o.id !== d.id && o.hwFingerprint === d.hwFingerprint && !o.mergedInto && o.status !== 'retired'),
+      mergedIntoId: d.mergedInto ? this.byId(d.mergedInto).deviceId : null,
+      retiredAt: d.retiredAt ?? null,
     };
   }
-  async listDevices() {
+  async listDevices(f: DeviceFilter) {
     this.hit('listDevices');
-    return this.devices.map((d) => this.row(d));
+    const statuses: DeviceStatus[] = f.statuses.length ? f.statuses : ['active', 'disabled'];
+    const has = (v: string | null | undefined, q: string) => !!v && v.toLowerCase().includes(q.toLowerCase());
+    return this.devices
+      .filter((d) => statuses.includes(d.status))
+      .filter((d) => {
+        const inv = this.inventories.get(d.id)?.inventory;
+        if (f.q) {
+          const q = f.q;
+          const nics = inv?.network ?? [];
+          const hit =
+            has(d.computerName, q) ||
+            has(inv?.system.user_name, q) ||
+            has(d.deviceId, q) ||
+            nics.some((n) => n.ips.some((ip) => has(ip, q)) || has(n.mac, q.replace(/-/g, ':')));
+          if (!hit) return false;
+        }
+        if (f.software && !(inv?.software ?? []).some((x) => has(x.name, f.software!))) return false;
+        if (f.os && !(has(inv?.system.os_name, f.os) || has(inv?.system.os_display_version, f.os))) return false;
+        return true;
+      })
+      .sort((a, b) => a.computerName.localeCompare(b.computerName) || a.id - b.id)
+      .map((d) => this.row(d));
+  }
+  async listEvents(deviceRef: number, beforeId: number | undefined, limit: number): Promise<DeviceEventRecord[]> {
+    this.hit('listEvents');
+    const all: DeviceEventRecord[] = [
+      ...this.events
+        .filter((e) => e.deviceRef === deviceRef)
+        .map((e) => ({ id: e.id ?? 0, type: e.type, occurredAt: new Date(0), receivedAt: null, detail: e.detail, data: null })),
+      ...this.agentEvents
+        .filter((e) => e.deviceRef === deviceRef)
+        .map((e) => ({ id: e.id ?? 0, type: e.type, occurredAt: e.occurredAt, receivedAt: e.receivedAt, detail: null, data: e.data })),
+    ];
+    return all
+      .filter((e) => beforeId === undefined || e.id < beforeId)
+      .sort((a, b) => b.id - a.id)
+      .slice(0, limit);
+  }
+  async setStatus(deviceRef: number, status: DeviceStatus, detail: string, _requestId: string, actor: Actor) {
+    this.hit('setStatus');
+    const d = this.byId(deviceRef);
+    if (d.mergedInto) return false;
+    d.status = status;
+    d.retiredAt = status === 'retired' ? (d.retiredAt ?? new Date()) : status === 'active' ? null : (d.retiredAt ?? null);
+    this.events.push({ id: ++this.eventSeq, deviceRef, type: status === 'active' ? 'enabled' : status, detail: `${actor.emp};${detail}` });
+    return true;
+  }
+  async merge(targetRef: number, sourceRef: number, detail: string, _requestId: string, actor: Actor): Promise<MergeResult> {
+    this.hit('merge');
+    const t = this.byId(targetRef);
+    const src = this.byId(sourceRef);
+    if (t.mergedInto) throw new AppError(409, 'ITA_MERGE_INVALID', '目標裝置已併入其他裝置', { reason: 'target_merged' });
+    if (src.mergedInto === targetRef) throw new AppError(409, 'ITA_MERGE_INVALID', '來源裝置已併入此裝置', { reason: 'already_merged' });
+    if (src.mergedInto) throw new AppError(409, 'ITA_MERGE_INVALID', '來源裝置已合併過', { reason: 'source_merged' });
+    const tInv = this.inventories.get(targetRef);
+    const sInv = this.inventories.get(sourceRef);
+    const inventoryFrom: MergeResult['inventoryFrom'] = !tInv && !sInv ? 'none' : !tInv || (sInv && sInv.collectedAt > tInv.collectedAt) ? 'source' : 'target';
+    if (inventoryFrom === 'source') this.inventories.set(targetRef, sInv!);
+    this.inventories.delete(sourceRef);
+    let events = 0;
+    for (const e of [...this.events, ...this.agentEvents])
+      if (e.deviceRef === sourceRef) {
+        e.deviceRef = targetRef;
+        events++;
+      }
+    const oldDn = t.certDn;
+    Object.assign(t, {
+      certDn: src.certDn,
+      certFp: src.certFp,
+      computerName: src.computerName,
+      agentVersion: src.agentVersion ?? t.agentVersion,
+      hwFingerprint: src.hwFingerprint ?? t.hwFingerprint,
+    });
+    Object.assign(src, { certDn: `merged:${src.deviceId}`, status: 'retired', mergedInto: targetRef, retiredAt: new Date() });
+    this.events.push({ id: ++this.eventSeq, deviceRef: targetRef, type: 'merged', detail: `${actor.emp};${src.deviceId};${oldDn};${detail}` });
+    return { events, commands: this.mergedCommands?.(sourceRef, targetRef) ?? 0, canceledCommands: 0, inventoryFrom };
+  }
+  /** 指令儲存掛上時搬指令(MemoryCommandStore 設定) */
+  mergedCommands?: (from: number, to: number) => number;
+  softwareBackfilled: number[] = [];
+  async backfillSoftware(afterRef: number, limit: number) {
+    this.hit('backfillSoftware');
+    const todo = [...this.inventories.keys()]
+      .filter((ref) => ref > afterRef && !this.softwareBackfilled.includes(ref))
+      .sort((a, b) => a - b)
+      .slice(0, limit);
+    this.softwareBackfilled.push(...todo);
+    return { lastRef: todo.length === limit ? todo[todo.length - 1]! : null, done: todo.length, failed: [] };
   }
   async getDevice(deviceId: string) {
     this.hit('getDevice');
@@ -162,7 +264,7 @@ export class MemoryDeviceStore extends Failable implements DeviceStore {
     return { row: this.row(d), payload: s?.payload ?? null, collectedAt: s?.collectedAt ?? null };
   }
   async close() {}
-  byId(id: number): DeviceRecord {
+  byId(id: number): MemoryDeviceStore["devices"][number] {
     const d = this.devices.find((x) => x.id === id);
     if (!d) throw new Error(`no device ${id}`);
     return d;
@@ -183,6 +285,11 @@ export class MemorySnapshotStore extends Failable implements SnapshotStore {
   async recordHeartbeat({ deviceId, at }: { deviceId: string; at: Date }) {
     this.hit('recordHeartbeat');
     this.heartbeats.push({ deviceId, at });
+  }
+  async reassign(fromDeviceId: string, toDeviceId: string) {
+    this.hit('reassign');
+    for (const x of this.snapshots) if (x.deviceId === fromDeviceId) x.deviceId = toDeviceId;
+    for (const x of this.heartbeats) if (x.deviceId === fromDeviceId) x.deviceId = toDeviceId;
   }
   async seenSnapshots(deviceId: string, items: { seq: number; hash: string }[]) {
     this.hit('seenSnapshots');
@@ -217,6 +324,10 @@ export class MemoryStateStore extends Failable implements StateStore {
   async setHash(deviceId: string, hash: string) {
     this.hit('setHash');
     this.hashes.set(deviceId, hash);
+  }
+  async clearHash(deviceId: string) {
+    this.hit('clearHash');
+    this.hashes.delete(deviceId);
   }
   async close() {}
 }

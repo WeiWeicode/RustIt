@@ -112,6 +112,19 @@ export class MongoSnapshotStore implements SnapshotStore {
     return new Set(docs.map((d) => `${d.agent_seq}:${d.content_hash}`));
   }
 
+  async reassign(fromDeviceId: string, toDeviceId: string): Promise<void> {
+    await this.run(() => this.heartbeats.updateMany({ device_id: fromDeviceId }, { $set: { device_id: toDeviceId } }));
+    // 逐份改:兩台剛好有相同 (agent_seq, content_hash) 的快照時,唯一索引擋下的那份留在來源(內容相同,不影響歷史),其餘照常搬
+    const docs = await this.run(() => this.snapshots.find({ device_id: fromDeviceId }, { projection: { _id: 1 } }).toArray());
+    for (const d of docs) {
+      try {
+        await this.run(() => this.snapshots.updateOne({ _id: d._id }, { $set: { device_id: toDeviceId } }));
+      } catch (err) {
+        if ((err as { code?: number }).code !== 11000) throw err;
+      }
+    }
+  }
+
   async close(): Promise<void> {
     await this.client.close();
   }

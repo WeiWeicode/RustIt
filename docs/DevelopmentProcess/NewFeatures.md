@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-16 P3 資料呈現:管理 API 分頁與篩選、事件、下載 JSON、停用 / 退役、合併(ItAgentBack)
+- 內容:依 `P3-DATA-DESIGN.md`(需求方 2026-10-16 確認:現在做分頁、P3-1 ~ P3-3 由 Claude 一起做)。migration 0004 `ita.device_software`(資產寫入時替換、啟動時回填);`GET /v1/devices` 分頁(`page`、`pageSize` ≤ 200,回 `total`)與篩選(關鍵字:名稱 / 使用者 / IP / MAC / 裝置代碼;軟體名稱;OS;在線;狀態,預設不列退役與已合併);詳情加 `suspectedDuplicates`、`clockSkewMs`、`mergedInto`、`retiredAt`;`GET /events`(游標)、`GET /inventory.json`;`PUT /status`、`POST /merge`(`endpoint.command.admin`,OpenAPI 宣告此權限)。子代理審查後修正見設計 §6.1。**行為變更**:清單預設每頁 50 台、不含退役與已合併(GigaItApp 同步改分頁;舊版前端只會看到第一頁)。
+- 檔案:`ItAgentBack/db/migrations/0004_device_software.sql`、`src/routes/devices.ts`、`src/services/device-service.ts`、`src/stores/sql-store.ts`、`types.ts`、`mongo-store.ts`、`redis-store.ts`、`src/openapi.ts`、`src/server.ts`、`test/devices.test.ts`(新)、`test/helpers.ts`、`test/mgmt-app.test.ts`、`test/int/stores.int.test.ts`;文件 `ItAgentBack/docs/DB_SCHEMA.md`、`docs/PROJECT-MAP.md`、`docs/P3-DATA-DESIGN.md`、`docs/HANDOFF.md`
+- 驗證:`npm run typecheck`;`npm test` 104/104;`npm run test:int` 9/9(SQL Server 2012 poc_test);本機 ItAgentBack 對測試庫唯讀實測清單分頁 / 篩選 / 事件 / 下載。migration 0004 尚未套用測試庫(待同意)。
+
 ## 2026-10-16 P3 資料呈現設計草案
 - 內容:盤點 develop 現況(詳情已回完整資產;缺清單篩選、軟體查詢、事件 API、下載 JSON、合併 / 退役),擬定 P3-1 ~ P3-4 分批、migration 0004 `ita.device_software`、管理 API 擴充、合併交易步驟、GigaItApp Tab 分法與測試區驗證方式(VM 改名 + 新憑證觸發「疑似同一台」);§7 列 7 項待需求方決定。VM 已升級 Agent 0.4.1。
 - 檔案:`docs/P3-DATA-DESIGN.md`(新)、`docs/HANDOFF.md`

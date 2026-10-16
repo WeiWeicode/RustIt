@@ -9,7 +9,7 @@ import { after, before, beforeEach, describe, it } from 'node:test';
 import type { FastifyInstance } from 'fastify';
 import WebSocket from 'ws';
 import { buildAgentApp } from '../src/agent-app.js';
-import { CONTRACTS_DIR, DN, certHeaders, inventoryRequest, setup } from './helpers.js';
+import { CONTRACTS_DIR, DN, certHeaders, inventoryRequest, setup, LIST_ALL } from './helpers.js';
 
 const config = { logLevel: 'silent', agentTls: null, trustedProxies: null };
 const H2 = 'b'.repeat(64);
@@ -230,12 +230,12 @@ describe('WebSocket GET /agent/v1/ws(指南 §5.3、§5.6)', () => {
     const c = await connect();
     await new Promise((r) => setTimeout(r, 50));
     env.redis.fail = true;
-    const list = await env.service.listDevices({ log: app.log, requestId: 't' });
+    const list = (await env.service.listDevices({ log: app.log, requestId: 't' }, LIST_ALL)).items;
     assert.equal(list[0]!.online, true);
     env.redis.calls = [];
     c.ws.close();
     await waitFor(() => env.redis.calls.filter((x) => x === 'clearOnline').length > 0);
-    assert.equal((await env.service.listDevices({ log: app.log, requestId: 't' }))[0]!.online, false);
+    assert.equal((await env.service.listDevices({ log: app.log, requestId: 't' }, LIST_ALL)).items[0]!.online, false);
     env.redis.fail = false;
   });
 

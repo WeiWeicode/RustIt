@@ -77,6 +77,8 @@ mongo.ensureIndexes().catch((err: unknown) => mgmt.log.warn({ err }, 'MongoDB �
 const ready = await readiness();
 if (!ready.ok) mgmt.log.error({ checks: ready.checks }, 'SQL Server 無法連線:Agent 回報將回 503,請檢查 ITA_DB_* 設定');
 else if (Object.values(ready.checks).some((c) => c !== 'ok')) mgmt.log.warn({ checks: ready.checks }, 'Mongo / Redis 無法連線,以降級模式運作');
+// migration 0004 之前寫入的資產回填軟體清單(P3);失敗只記 warn,下次啟動再試
+if (ready.ok) void service.backfillSoftware({ log: mgmt.log, requestId: 'startup' });
 
 for (const signal of ['SIGINT', 'SIGTERM'])
   process.once(signal, () => {

@@ -20,7 +20,7 @@
 
 0. **下一個工作階段從這裡開始(2026-10-16)**:
    - VM `DESKTOP-1TB2UMP` 已由需求方升級 Agent **0.4.1**(2026-10-16;MSI SHA-256 `880e46d9…da794c`,自 develop `8568f55` 建置)。尚待確認:收集一次日誌,zip 內檔案時間應為日誌修改時間(不是 1980-01-01)。
-   - **P3 資料呈現準備中**:設計草案 [P3-DATA-DESIGN.md](P3-DATA-DESIGN.md)(分支 `docs/p3-design`),§7 待需求方決定後依 P3-1 → P3-4 開工。
+   - **P3 資料呈現實作完成(未合併)**:設計 [P3-DATA-DESIGN.md](P3-DATA-DESIGN.md)(需求方 2026-10-16 確認);RustIt `feature/p3-data`(含設計文件提交)、GigaItApp `feature/p3-device-tabs`。測試全過(設計 §6.1)。**下一步依序**:需求方同意後套用 migration 0004 到 `giganexus_It_Agent_test` → RustIt MR 合併 develop → GigaItApp MR 合併 develop → 瀏覽器實測(各 Tab、篩選、下載)→ P3-4:VM 改名 + 以新名稱簽新憑證,驗證「疑似同一台」與合併(設計 §6)。上線前仍須完成資料範圍依 `cos` 過濾(指南 E6)。
    - P4 後續(未排程,見 `P4-COMMAND-DESIGN.md` §6.1、§8.4):WebSocket 訊息速率上限、`result` 依類型以 schema 限制、慢速上傳佔用回報名額、`ita.command_file.command_ref` 唯一索引(多實例前)、附檔總量上限與磁碟告警、批次下指令畫面。
 1. **P1 已完成**(2026-10-14 Hyper-V VM 驗證 7 項通過,見下方「P1 收尾:VM 測試」)。Win11 VM 可之後補測;VM 保留作 P2 以後的測試機(檢查點「匯入憑證」)。
 2. **P3 資料呈現**、**P8-1 使用者端外殼與我的電腦** 可並行:P3(管理 API 回完整資產 + GigaItApp 詳情分 Tab)只動後端與前端,適合交給同仁。

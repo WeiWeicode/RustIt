@@ -21,7 +21,7 @@ import { SqlDeviceStore } from '../../src/stores/sql-store.js';
 import { CommandDispatcher } from '../../src/services/command-dispatcher.js';
 import { MongoClient } from 'mongodb';
 import { Redis } from 'ioredis';
-import { DN, FakeConnection, FP, inventoryRequest } from '../helpers.js';
+import { DN, FakeConnection, FP, inventoryRequest, LIST_ALL } from '../helpers.js';
 
 const env = process.env;
 const testDb = env.ITA_TEST_DB_NAME ?? '';
@@ -75,7 +75,7 @@ describe('SQL Server + Mongo + Redis', () => {
     assert.equal((await service.ingestInventory(ctx, device, inventoryRequest())).result, 'stored');
     assert.equal((await service.ingestInventory(ctx, device, inventoryRequest({ agent_seq: inventoryRequest().agent_seq + 1 }))).result, 'unchanged');
 
-    const [row] = await service.listDevices(ctx);
+    const [row] = (await service.listDevices(ctx, LIST_ALL)).items;
     assert.equal(row!.deviceId, device.deviceId);
     assert.equal(row!.userName, 'EXAMPLE\\user01');
     assert.equal(row!.memoryTotal, 17179869184);
@@ -90,7 +90,7 @@ describe('SQL Server + Mongo + Redis', () => {
 
   it('同一 DN 再次識別為同一台;新指紋寫稽核', async () => {
     const again = await service.identify(ctx, DN, 'c'.repeat(40));
-    const list = await service.listDevices(ctx);
+    const list = (await service.listDevices(ctx, LIST_ALL)).items;
     assert.equal(list.length, 1);
     assert.equal(list[0]!.deviceId, again.deviceId);
     assert.equal(list[0]!.certFingerprint, 'c'.repeat(40));
@@ -114,9 +114,9 @@ describe('SQL Server + Mongo + Redis', () => {
     const conn = { send() {}, close() {}, terminate() {} };
     await service.connected(ctx, device, conn);
     await service.heartbeat(ctx, device, { outbox_pending: 0 });
-    assert.equal((await service.listDevices(ctx))[0]!.online, true);
+    assert.equal(((await service.listDevices(ctx, LIST_ALL)).items)[0]!.online, true);
     await service.disconnected(ctx, device, conn);
-    assert.equal((await service.listDevices(ctx))[0]!.online, false);
+    assert.equal(((await service.listDevices(ctx, LIST_ALL)).items)[0]!.online, false);
   });
 
   it('P2:/sync 以 Mongo 已收過的 seq 去重;端點事件以 event_id 去重(過濾唯一索引)', async () => {
@@ -250,5 +250,77 @@ describe('SQL Server + Mongo + Redis', () => {
     assert.ok((await later.sweep(ctx)) >= 1);
     assert.equal(await store.getFile(up.file_id), null);
     assert.equal((await commands.get(ctx, cmd.commandId)).kind, 'logs.collect');
+  });
+
+  it('P3(0004):軟體表與回填、清單篩選、事件、狀態、合併(交易搬資料、釋放 DN)', async () => {
+    const all = (patch: object = {}) => service.listDevices(ctx, { ...LIST_ALL, pageSize: 200, ...patch });
+    const names = async (patch: object) => (await all(patch)).items.map((d) => d.computerName);
+    const target = (await sql.findByDn(DN))!;
+    assert.deepEqual(await names({ software: 'office suite' }), ['PC-EXAMPLE-01']);
+    assert.deepEqual(await names({ software: '%' }), [], 'LIKE 萬用字元已跳脫');
+    assert.deepEqual(await names({ q: '198.51.100' }), ['PC-EXAMPLE-01']);
+    assert.deepEqual(await names({ q: '00-00-5E-00-53-01' }), ['PC-EXAMPLE-01']);
+    assert.deepEqual(await names({ os: '24H2' }), ['PC-EXAMPLE-01']);
+    assert.ok((await all()).items.find((d) => d.computerName === 'PC-EXAMPLE-01')!.suspectedDuplicate);
+
+    // 回填:清掉軟體列後由 payload 補回
+    const pool = await connect(migrateConfig(env, testDb));
+    try {
+      await pool.request().input('id', target.id).query('DELETE FROM ita.device_software WHERE device_ref = @id');
+      assert.deepEqual(await names({ software: 'office suite' }), []);
+      assert.ok((await service.backfillSoftware(ctx)) >= 1);
+      assert.deepEqual(await names({ software: 'office suite' }), ['PC-EXAMPLE-01']);
+
+      const ev = await service.listEvents(ctx, target.deviceId, undefined, 2);
+      assert.equal(ev.items.length, 2);
+      assert.ok(ev.items[0]!.id > ev.items[1]!.id, '新到舊');
+      assert.ok(ev.nextCursor);
+
+      const actor = { emp: 'S000001', name: '測試人員' };
+      const files = (await sql.findByDn('O=GigaNexus Dev,CN=PC-EXAMPLE-FILES'))!;
+      await service.setStatus(ctx, actor, files.deviceId, 'retired', '整合測試');
+      assert.deepEqual(await names({ q: 'FILES' }), []);
+      assert.ok((await all({ statuses: ['retired'], q: 'FILES' })).items[0]!.retiredAt);
+      await service.setStatus(ctx, actor, files.deviceId, 'active', '');
+      assert.equal((await all({ q: 'FILES' })).items[0]!.retiredAt, null);
+
+      // 1. 同指紋、來源沒有資產:保留目標的資產;來源的 DN 釋放後對到目標
+      const newDn = 'O=GigaNexus Dev,CN=PC-EXAMPLE-NEW';
+      const src = (await sql.findByDn(newDn))!;
+      const m1 = await service.merge(ctx, actor, target.deviceId, src.deviceId, '重灌', false);
+      assert.equal(m1.inventoryFrom, 'target');
+      assert.ok(m1.canceledCommands >= 1, 'P4 測試留下排隊中的 agent.restart');
+      const canceled = await pool.request().input('id', target.id).query(`SELECT COUNT(*) AS n FROM ita.command WHERE device_ref = @id AND state IN ('queued', 'sent', 'acked', 'running')`);
+      assert.equal(canceled.recordset[0].n, 0, '合併後沒有未完成的指令');
+      assert.ok(m1.events >= 2, '來源的 registered、suspected_duplicate');
+      assert.equal((await sql.findByDn(newDn))!.deviceId, target.deviceId);
+      const merged = await service.getDevice(ctx, src.deviceId);
+      assert.deepEqual([merged.status, merged.mergedInto, merged.certDn], ['retired', target.deviceId, `merged:${src.deviceId}`]);
+      assert.equal((await service.merge(ctx, actor, target.deviceId, src.deviceId, '', true)).alreadyMerged, true);
+
+      // 2. 指紋不同(force)、來源資產較新:目標換成來源的資產、網卡與軟體;指令搬過去
+      const later = inventoryRequest({ agent_seq: 99, collected_at: '2026-10-20T00:00:00Z', content_hash: '9'.repeat(64) });
+      later.inventory = structuredClone(later.inventory);
+      later.inventory.software = [{ name: 'Int Test Tool', version: '1', publisher: 'X', install_date: '2026-10-20' }];
+      later.inventory.network = [{ ...later.inventory.network[0]!, ips: ['203.0.113.99'] }];
+      const filesDev = (await sql.findByDn('O=GigaNexus Dev,CN=PC-EXAMPLE-FILES'))!;
+      await service.ingestInventory(ctx, filesDev, later);
+      await assert.rejects(service.merge(ctx, actor, target.deviceId, filesDev.deviceId, '', false), { code: 'ITA_MERGE_INVALID' });
+      const m2 = await service.merge(ctx, actor, target.deviceId, filesDev.deviceId, '', true);
+      assert.equal(m2.inventoryFrom, 'source');
+      assert.equal(m2.commands, 1, 'logs.collect 指令');
+      const after = await service.getDevice(ctx, target.deviceId);
+      assert.deepEqual(after.ips, ['203.0.113.99']);
+      assert.equal(after.collectedAt, '2026-10-20T00:00:00.000Z');
+      assert.deepEqual(await names({ software: 'int test tool' }), [after.computerName]);
+      assert.deepEqual(await names({ software: 'office suite' }), [], '舊資產的軟體列已刪除');
+      const r = await pool
+        .request()
+        .input('id', target.id)
+        .query(`SELECT COUNT(*) AS n FROM ita.device_event WHERE device_ref = @id AND event_type = 'merged'`);
+      assert.equal(r.recordset[0].n, 2);
+    } finally {
+      await pool.close();
+    }
   });
 });

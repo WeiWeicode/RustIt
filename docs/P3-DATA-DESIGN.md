@@ -52,25 +52,27 @@ CREATE INDEX ix_device_software_name ON ita.device_software (name) INCLUDE (devi
 | --- | --- | --- | --- | --- |
 | `GET` | `/v1/devices` | `endpoint.device.read` | **分頁**:`page`(1 起)、`pageSize`(預設 50,上限 200),回應加 `total`、`page`、`pageSize`(`items` 不變;依電腦名稱排序)。查詢參數(皆可省略):`q`(電腦名稱、使用者、IP、MAC、裝置代碼,部分比對)、`software`(軟體名稱部分比對)、`os`、`online`(`true`/`false`)、`status`(`active`/`disabled`/`retired`,預設 `active,disabled`)。回應只新增欄位:`suspectedDuplicate`(boolean)、`mergedInto`(deviceId 或 null) | P3-1 |
 | `GET` | `/v1/devices/{id}` | `endpoint.device.read` | 只新增:`suspectedDuplicates`(同硬體指紋、未合併的其他裝置摘要)、`mergedInto`、`retiredAt`、`clockSkewMs` | P3-1 |
-| `GET` | `/v1/devices/{id}/events` | `endpoint.device.read` | 事件清單,新到舊;`?before=<id>&limit=50`(上限 200);欄位 `id`、`type`、`occurredAt`、`receivedAt`、`detail`、`data`(端點事件的 JSON) | P3-1 |
+| `GET` | `/v1/devices/{id}/events` | `endpoint.device.read` | 事件清單,依寫入順序新到舊;`?cursor=<上一頁 nextCursor>&limit=50`(上限 200),回 `{ items, nextCursor }`(與指令清單相同);欄位 `id`、`type`、`occurredAt`、`receivedAt`、`detail`、`data`(端點事件的 JSON) | P3-1 |
 | `GET` | `/v1/devices/{id}/inventory.json` | `endpoint.device.read` | 最新資產原樣(資料契約 snake_case),`Content-Disposition: attachment; filename="<電腦名稱>-<yyyyMMdd>.json"`;無資產回 404 `ITA_INVENTORY_NOT_FOUND` | P3-1 |
 | `PUT` | `/v1/devices/{id}/status` | `endpoint.command.admin` | 指南 §8.3 既有草案:`{ status: 'active' \| 'disabled' \| 'retired', reason }`;停用 / 退役時立即關閉 WebSocket。`x-audit-level: meta` | P3-3 |
-| `POST` | `/v1/devices/{id}/merge` | `endpoint.command.admin` | `{ sourceDeviceId, reason }`:把 `sourceDeviceId`(重灌後的新登錄)併入 `{id}`(舊裝置),見 §4。`x-audit-level: meta`;支援 `Idempotency-Key` | P3-3 |
+| `POST` | `/v1/devices/{id}/merge` | `endpoint.command.admin` | `{ sourceDeviceId, reason, force? }`:把 `sourceDeviceId`(重灌後的新登錄)併入 `{id}`(舊裝置),見 §4。`x-audit-level: meta`;不用 `Idempotency-Key`,重送(含並行)回 `alreadyMerged: true` | P3-3 |
 
-- 錯誤代碼只新增:`ITA_INVENTORY_NOT_FOUND`、`ITA_MERGE_INVALID`(同一台、來源已合併、兩者指紋不同且未帶 `force`)、`ITA_DEVICE_STATUS_INVALID`。
+- 錯誤代碼只新增:`ITA_INVENTORY_NOT_FOUND`、`ITA_MERGE_INVALID`(`details.reason`:`same_device`、`fingerprint_mismatch`、`overlap`、`target_online`、`target_retired`、`source_not_active`、`source_merged`、`target_merged`)、`ITA_DEVICE_STATUS_INVALID`(已合併的裝置不能變更狀態)。
+- 清單分頁在 service:SQL 依篩選取出全部符合的列,在線篩選(狀態在 Redis)後再分頁;台數到數千台時改為 SQL 分頁(無在線篩選時)。
 - 資料範圍依 `cos` 過濾仍待指南 §10 E6,本階段不做。
 
 ## 4. 合併(A1)
 
 方向:**保留舊裝置**(deviceId、首次連線時間、指令紀錄不變),新登錄的裝置併入。單一 SQL 交易:
 
-1. 鎖定兩列(`UPDLOCK`),檢查:不是同一台、來源 `merged_into IS NULL`、兩者 `hw_fingerprint` 相同(不同時需 `force: true`,畫面再確認一次)。
-2. 來源的 `cert_dn` 改為 `merged:<來源 device_id>`(釋放唯一鍵),目標的 `cert_dn` / `cert_fp` / `computer_name` / `agent_version` / `hw_fingerprint` / `last_seen_at` 改為來源的值(來源才是目前在用的那台)。
-3. `device_event`、`command`(含 `command_batch` 不動)的 `device_ref` 由來源改為目標;端點事件 `event_uid` 唯一索引以 `(device_ref, event_uid)`,UUID 不會重複。
-4. `device_inventory` / `device_nic` / `device_software`:取 `collected_at` 較新的一份放到目標,另一份刪除。
-5. 來源設 `status = 'retired'`、`merged_into = 目標`、`retired_at`;目標寫 `merged` 事件(detail:來源 deviceId、舊 DN、操作人工號)。
+1. 前置檢查(service):不是同一台、目標不在線、目標未退役、來源為 active。**硬體指紋由端點自行回報,只是提示**(算法公開,知道 BIOS 序號與 UUID 即可偽造):指紋不同、或來源的首次連線早於目標最後回報超過 15 分鐘(兩台曾同時使用,不像重灌)時,需 IT 確認後帶 `force: true`。
+2. 交易內鎖定兩列(`UPDLOCK, HOLDLOCK`)再檢查一次(並行的同一請求回 `alreadyMerged`)。
+3. 來源的 `cert_dn` 改為 `merged:<來源 device_id>`(釋放唯一鍵),目標的 `cert_dn` / `cert_fp` / `computer_name` / `agent_version` / `hw_fingerprint` / 時鐘偏差改為來源的值(來源才是目前在用的那台);**目標的狀態不變**(不能藉合併解除停用 / 退役)。
+4. 兩台尚未結束的指令一律取消(`DEVICE_MERGED`):舊裝置排隊的指令不可送到合併後連線的 Agent。之後 `device_event`、`command`(`command_batch` 不動)的 `device_ref` 由來源改為目標;端點事件 `event_uid` 唯一索引以 `(device_ref, event_uid)`,UUID 不會重複。
+5. `device_inventory` / `device_nic` / `device_software`:取 `collected_at` 較新的一份放到目標,另一份刪除。
+6. 來源設 `status = 'retired'`、`merged_into = 目標`、`retired_at`;目標寫 `merged` 事件(detail:來源 deviceId、舊 DN、操作人工號)。
 
-交易後(失敗只記 warn):Mongo `snapshots` / `heartbeats` 的 `device_id` 改為目標;Redis 刪除兩者的 `online` / `hash` 鍵;**關閉來源的 WebSocket**,Agent 重連時依新 DN 找到目標裝置(不需要改 Agent)。
+交易後:**先關閉兩台的 WebSocket**(避免清理期間 Agent 仍以來源身分寫入;Agent 重連時依 DN 找到目標裝置,不需要改 Agent),再改 Mongo `snapshots` / `heartbeats` 的 `device_id`、清除 Redis 兩台的 hash 與來源的 online 鍵(失敗只記 warn,Mongo 可重建)。
 
 退役:`status = 'retired'`、`retired_at`,關閉 WebSocket;Agent 之後連線回 403 `ITA_DEVICE_RETIRED`(P2 已實作)。資料依保存期限清除屬 B5,不在 P3。
 
@@ -91,6 +93,14 @@ Tab 只在切換時載入(事件、軟體表格大),沿用 `DeviceCommands` 的�
   1. 在 GigaItApp 依軟體名稱、IP、電腦名稱各找到 VM 與自己的電腦;各 Tab 有資料;下載 JSON 可開啟。
   2. **疑似同一台**:VM 還原檢查點只會沿用同一 DN,不會觸發。改為 VM 改電腦名稱 → 需求方以新名稱在主機 2 執行 `host2-issue-test-device-cert.sh` 簽新憑證並匯入(舊憑證移除)→ 重啟服務 → 出現新裝置且標記「疑似同一台」。
   3. 合併後:清單只剩一台、deviceId 為舊的、事件與指令紀錄連續、Agent 自動重連到舊裝置;退役另一台測試裝置後 Agent 連線被拒。
+
+## 6.1 實作與驗證(2026-10-16,分支 `feature/p3-data`、GigaItApp `feature/p3-device-tabs`)
+
+- ItAgentBack:`npm test` 104 項、`npm run test:int` 9 項(SQL Server 2012 `giganexus_It_Agent_poc_test`:軟體表與回填、篩選、事件、狀態、兩種方向的合併與指令取消)全部通過;本機 ItAgentBack(唯讀)對 `giganexus_It_Agent_test` 實測分頁、關鍵字、OS、退役篩選、事件游標、下載 JSON 標頭、詳情的時鐘偏差。軟體名稱篩選在 0004 套用前回 503(預期,確認部署順序)。
+- 整合測試抓到:`LIKE N'%"software":[{%'` 的 `[` 在 SQL Server LIKE 是字元集合開頭,改為跳脫。
+- `code-reviewer`、`security-auditor` 子代理審查後的修正:合併後先關閉 WebSocket 再清理;回填改游標並在交易內鎖住資產列重讀(與資產寫入不重複、不飢餓,無法解析的記 warn);合併不覆蓋目標狀態、目標退役或來源停用 / 退役拒絕;合併取消兩台未完成的指令(避免偽造指紋取得舊裝置的排隊指令);新登錄早於舊裝置最後回報需 force;並行重送回 `alreadyMerged`;`setStatus` 交易內確認未合併;LIKE 參數長度放寬為跳脫後上限;交易後也關閉目標連線。
+- **未處理(已知)**:資料範圍依 `cos` 過濾(指南 §10 E6)仍未做,目前有 `endpoint.device.read` 即可看全部公司的電腦、有 `endpoint.command.admin` 即可管理全部;上線前必須完成(列入指南 §11)。合併路由尚未寫入指南 §8.3 表格(需 Gateway repo 同意)。
+- **部署順序**:1. 需求方同意後套用 migration 0004 到 `giganexus_It_Agent_test` → 2. RustIt 合併 develop(endpoint-server 自動註冊 OpenAPI,建立 `endpoint.command.admin`)→ 3. GigaItApp 合併 develop(rbac-test 套用 `it.endpoint-device.admin`)。GigaItApp 先部署也可用(清單相容舊回應,只是沒有分頁與新功能)。
 
 ## 7. 決定事項(2026-10-16)
 
