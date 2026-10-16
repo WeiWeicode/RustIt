@@ -1,6 +1,6 @@
 # E6 資料範圍依公司(`cos`)過濾 — 設計
 
-> 2026-10-16 E6-1 已實作(§6.1),尚未合併 develop。草案 2026-10-16,分支 `feature/e6-company-scope`(從 `gitlab/develop` 807c7a1 開)。依據:ENDPOINT-AGENT-GUIDE §8.2「資料範圍」、§10.2 E6、§11 Endpoint Server 檢查清單;P3-DATA-DESIGN §3、§6.1「未處理(已知)」;資安稽核 M2。
+> 2026-10-16 E6-1 已上測試區(RustIt MR !25,endpoint-server `3081af75`;§6.1)。草案 2026-10-16,分支 `feature/e6-company-scope`(從 `gitlab/develop` 807c7a1 開)。依據:ENDPOINT-AGENT-GUIDE §8.2「資料範圍」、§10.2 E6、§11 Endpoint Server 檢查清單;P3-DATA-DESIGN §3、§6.1「未處理(已知)」;資安稽核 M2。
 > **2026-10-16 需求方確認**:§2 第 1、2、3、6 項採建議(混合判斷;`ENDPOINT_SCOPE_ALL_ROLES` 測試區先 `it-admin`;未指定只有全部公司角色看得到;改公司需 admin 且為全部公司角色);第 4、5、7 項隨之採建議;第 8、9 項(GigaItApp、Gateway)各批動手前另行同意。
 
 ## 0. 目標與缺口
@@ -196,6 +196,7 @@ export interface MgmtCtx extends Ctx { scope: Scope }
 - 子代理審查(`code-reviewer`、`security-auditor`,無高嚴重度)後的修正:`suspected_duplicate` 事件內容提到範圍外的裝置時改為不含識別資訊的說明;清單 / 詳情的 `suspectedDuplicate` 標記只看範圍內的另一台;併入的目標在範圍外時 `mergedInto`(含 409 details)回 null;SQL 公司比對改二進位定序;`GET /v1/commands?batchId=` 與 `GET /v1/batches/{id}` 一致(含範圍外裝置視同不存在);批次 Idempotency-Key 命中範圍外的批次回 404。
 - **與設計不同**:`ENDPOINT_COMPANY_DOMAINS` 由 JSON 改為 `公司=網域,網域;公司=網域`(§2 #4、§3.2 已改);`CommandFileService` 自行檢查範圍(不經 dispatcher,邏輯相同)。
 - migration 0005 已套用 `giganexus_It_Agent_test`(2026-10-16,經需求方同意;欄位、CHECK、索引確認,既有 3 台皆未指定,新版部署後啟動回填)。
+- **測試區(2026-10-16)**:MR !25 合併後第一次 deploy-test 因主機 2 `ita.env` 尚未設定 `ENDPOINT_SCOPE_ALL_ROLES` 在 compose 階段失敗(保護如預期,舊版 `bde3369a` 持續運作);需求方同意後於 `ita.env` 加 `ENDPOINT_SCOPE_ALL_ROLES=it-admin`、`ENDPOINT_COMPANY_DOMAINS=碩禾=gsc.com.tw,gsmc.com.tw`(公司名稱用 LOS 的「碩禾」,碩禾員工的 `cos`;鹽城碩禾尚未開放登入先不列;備份 `ita.env.bak-20261016`),重跑後 `3081af75` healthy。啟動回填 2 台:開發機兩筆登錄分別為 `cert`(CN 為 FQDN)與 `domain`(回報 `gsmc.com.tw`)→ 碩禾;VM `DESKTOP-1TB2UMP`(WORKGROUP)維持未指定。OpenAPI 批次 112(新增 `PUT /v1/devices/{id}/company`)待 IT 發佈。
 - **未做**:E6-2(GigaItApp)、E6-3(指南回寫)待同意;`test.env.example` 的公司名稱(碩禾、鹽城碩禾)須與測試區 Gateway `gw.company.comp_name` 核對。
 
 ## 7. 風險
