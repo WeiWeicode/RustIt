@@ -18,10 +18,10 @@ import { buildAgentApp } from '../src/agent-app.js';
 import { buildMgmtApp } from '../src/mgmt-app.js';
 import { FILE_MAX_BYTES } from '../src/services/command-files.js';
 import type { DeviceRecord } from '../src/stores/types.js';
-import { CONTRACTS_DIR, DN, FP, certHeaders, setupCommands } from './helpers.js';
+import { ALL, CONTRACTS_DIR, DN, FP, certHeaders, setupCommands } from './helpers.js';
 
 const log = Fastify({ logger: { level: 'silent' } }).log;
-const ctx = { log, requestId: 'req-diag-1' };
+const ctx = { log, requestId: 'req-diag-1', scope: ALL };
 const IT: GatewayIdentity = { sub: '1', emp: 'S000001', name: '測試人員' };
 const addFormats = ((addFormatsModule as unknown as { default?: unknown }).default ?? addFormatsModule) as (a: Ajv) => Ajv;
 const validateUpload = addFormats(new Ajv({ strict: true })).compile(JSON.parse(readFileSync(path.join(CONTRACTS_DIR, 'command-file.schema.json'), 'utf8')));
@@ -183,7 +183,7 @@ describe('指令附檔下載與清除(:51240)', () => {
     });
     const gateway = loadGatewayEnv({ GW_ENV: 'dev', SERVICE_CODE: 'endpoint-api', GW_JWKS_URL: 'http://127.0.0.1:1/jwks.json' });
     mgmt = await buildMgmtApp({
-      config: { gateway, monitor: loadMonitorEnv('dev', {}), logLevel: 'silent', devSkipToken: true },
+      config: { gateway, monitor: loadMonitorEnv('dev', {}), logLevel: 'silent', devSkipToken: true, scopeAllRoles: [] },
       service: env.service,
       commands: env.commands,
       files: env.files,

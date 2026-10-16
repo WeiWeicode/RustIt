@@ -52,6 +52,9 @@ services:
       # 指令附檔(logs.collect 日誌 zip,P4-2):保存 14–30 天(PLATFORM-PLAN B5),到期自動刪除
       COMMAND_FILES_DIR: /data/command-files
       COMMAND_FILE_KEEP_DAYS: ${COMMAND_FILE_KEEP_DAYS:-14}
+      # 資料範圍(E6,docs/E6-COMPANY-SCOPE-DESIGN.md):可管理所有公司的角色代碼(必須設定,可為空字串)、網域 → 公司對應
+      ENDPOINT_SCOPE_ALL_ROLES: ${ENDPOINT_SCOPE_ALL_ROLES?ENDPOINT_SCOPE_ALL_ROLES 必須設定(可管理所有公司的角色代碼;沒有則設為空字串)}
+      ENDPOINT_COMPANY_DOMAINS: ${ENDPOINT_COMPANY_DOMAINS:-}
     volumes:
       - ita_command_files:/data/command-files
     secrets: [gw_api_key, ita_db_password, mongo_url, redis_url, endpoint_server_crt, endpoint_server_key, monitor_api_key, agent_monitor_api_key]

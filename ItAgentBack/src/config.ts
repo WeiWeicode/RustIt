@@ -16,10 +16,14 @@
  *   AGENT_MAX_INFLIGHT / AGENT_BUSY_RETRY_AFTER_SEC  HTTPS 回報同時處理上限,超過回 429 + Retry-After(A3),預設 32 / 30
  *   COMMAND_FILES_DIR         指令附檔(logs.collect 日誌 zip)存放目錄;test / prod 必填(容器 /data/command-files),dev 預設 data/dev/command-files
  *   COMMAND_FILE_KEEP_DAYS    指令附檔保存天數 14–30,預設 14(PLATFORM-PLAN B5)
+ *   ENDPOINT_SCOPE_ALL_ROLES  可管理所有公司的角色代碼(逗號分隔;內部 Token 的 roles 有任一個即全部公司;E6)。test / prod 必須設定,
+ *                             要沒有人能看全部時明確設為空字串;dev 預設空
+ *   ENDPOINT_COMPANY_DOMAINS  網域 → 公司(`公司=網域,網域;公司=網域`,公司名稱同 Gateway comp_name);省略 = 不自動判定(E6 §3.2)
  */
 import { readFileSync } from 'node:fs';
 import { isGatewayPort, loadGatewayEnv, loadMonitorEnv, type GatewayEnv, type MonitorEnv } from '@giganexus/backend-sdk';
 import type { AgentSettings } from './contracts.js';
+import { parseCompanyDomains } from './services/company.js';
 
 export interface SqlConfig {
   server: string;
@@ -66,6 +70,10 @@ export interface Config {
   commandFilesDir: string;
   /** 指令附檔保存天數(B5) */
   commandFileKeepDays: number;
+  /** 可管理所有公司的角色代碼(E6) */
+  scopeAllRoles: string[];
+  /** 網域(小寫)→ 公司(E6) */
+  companyDomains: Map<string, string>;
 }
 
 export class ConfigError extends Error {
@@ -142,6 +150,24 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd?: string): 
   if (!devTrustHeaders && proxies.length === 0)
     throw new ConfigError('AGENT_TRUSTED_PROXIES 未設定(Nginx 所在 IP / 網段);本機 Agent 直連開發時改設 DEV_TRUST_CLIENT_HEADERS=1');
 
+  // 資料範圍(E6):漏設會讓所有人看不到未指定公司的電腦而誤以為故障,test / prod 必須明確設定(可為空字串)
+  if (!isDev && env.ENDPOINT_SCOPE_ALL_ROLES === undefined)
+    throw new ConfigError('ENDPOINT_SCOPE_ALL_ROLES 未設定(可管理所有公司的角色代碼,逗號分隔;要沒有人能看全部請明確設為空字串)');
+  const scopeAllRoles = [
+    ...new Set(
+      (env.ENDPOINT_SCOPE_ALL_ROLES ?? '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
+    ),
+  ];
+  let companyDomains: Map<string, string>;
+  try {
+    companyDomains = parseCompanyDomains(env.ENDPOINT_COMPANY_DOMAINS);
+  } catch (err) {
+    throw new ConfigError(`ENDPOINT_COMPANY_DOMAINS 格式錯誤:${(err as Error).message}`);
+  }
+
   return {
     gateway,
     monitor: loadMonitorEnv(gateway.gwEnv, env),
@@ -168,5 +194,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd?: string): 
     busyRetryAfterSec: int('AGENT_BUSY_RETRY_AFTER_SEC', env.AGENT_BUSY_RETRY_AFTER_SEC, 30, 1, 3600),
     commandFilesDir: isDev ? env.COMMAND_FILES_DIR || 'data/dev/command-files' : required('COMMAND_FILES_DIR', env.COMMAND_FILES_DIR),
     commandFileKeepDays: int('COMMAND_FILE_KEEP_DAYS', env.COMMAND_FILE_KEEP_DAYS, 14, 14, 30),
+    scopeAllRoles,
+    companyDomains,
   };
 }

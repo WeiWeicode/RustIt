@@ -4,6 +4,7 @@
  * 與 SqlDeviceStore 共用連線池。狀態轉換一律條件更新(WHERE state IN …):多個來源同時更新時只有一個成功,狀態只能往前。
  */
 import sql from 'mssql';
+import { companyIn } from './sql-store.js';
 import type {
   BatchRecord,
   CommandFileRecord,
@@ -22,7 +23,7 @@ type Row = Record<string, unknown>;
 
 const cut = (s: string | null | undefined, n: number): string | null => (s == null || s === '' ? null : s.length > n ? s.slice(0, n) : s);
 
-const COLS = `c.id, c.command_id, c.batch_ref, b.batch_id, b.max_concurrent, c.device_ref, d.device_id, d.computer_name, c.cert_dn, c.kind, c.level, c.params,
+const COLS = `c.id, c.command_id, c.batch_ref, b.batch_id, b.max_concurrent, c.device_ref, d.device_id, d.computer_name, d.company AS device_company, c.cert_dn, c.kind, c.level, c.params,
   c.state, c.progress, c.result_summary, c.error_code, c.error_message, c.expires_at, c.timeout_at, c.send_count, c.created_by_emp, c.created_by_name,
   c.request_id, c.created_at, c.sent_at, c.acked_at, c.started_at, c.finished_at`;
 const FROM = `ita.command c JOIN ita.device d ON d.id = c.device_ref LEFT JOIN ita.command_batch b ON b.id = c.batch_ref`;
@@ -41,6 +42,7 @@ function toCommand(r: Row): CommandRecord {
     deviceRef: Number(r.device_ref),
     deviceId: String(r.device_id).toLowerCase(),
     computerName: String(r.computer_name),
+    deviceCompany: r.device_company == null ? null : String(r.device_company),
     certDn: String(r.cert_dn),
     kind: String(r.kind),
     level: r.level === 'admin' ? 'admin' : 'basic',
@@ -192,6 +194,13 @@ export class SqlCommandStore implements CommandStore, CommandFileStore {
     return this.batchWhere('b.batch_id = @bid', (r) => r.input('bid', sql.UniqueIdentifier, batchId));
   }
 
+  async batchCompanies(batchRef: number): Promise<(string | null)[]> {
+    const r = await (await this.request())
+      .input('batch', sql.BigInt, batchRef)
+      .query(`SELECT DISTINCT d.company FROM ita.command c JOIN ita.device d ON d.id = c.device_ref WHERE c.batch_ref = @batch`);
+    return (r.recordset as Row[]).map((x) => (x.company == null ? null : String(x.company)));
+  }
+
   async listCommands(f: CommandFilter): Promise<CommandRecord[]> {
     const req = (await this.request()).input('limit', sql.Int, f.limit);
     const where: string[] = [];
@@ -215,6 +224,7 @@ export class SqlCommandStore implements CommandStore, CommandFileStore {
       where.push('c.id < @before');
       req.input('before', sql.BigInt, f.beforeId);
     }
+    if (f.companies) where.push(companyIn(req, f.companies));
     const r = await req.query(`SELECT TOP (@limit) ${COLS} FROM ${FROM} ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY c.id DESC`);
     return (r.recordset as Row[]).map(toCommand);
   }

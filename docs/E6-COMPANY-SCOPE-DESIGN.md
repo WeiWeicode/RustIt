@@ -1,6 +1,6 @@
 # E6 資料範圍依公司(`cos`)過濾 — 設計
 
-> 草案 2026-10-16,分支 `feature/e6-company-scope`(從 `gitlab/develop` 807c7a1 開)。依據:ENDPOINT-AGENT-GUIDE §8.2「資料範圍」、§10.2 E6、§11 Endpoint Server 檢查清單;P3-DATA-DESIGN §3、§6.1「未處理(已知)」;資安稽核 M2。
+> 2026-10-16 E6-1 已實作(§6.1),尚未合併 develop。草案 2026-10-16,分支 `feature/e6-company-scope`(從 `gitlab/develop` 807c7a1 開)。依據:ENDPOINT-AGENT-GUIDE §8.2「資料範圍」、§10.2 E6、§11 Endpoint Server 檢查清單;P3-DATA-DESIGN §3、§6.1「未處理(已知)」;資安稽核 M2。
 > **2026-10-16 需求方確認**:§2 第 1、2、3、6 項採建議(混合判斷;`ENDPOINT_SCOPE_ALL_ROLES` 測試區先 `it-admin`;未指定只有全部公司角色看得到;改公司需 admin 且為全部公司角色);第 4、5、7 項隨之採建議;第 8、9 項(GigaItApp、Gateway)各批動手前另行同意。
 
 ## 0. 目標與缺口
@@ -65,7 +65,7 @@
 | **1** | **電腦屬於哪家公司** | A. 只由 IT 手動指定(新電腦先「未指定」)<br>B. 只看憑證 DN(依 E1:FQDN 網域尾碼或 `<公司代碼>-` 前綴)<br>C. 只看 Agent 回報的網域<br>D. **混合**:憑證 DN 判得出就用 → 否則用回報網域 → 都沒有則「未指定」;IT 手動指定優先且之後不再自動改 | **D**。理由:正式區網域電腦多數可自動判定(省人工);E1 未定案、測試 PKI 判斷不出時有網域可退;工作群組 / 子公司電腦由「全部公司」角色手動指定。回報網域可偽造,但偽造者必須已控制該台電腦,最多讓**自己那台**出現在別家公司的清單,不會讓 IT 取得別家電腦的權限;來源記在 `company_source`,畫面可標示「依回報網域」 |
 | **2** | **「可管理所有公司」怎麼判斷** | A. 設定檔列角色代碼:`ENDPOINT_SCOPE_ALL_ROLES=it-admin`(Token `roles` 有任一個即全部)<br>B. 新設專用角色(例 `endpoint-all-companies`,不含權限,只當標記),仍經 A 的設定檔指定<br>C. 由 BFF 拆路由 / 新權限代碼(BFF 一條路由只能查一個權限,要整組重複路由,不建議)<br>D. 要求 Gateway 在 `cos` 放 `*`(需改 Gateway,不建議) | **A,測試區先設 `it-admin`**(目前唯一有 admin 的角色,需求方測試方便);正式區要「一般 IT 只管自己公司」時改 B:在 GigaItApp `gateway-rbac.yaml` 新增標記角色(需 GigaItApp 同意),只改設定、不改程式。設定為空 = 沒有人能看全部 |
 | 3 | 「未指定公司」的電腦誰看得到 | A. 只有全部公司角色<br>B. 所有人 | **A**(不洩漏;全部公司角色在清單以「未指定」篩選後逐台指定) |
-| 4 | 網域 → 公司的對應放哪裡 | A. ItAgentBack 設定 `ENDPOINT_COMPANY_DOMAINS`(JSON)<br>B. 讀 Gateway `gw.company_ad_domain`(跨資料庫,違反 §10.4)<br>C. 請 Gateway 新增查詢 API(需改 Gateway) | **A**:`{"碩禾":["gsc.com.tw","gsmc.com.tw"],"鹽城碩禾":["ygdmc.gsc.com.tw"]}`。比對**最長尾碼優先**(`ygdmc.gsc.com.tw` 不可被 `gsc.com.tw` 先吃掉),不分大小寫。公司名稱必須與 Gateway `comp_name` 完全一致,啟動時檢查格式、不檢查名稱存在(看不到 Gateway DB) |
+| 4 | 網域 → 公司的對應放哪裡 | A. ItAgentBack 設定 `ENDPOINT_COMPANY_DOMAINS`(JSON)<br>B. 讀 Gateway `gw.company_ad_domain`(跨資料庫,違反 §10.4)<br>C. 請 Gateway 新增查詢 API(需改 Gateway) | **A**:`碩禾=gsc.com.tw,gsmc.com.tw;鹽城碩禾=ygdmc.gsc.com.tw`(實作時由 JSON 改為此格式:放在 Compose 的 env 檔不需處理引號與跳脫,§6.1)。比對**最長尾碼優先**(`ygdmc.gsc.com.tw` 不可被 `gsc.com.tw` 先吃掉),不分大小寫。公司名稱必須與 Gateway `comp_name` 完全一致,啟動時檢查格式、不檢查名稱存在(看不到 Gateway DB) |
 | 5 | 憑證 DN 規則(E1 未定) | A. 現在只實作「CN 是 FQDN → 取網域尾碼套 #4 對應」<br>B. 連 `<公司代碼>-` 前綴一起做 | **A**:非網域電腦的前綴格式與公司代碼表要等 E1 / E8 定案;未定前非網域電腦走「回報網域 → 未指定 → 手動」 |
 | 6 | 誰可以改電腦的公司 | A. `endpoint.command.admin` 且為全部公司角色<br>B. `endpoint.command.admin` 即可(但只能改成自己 `cos` 內的公司) | **A**:新路由 `PUT /v1/devices/{id}/company`(admin);非全部公司角色回 403 `ITA_SCOPE_ALL_REQUIRED`。B 會讓兩家公司的 IT 互相把電腦搶來搶去 |
 | 7 | 指令紀錄跟著誰 | A. 跟著裝置**目前**的公司(電腦改指定公司,歷史指令一起移過去)<br>B. 記錄建立當時的公司 | **A**:不需在 `ita.command` 加欄位,JOIN `ita.device` 即可;改公司寫稽核事件 |
@@ -97,7 +97,7 @@ GO
 | 變數 | 例 | 規則 |
 | --- | --- | --- |
 | `ENDPOINT_SCOPE_ALL_ROLES` | `it-admin` | 逗號分隔角色代碼;可空(= 沒有人看全部)。test / prod 未設定時**啟動失敗**(避免漏設造成 IT 全部看不到而誤以為故障;要空就明確設為空字串) |
-| `ENDPOINT_COMPANY_DOMAINS` | `{"碩禾":["gsc.com.tw","gsmc.com.tw"],"鹽城碩禾":["ygdmc.gsc.com.tw"]}` | JSON;公司名稱 1–20 字、網域小寫且不可重複指到兩家公司,格式錯**啟動失敗**;可省略(= 不自動判定) |
+| `ENDPOINT_COMPANY_DOMAINS` | `碩禾=gsc.com.tw,gsmc.com.tw;鹽城碩禾=ygdmc.gsc.com.tw` | `公司=網域,網域;公司=網域`;公司名稱 1–20 字、網域小寫且不可重複指到兩家公司,格式錯**啟動失敗**;可省略(= 不自動判定) |
 | dev `DEV_SKIP_TOKEN` | — | `DEV_IDENTITY` 視為全部公司(只在 dev) |
 
 兩個都寫進 `deploy/` 的 `ita.env` 範本(非機密);測試區由需求方更新 `/srv/giganexus/deploy/ita.env`。
@@ -189,11 +189,21 @@ export interface MgmtCtx extends Ctx { scope: Scope }
 3. RustIt 合併 develop(群組告知)→ endpoint-server 自動註冊 OpenAPI(新路由 `PUT .../company` 進草稿,IT 發佈)。
 4. E6-2 / E6-3 依同意另行處理。
 
+## 6.1 實作與驗證(2026-10-16,分支 `feature/e6-company-scope`)
+
+- ItAgentBack:migration 0005;`services/scope.ts`(`scopeOf`、`inScope`、`MgmtCtx`)、`services/company.ts`(網域對應解析、`resolveCompany`)、`routes/mgmt-ctx.ts`;`DeviceService.found()` 與 `CommandDispatcher.scopedDevice()` / `getRecord()` / `batchInScope()`、`CommandFileService.open()` / `forCommand()` 檢查範圍;清單類以 SQL `company IN (...)` 過濾;`PUT /v1/devices/{id}/company`;啟動回填 `backfillCompany`;Compose / `test.env.example` 加兩個設定(`ENDPOINT_SCOPE_ALL_ROLES` 未設定時 Compose 與服務都啟動失敗)。
+- 測試:`npm test` 124 項(新增 `test/scope.test.ts`:純函式、四種 Token × 每條管理 API、範圍外與不存在回應逐欄相同、批次與合併不留下資料、Idempotency-Key、公司自動判定與指定、回填、路由清單比對)全部通過;暫時拿掉 `found()` 的範圍檢查時 5 項失敗(測試有效)。`npm run test:int` 10 項(SQL Server 2012 `giganexus_It_Agent_poc_test`:0005、IN 參數 0 / 1 / 多家、`IS NULL`、`setCompany` 不覆寫 manual、回填、合併繼承、CHECK)全部通過。
+- 子代理審查(`code-reviewer`、`security-auditor`,無高嚴重度)後的修正:`suspected_duplicate` 事件內容提到範圍外的裝置時改為不含識別資訊的說明;清單 / 詳情的 `suspectedDuplicate` 標記只看範圍內的另一台;併入的目標在範圍外時 `mergedInto`(含 409 details)回 null;SQL 公司比對改二進位定序;`GET /v1/commands?batchId=` 與 `GET /v1/batches/{id}` 一致(含範圍外裝置視同不存在);批次 Idempotency-Key 命中範圍外的批次回 404。
+- **與設計不同**:`ENDPOINT_COMPANY_DOMAINS` 由 JSON 改為 `公司=網域,網域;公司=網域`(§2 #4、§3.2 已改);`CommandFileService` 自行檢查範圍(不經 dispatcher,邏輯相同)。
+- **未做**:migration 0005 尚未套用 `giganexus_It_Agent_test`(待同意);E6-2(GigaItApp)、E6-3(指南回寫)待同意;`test.env.example` 的公司名稱(碩禾、鹽城碩禾)須與測試區 Gateway `gw.company.comp_name` 核對。
+
 ## 7. 風險
 
 | 風險 | 處理 |
 | --- | --- |
 | IT 人員 `cos` 為空 → 看不到任何電腦,像故障 | 部署前以 `/api/auth/me` 確認;清單回應不提示原因(避免洩漏),日誌記 `scope: empty` |
 | Gateway 公司改名(LOS `CompName` 變更)→ 裝置的 `company` 對不上 | 屬罕見事件;改名時以 SQL `UPDATE ita.device SET company = …` 一併處理(寫進 DB_SCHEMA 維運說明) |
-| 回報網域可偽造 | 見 §2 #1;正式區憑證採 FQDN 後以 `cert` 為主 |
+| 回報網域可偽造 | 見 §2 #1;正式區憑證採 FQDN 後以 `cert` 為主。資安稽核補充:憑證 CN 不是 FQDN 時(測試區臨時 PKI),該台的本機管理員可改 Agent 回報讓**自己那台**變成未指定(所屬公司 IT 看不到,只有全部公司角色看得到)或歸到別家公司;不影響其他電腦。目前接受(公司變更會寫 `company_changed` 事件),**上線檢查加入「正式區裝置憑證 CN 必須是 FQDN」**(指南 E1) |
+| 公司名稱大小寫 / 全半形 | SQL 比對一律 `COLLATE Latin1_General_BIN2`,與 service 逐字比對一致;`cos` 超過 20 字的名稱直接略過 |
+| 修改 `ENDPOINT_COMPANY_DOMAINS` | 來源為 `domain` 的既有裝置要等下次資產內容變動才重算(啟動回填只處理未判定的) |
 | 清單在 service 分頁、在線篩選在 Redis | 範圍條件在 SQL,分頁仍正確;不影響 |

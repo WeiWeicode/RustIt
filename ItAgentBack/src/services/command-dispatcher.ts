@@ -9,6 +9,7 @@
  *   舊版 Agent 回 unsupported(信封 id = command_id):設為 failed UNSUPPORTED_COMMAND。
  *   每分鐘掃描:queued / sent 超過 expires_at → expired;acked / running 超過 timeout_at → failed TIMEOUT。
  *   單一實例(連線表在本行程,指南 §8.4);多實例需改為 Redis pub/sub 轉送。
+ *   資料範圍(E6):管理方法收 MgmtCtx;指令跟著裝置目前的公司,範圍外一律回與不存在相同的 404。
  */
 import { randomUUID } from 'node:crypto';
 import type { GatewayIdentity } from '@giganexus/backend-sdk';
@@ -16,6 +17,7 @@ import { EXPIRES_MAX_SEC, EXPIRES_MIN_SEC, kindOf, paramErrors, type CommandKind
 import { AppError, storageUnavailable } from '../errors.js';
 import type { BatchRecord, CommandLevel, CommandPatch, CommandRecord, CommandState, CommandStore, DeviceRow, DeviceStore } from '../stores/types.js';
 import type { Ctx } from './device-service.js';
+import { inScope, scopeCompanies, type MgmtCtx } from './scope.js';
 
 /** 推送到 Agent 的通道(DeviceService 的連線表) */
 export interface CommandChannel {
@@ -204,17 +206,40 @@ export class CommandDispatcher {
     if (n >= def.maxPending) throw new AppError(409, 'ITA_COMMAND_LIMIT', `${computerName} 已有 ${n} 筆尚未結束的 ${def.kind},請等待完成或取消後再送`);
   }
 
-  private async activeDevice(ctx: Ctx, deviceId: string) {
+  /** 範圍內的裝置;不存在或範圍外回相同的 404(E6) */
+  private async scopedDevice(ctx: MgmtCtx, deviceId: string): Promise<DeviceRow> {
     const found = await this.sqlDo(ctx, 'device.get', () => this.devices.getDevice(deviceId));
-    if (!found) throw new AppError(404, 'ITA_DEVICE_NOT_FOUND', '找不到此電腦');
-    if (found.row.status !== 'active') throw new AppError(409, 'ITA_DEVICE_NOT_ACTIVE', '此電腦已停用或退役,不能下指令');
+    if (!found || !inScope(ctx.scope, found.row.company)) {
+      if (found) ctx.log.info({ deviceId, scopeDenied: true }, '裝置不在資料範圍內');
+      throw new AppError(404, 'ITA_DEVICE_NOT_FOUND', '找不到此電腦');
+    }
     return found.row;
   }
 
-  async create(ctx: Ctx, who: GatewayIdentity, level: CommandLevel, deviceId: string, input: CreateCommandInput): Promise<CommandView> {
+  private async activeDevice(ctx: MgmtCtx, deviceId: string) {
+    const row = await this.scopedDevice(ctx, deviceId);
+    if (row.status !== 'active') throw new AppError(409, 'ITA_DEVICE_NOT_ACTIVE', '此電腦已停用或退役,不能下指令');
+    return row;
+  }
+
+  /** Idempotency-Key 找到的既有紀錄也要在範圍內(裝置之後改了公司) */
+  private assertScoped(ctx: MgmtCtx, company: string | null, what: string): void {
+    if (inScope(ctx.scope, company)) return;
+    ctx.log.info({ what, scopeDenied: true }, '既有指令不在資料範圍內');
+    throw new AppError(404, 'ITA_DEVICE_NOT_FOUND', '找不到此電腦');
+  }
+
+  private async batchInScope(ctx: MgmtCtx, batchRef: number): Promise<boolean> {
+    if (ctx.scope.all) return true;
+    const companies = await this.sqlDo(ctx, 'batch.companies', () => this.store.batchCompanies(batchRef));
+    return companies.every((c) => inScope(ctx.scope, c));
+  }
+
+  async create(ctx: MgmtCtx, who: GatewayIdentity, level: CommandLevel, deviceId: string, input: CreateCommandInput): Promise<CommandView> {
     const emp = who.emp ?? who.sub;
     const key = input.idempotencyKey;
     const same = (c: CommandRecord) => {
+      this.assertScoped(ctx, c.deviceCompany, `command ${c.commandId}`);
       // 同一個 key 用在不同電腦或類型:不可回傳舊的那筆(稽核會看不出沒有建立)
       if (c.deviceId !== deviceId || c.kind !== input.kind || c.level !== level)
         throw new AppError(422, 'ITA_IDEMPOTENCY_KEY_REUSED', 'Idempotency-Key 已用於另一筆不同的指令');
@@ -263,7 +288,7 @@ export class CommandDispatcher {
   }
 
   async createBatch(
-    ctx: Ctx,
+    ctx: MgmtCtx,
     who: GatewayIdentity,
     level: CommandLevel,
     deviceIds: string[],
@@ -275,7 +300,11 @@ export class CommandDispatcher {
       const cmds = await this.sqlDo(ctx, 'command.list(batch)', () => this.store.listCommands({ batchRef: b.id, limit: BATCH_MAX_DEVICES }));
       return { batchId: b.batchId, commands: cmds.reverse().map((c) => ({ deviceId: c.deviceId, commandId: c.commandId, state: c.state })) };
     };
-    const sameBatch = (b: BatchRecord) => {
+    const sameBatch = async (b: BatchRecord) => {
+      if (!(await this.batchInScope(ctx, b.id))) {
+        ctx.log.info({ batchId: b.batchId, scopeDenied: true }, '既有批次含資料範圍外的裝置');
+        throw new AppError(404, 'ITA_DEVICE_NOT_FOUND', '找不到此電腦');
+      }
       if (b.kind !== input.kind || b.level !== level) throw new AppError(422, 'ITA_IDEMPOTENCY_KEY_REUSED', 'Idempotency-Key 已用於另一筆不同的批次');
       return result(b);
     };
@@ -343,7 +372,7 @@ export class CommandDispatcher {
   }
 
   /** 只能取消自己建立、仍是 queued 的指令(指南 §8.3) */
-  async cancel(ctx: Ctx, who: GatewayIdentity, commandId: string): Promise<CommandView> {
+  async cancel(ctx: MgmtCtx, who: GatewayIdentity, commandId: string): Promise<CommandView> {
     const cmd = await this.getRecord(ctx, commandId);
     if (cmd.createdByEmp !== (who.emp ?? who.sub)) throw new AppError(403, 'ITA_COMMAND_NOT_OWNER', '只能取消自己建立的指令');
     const ok =
@@ -357,45 +386,52 @@ export class CommandDispatcher {
 
   // ---------- 查詢(管理 API) ----------
 
-  private async getRecord(ctx: Ctx, commandId: string): Promise<CommandRecord> {
+  /** 不存在或裝置不在範圍內回相同的 404(E6) */
+  private async getRecord(ctx: MgmtCtx, commandId: string): Promise<CommandRecord> {
     const cmd = await this.sqlDo(ctx, 'command.get', () => this.store.getCommand(commandId));
-    if (!cmd) throw new AppError(404, 'ITA_COMMAND_NOT_FOUND', '找不到此指令');
+    if (!cmd || !inScope(ctx.scope, cmd.deviceCompany)) {
+      if (cmd) ctx.log.info({ commandId, scopeDenied: true }, '指令的裝置不在資料範圍內');
+      throw new AppError(404, 'ITA_COMMAND_NOT_FOUND', '找不到此指令');
+    }
     return cmd;
   }
 
-  async get(ctx: Ctx, commandId: string): Promise<CommandView> {
+  async get(ctx: MgmtCtx, commandId: string): Promise<CommandView> {
     return toView(await this.getRecord(ctx, commandId));
   }
 
   /** 新到舊;nextCursor 為下一頁的游標(內部序號) */
   async list(
-    ctx: Ctx,
+    ctx: MgmtCtx,
     q: { deviceId?: string; batchId?: string; state?: CommandState; kind?: string; cursor?: string; limit?: number },
   ): Promise<{ items: CommandView[]; nextCursor: string | null }> {
     const limit = Math.min(Math.max(q.limit ?? 50, 1), 100);
     let deviceRef: number | undefined;
-    if (q.deviceId) {
-      const found = await this.sqlDo(ctx, 'device.get', () => this.devices.getDevice(q.deviceId!));
-      if (!found) throw new AppError(404, 'ITA_DEVICE_NOT_FOUND', '找不到此電腦');
-      deviceRef = found.row.id;
-    }
+    if (q.deviceId) deviceRef = (await this.scopedDevice(ctx, q.deviceId)).id;
+    const companies = scopeCompanies(ctx.scope);
+    if (companies?.length === 0) return { items: [], nextCursor: null };
     let batchRef: number | undefined;
     if (q.batchId) {
       const b = await this.sqlDo(ctx, 'batch.get', () => this.store.getBatch(q.batchId!));
-      if (!b) return { items: [], nextCursor: null };
+      // 與 getBatch 一致:批次含範圍外的裝置視同不存在(E6)
+      if (!b || !(await this.batchInScope(ctx, b.id))) return { items: [], nextCursor: null };
       batchRef = b.id;
     }
     const beforeId = q.cursor && /^\d+$/.test(q.cursor) ? Number(q.cursor) : undefined;
     const rows = await this.sqlDo(ctx, 'command.list', () =>
-      this.store.listCommands({ deviceRef, batchRef, state: q.state, kind: q.kind, beforeId, limit: limit + 1 }),
+      this.store.listCommands({ deviceRef, batchRef, state: q.state, kind: q.kind, beforeId, companies, limit: limit + 1 }),
     );
     const page = rows.slice(0, limit);
     return { items: page.map(toView), nextCursor: rows.length > limit ? String(page[page.length - 1]!.id) : null };
   }
 
-  async getBatch(ctx: Ctx, batchId: string): Promise<BatchView> {
+  /** 批次內所有裝置都在範圍內才看得到(避免從台數推知其他公司的電腦;E6 §1.4) */
+  async getBatch(ctx: MgmtCtx, batchId: string): Promise<BatchView> {
     const b = await this.sqlDo(ctx, 'batch.get', () => this.store.getBatch(batchId));
-    if (!b) throw new AppError(404, 'ITA_BATCH_NOT_FOUND', '找不到此批次');
+    if (!b || !(await this.batchInScope(ctx, b.id))) {
+      if (b) ctx.log.info({ batchId, scopeDenied: true }, '批次含資料範圍外的裝置');
+      throw new AppError(404, 'ITA_BATCH_NOT_FOUND', '找不到此批次');
+    }
     return batchView(b);
   }
 
