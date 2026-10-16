@@ -1,7 +1,7 @@
 # E6 資料範圍依公司(`cos`)過濾 — 設計
 
 > 草案 2026-10-16,分支 `feature/e6-company-scope`(從 `gitlab/develop` 807c7a1 開)。依據:ENDPOINT-AGENT-GUIDE §8.2「資料範圍」、§10.2 E6、§11 Endpoint Server 檢查清單;P3-DATA-DESIGN §3、§6.1「未處理(已知)」;資安稽核 M2。
-> **狀態:待需求方確認 §2 決定事項**;確認前不動程式、不建 migration。
+> **2026-10-16 需求方確認**:§2 第 1、2、3、6 項採建議(混合判斷;`ENDPOINT_SCOPE_ALL_ROLES` 測試區先 `it-admin`;未指定只有全部公司角色看得到;改公司需 admin 且為全部公司角色);第 4、5、7 項隨之採建議;第 8、9 項(GigaItApp、Gateway)各批動手前另行同意。
 
 ## 0. 目標與缺口
 
@@ -58,7 +58,7 @@
 | `GET /v1/batches/{id}` | read | `store.getBatch()` | 批次內**所有**裝置都在範圍內才看得到,否則 404(避免從筆數推知其他公司的電腦) |
 | `GET /v1/commands/{id}/files/{fileId}` | read | `CommandFileService.open()` | 先以 `dispatcher.get()` 檢查指令範圍,再開檔 |
 
-## 2. 決定事項(請需求方確認)
+## 2. 決定事項(2026-10-16 已確認,見開頭)
 
 | # | 問題 | 選項 | 建議 |
 | --- | --- | --- | --- |
