@@ -20,7 +20,7 @@
 
 0. **下一個工作階段從這裡開始(2026-10-16)**:
    - VM `DESKTOP-1TB2UMP` 已由需求方升級 Agent **0.4.1**(2026-10-16;MSI SHA-256 `880e46d9…da794c`,自 develop `8568f55` 建置)。尚待確認:收集一次日誌,zip 內檔案時間應為日誌修改時間(不是 1980-01-01)。
-   - **P3 資料呈現實作完成(未合併)**:設計 [P3-DATA-DESIGN.md](P3-DATA-DESIGN.md)(需求方 2026-10-16 確認);RustIt `feature/p3-data`(含設計文件提交)、GigaItApp `feature/p3-device-tabs`。測試全過(設計 §6.1)。**進度**:GigaItApp 已合併 develop(MR !4,2026-10-16;MR !3 誤合到 main,內容相同);migration 0004 已套用 `giganexus_It_Agent_test`(2026-10-16,經需求方同意,`ita.device_software` 與索引已建)。**下一步依序**:RustIt MR 合併 develop(新版啟動時回填軟體清單)→ 瀏覽器實測(各 Tab、篩選、下載)→ P3-4:VM 改名 + 以新名稱簽新憑證,驗證「疑似同一台」與合併(設計 §6)。上線前仍須完成資料範圍依 `cos` 過濾(指南 E6)。
+   - **P3 資料呈現已上測試區(2026-10-16)**:RustIt MR !23(endpoint-server `807c7a12`,OpenAPI 批次 110 已發佈,新增權限 `endpoint.command.admin`,啟動時回填 3 台軟體清單)、GigaItApp MR !4、!5(詳情固定 85vh 高度、篩選列換行);migration 0004 已套用;rbac-test 已重跑(`it.endpoint-device.admin` → `endpoint.command.admin`,it-admin)。瀏覽器實測(需求方登入):清單分頁 / 軟體篩選 / 清除、VM 詳情 7 個 Tab、事件 21 筆、下載 JSON、管理卡片(停用、退役)皆正常。**下一步 P3-4**:VM 改名 + 以新名稱簽新憑證(需求方在主機 2 執行 `host2-issue-test-device-cert.sh`),驗證「疑似同一台」與合併(設計 §6);停用 / 退役 / 合併尚未在測試區實際操作。上線前仍須完成資料範圍依 `cos` 過濾(指南 E6)、合併路由寫入指南 §8.3(需 Gateway 同意)。
    - P4 後續(未排程,見 `P4-COMMAND-DESIGN.md` §6.1、§8.4):WebSocket 訊息速率上限、`result` 依類型以 schema 限制、慢速上傳佔用回報名額、`ita.command_file.command_ref` 唯一索引(多實例前)、附檔總量上限與磁碟告警、批次下指令畫面。
 1. **P1 已完成**(2026-10-14 Hyper-V VM 驗證 7 項通過,見下方「P1 收尾:VM 測試」)。Win11 VM 可之後補測;VM 保留作 P2 以後的測試機(檢查點「匯入憑證」)。
 2. **P3 資料呈現**、**P8-1 使用者端外殼與我的電腦** 可並行:P3(管理 API 回完整資產 + GigaItApp 詳情分 Tab)只動後端與前端,適合交給同仁。
