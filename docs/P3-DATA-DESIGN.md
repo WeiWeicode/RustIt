@@ -1,0 +1,105 @@
+# P3 資料呈現設計
+
+> 草案 2026-10-16,分支 `docs/p3-design`(從 `gitlab/develop` b9c4ae2 開)。依據:PLATFORM-PLAN §3.3、§4.3、§4.10 A1、§5.1、§7、§8 P3 列;指南 ENDPOINT-AGENT-GUIDE §3.3、§8.2–§8.3。
+> **2026-10-16 需求方確認**:§7 第 2 項改為**現在做分頁**、第 5 項 P3-1 ~ P3-3 都由 Claude 這次一起做,其餘照建議。
+
+## 0. 現況與缺口
+
+| 項目 | 現況(develop) | P3 要補 |
+| --- | --- | --- |
+| 詳情 API | `GET /v1/devices/{id}` 已回完整 `inventory`(camelCase) | 疑似同一台清單、合併 / 退役資訊 |
+| 清單 API | 回全部裝置,無篩選 | 篩選:關鍵字(名稱、IP、MAC、裝置代碼、使用者)、軟體名稱、OS、在線、狀態;預設不列退役與已合併 |
+| 軟體查詢 | 只存在 `device_inventory.payload`(NVARCHAR(MAX)) | 新資料表 `ita.device_software`,依名稱找電腦 |
+| 事件 | `ita.device_event` 有資料(稽核 + 端點事件),沒有查詢 API | `GET /v1/devices/{id}/events` |
+| 下載 JSON | 無 | `GET /v1/devices/{id}/inventory.json` |
+| 硬體指紋 | P2 已寫 `hw_fingerprint`、`suspected_duplicate` 事件、`merged_into` / `retired_at` 欄位 | 合併、退役 API 與畫面 |
+| GigaItApp 詳情 | 「概要」(硬體、安全、磁碟、網卡擠在一頁)+「指令」 | 分 Tab:概要 / 硬體 / 網路 / 軟體 / 安全與周邊 / 事件 / 指令 |
+
+## 1. 分批
+
+| 批 | 內容 | repo | 需要同意 |
+| --- | --- | --- | --- |
+| **P3-1** | migration `0004_device_software.sql`;清單篩選、`/events`、`/inventory.json`、疑似同一台;舊資料回填軟體表 | RustIt | migration 套用 `giganexus_It_Agent_test` 前 |
+| **P3-2** | GigaItApp 詳情分 Tab、清單篩選列、下載 JSON | GigaItApp | 動 GigaItApp 前 |
+| **P3-3** | 合併、退役 API(`endpoint.command.admin`)與畫面;`gateway-rbac.yaml` 新增按鈕節點 | RustIt、GigaItApp | 權限授予哪個角色(§7 第 3 項) |
+| **P3-4** | 測試區驗證(§6) | — | VM 改名、簽新憑證由需求方執行 |
+
+P3-1 ~ P3-3 由 Claude 一起做(需求方 2026-10-16)。
+
+## 2. 資料表(`0004_device_software.sql`,SQL Server 2012)
+
+```sql
+-- 每台裝置最新一份資產的軟體清單,隨 saveInventory 整批替換(同 device_nic 做法)
+CREATE TABLE ita.device_software (
+  id           INT IDENTITY(1,1) NOT NULL CONSTRAINT pk_device_software PRIMARY KEY,
+  device_ref   INT            NOT NULL CONSTRAINT fk_device_software_device REFERENCES ita.device (id),
+  name         NVARCHAR(400)  NOT NULL,
+  version      NVARCHAR(100)  NULL,
+  publisher    NVARCHAR(255)  NULL,
+  install_date VARCHAR(16)    NULL   -- 原樣保存 Agent 的字串(登錄檔 yyyymmdd)
+);
+CREATE INDEX ix_device_software_device ON ita.device_software (device_ref);
+CREATE INDEX ix_device_software_name ON ita.device_software (name) INCLUDE (device_ref);
+```
+
+- 只新增資料表,舊版服務不受影響。`name` 超過 400 字截斷(索引鍵上限 900 bytes)。
+- **回填**:migration 不解析 JSON(SQL 2012 無 JSON 函式);服務啟動時對「有 inventory、沒有 software 列」的裝置,從 `payload` 解析後補寫一次(冪等,寫入失敗只記 warn)。
+- 依名稱搜尋用 `LIKE N'%' + @q + N'%'`(跳脫 `%`、`_`、`[`);幾百台 × 數百筆在可接受範圍,量大時再改全文檢索。
+
+## 3. 管理 API(`:51240`,對外 `/api/endpoint/*`)
+
+| 方法 | 路徑 | `x-permission` | 說明 | 批 |
+| --- | --- | --- | --- | --- |
+| `GET` | `/v1/devices` | `endpoint.device.read` | **分頁**:`page`(1 起)、`pageSize`(預設 50,上限 200),回應加 `total`、`page`、`pageSize`(`items` 不變;依電腦名稱排序)。查詢參數(皆可省略):`q`(電腦名稱、使用者、IP、MAC、裝置代碼,部分比對)、`software`(軟體名稱部分比對)、`os`、`online`(`true`/`false`)、`status`(`active`/`disabled`/`retired`,預設 `active,disabled`)。回應只新增欄位:`suspectedDuplicate`(boolean)、`mergedInto`(deviceId 或 null) | P3-1 |
+| `GET` | `/v1/devices/{id}` | `endpoint.device.read` | 只新增:`suspectedDuplicates`(同硬體指紋、未合併的其他裝置摘要)、`mergedInto`、`retiredAt`、`clockSkewMs` | P3-1 |
+| `GET` | `/v1/devices/{id}/events` | `endpoint.device.read` | 事件清單,新到舊;`?before=<id>&limit=50`(上限 200);欄位 `id`、`type`、`occurredAt`、`receivedAt`、`detail`、`data`(端點事件的 JSON) | P3-1 |
+| `GET` | `/v1/devices/{id}/inventory.json` | `endpoint.device.read` | 最新資產原樣(資料契約 snake_case),`Content-Disposition: attachment; filename="<電腦名稱>-<yyyyMMdd>.json"`;無資產回 404 `ITA_INVENTORY_NOT_FOUND` | P3-1 |
+| `PUT` | `/v1/devices/{id}/status` | `endpoint.command.admin` | 指南 §8.3 既有草案:`{ status: 'active' \| 'disabled' \| 'retired', reason }`;停用 / 退役時立即關閉 WebSocket。`x-audit-level: meta` | P3-3 |
+| `POST` | `/v1/devices/{id}/merge` | `endpoint.command.admin` | `{ sourceDeviceId, reason }`:把 `sourceDeviceId`(重灌後的新登錄)併入 `{id}`(舊裝置),見 §4。`x-audit-level: meta`;支援 `Idempotency-Key` | P3-3 |
+
+- 錯誤代碼只新增:`ITA_INVENTORY_NOT_FOUND`、`ITA_MERGE_INVALID`(同一台、來源已合併、兩者指紋不同且未帶 `force`)、`ITA_DEVICE_STATUS_INVALID`。
+- 資料範圍依 `cos` 過濾仍待指南 §10 E6,本階段不做。
+
+## 4. 合併(A1)
+
+方向:**保留舊裝置**(deviceId、首次連線時間、指令紀錄不變),新登錄的裝置併入。單一 SQL 交易:
+
+1. 鎖定兩列(`UPDLOCK`),檢查:不是同一台、來源 `merged_into IS NULL`、兩者 `hw_fingerprint` 相同(不同時需 `force: true`,畫面再確認一次)。
+2. 來源的 `cert_dn` 改為 `merged:<來源 device_id>`(釋放唯一鍵),目標的 `cert_dn` / `cert_fp` / `computer_name` / `agent_version` / `hw_fingerprint` / `last_seen_at` 改為來源的值(來源才是目前在用的那台)。
+3. `device_event`、`command`(含 `command_batch` 不動)的 `device_ref` 由來源改為目標;端點事件 `event_uid` 唯一索引以 `(device_ref, event_uid)`,UUID 不會重複。
+4. `device_inventory` / `device_nic` / `device_software`:取 `collected_at` 較新的一份放到目標,另一份刪除。
+5. 來源設 `status = 'retired'`、`merged_into = 目標`、`retired_at`;目標寫 `merged` 事件(detail:來源 deviceId、舊 DN、操作人工號)。
+
+交易後(失敗只記 warn):Mongo `snapshots` / `heartbeats` 的 `device_id` 改為目標;Redis 刪除兩者的 `online` / `hash` 鍵;**關閉來源的 WebSocket**,Agent 重連時依新 DN 找到目標裝置(不需要改 Agent)。
+
+退役:`status = 'retired'`、`retired_at`,關閉 WebSocket;Agent 之後連線回 403 `ITA_DEVICE_RETIRED`(P2 已實作)。資料依保存期限清除屬 B5,不在 P3。
+
+## 5. GigaItApp(P3-2、P3-3)
+
+| 位置 | 內容 |
+| --- | --- |
+| 電腦清單 | 篩選列:關鍵字、軟體名稱、OS、在線、顯示退役;欄位加「疑似同一台」標記 |
+| 詳情 Tab | **概要**(狀態、使用者、OS、型號、序號、Agent、時鐘偏差、憑證;疑似同一台提示與「合併」按鈕)/ **硬體**(CPU、記憶體模組、實體磁碟、磁碟區、顯示卡、主機板與 BIOS)/ **網路**(網卡、IP、閘道、DNS、DHCP)/ **軟體**(表格 + 名稱篩選、筆數)/ **安全與周邊**(防毒、最近更新、USB 儲存原則與紀錄、RustDesk)/ **事件**(含 `offline_period`、`suspected_duplicate`、`clock_skew`)/ **指令**(既有) |
+| 按鈕 | 「下載資產 JSON」(read);「合併」「退役」「停用 / 啟用」(新按鈕節點,`includes: [endpoint.command.admin]`) |
+
+Tab 只在切換時載入(事件、軟體表格大),沿用 `DeviceCommands` 的做法。
+
+## 6. 測試與驗證
+
+- ItAgentBack:`device_software` 替換與回填、篩選參數(含 LIKE 跳脫)、`/events` 分頁、`inventory.json` 標頭、合併交易各檢查與回滾、退役後 403;`npm test`、`npm run test:int`(`giganexus_It_Agent_poc_test`)。
+- 測試區(PLATFORM-PLAN P3 完成標準):
+  1. 在 GigaItApp 依軟體名稱、IP、電腦名稱各找到 VM 與自己的電腦;各 Tab 有資料;下載 JSON 可開啟。
+  2. **疑似同一台**:VM 還原檢查點只會沿用同一 DN,不會觸發。改為 VM 改電腦名稱 → 需求方以新名稱在主機 2 執行 `host2-issue-test-device-cert.sh` 簽新憑證並匯入(舊憑證移除)→ 重啟服務 → 出現新裝置且標記「疑似同一台」。
+  3. 合併後:清單只剩一台、deviceId 為舊的、事件與指令紀錄連續、Agent 自動重連到舊裝置;退役另一台測試裝置後 Agent 連線被拒。
+
+## 7. 決定事項(2026-10-16)
+
+| # | 問題 | 建議 |
+| --- | --- | --- |
+| 1 | 軟體查詢用新資料表 `ita.device_software`(migration 0004),還是直接 `LIKE` 搜 `payload` | **新資料表**:可依名稱建索引,軟體 Tab 與之後 P5 軟體增刪比對也用得到 |
+| 2 | 清單要不要現在做分頁(指南 §8.3 寫「分頁」) | ~~先不做~~ → **決定:現在做**(主機端分頁,§3) |
+| 3 | 合併、退役、停用用 `endpoint.command.admin`(指南 §8.2 已定義「停用 / 啟用裝置」屬此等級),目前只授予 it-admin? | **用 admin、只給 it-admin**;admin 路徑原訂 P6 才開,這次先開裝置狀態與合併兩條,指令的 `admin-commands` 仍等 P6 |
+| 4 | 合併方向:保留舊裝置(deviceId 不變) | **保留舊裝置**(PLATFORM-PLAN A1 原文「併入舊裝置」) |
+| 5 | P3-1 / P3-2 誰寫 | **決定:Claude 這次一起做**,不交給同仁 |
+| 6 | 「事件」Tab 放 P3 還是 P5 | **P3 先做清單**(合併前要看得到 `suspected_duplicate`);P5 再加軟硬體變更事件與告警 |
+| 7 | 變更歷程(`/history`,Mongo 快照)| **延到 P5**(與軟硬體變更比對一起做) |

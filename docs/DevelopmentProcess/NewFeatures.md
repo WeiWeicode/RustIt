@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-16 P3 資料呈現設計草案
+- 內容:盤點 develop 現況(詳情已回完整資產;缺清單篩選、軟體查詢、事件 API、下載 JSON、合併 / 退役),擬定 P3-1 ~ P3-4 分批、migration 0004 `ita.device_software`、管理 API 擴充、合併交易步驟、GigaItApp Tab 分法與測試區驗證方式(VM 改名 + 新憑證觸發「疑似同一台」);§7 列 7 項待需求方決定。VM 已升級 Agent 0.4.1。
+- 檔案:`docs/P3-DATA-DESIGN.md`(新)、`docs/HANDOFF.md`
+- 驗證:文件;未改程式
+
 ## 2026-10-15 P4-2:測試區 VM 驗證(含 P4-1 服務模式 agent.restart)
 - 內容:P4-2 合併 develop 後,重建 0.4.0 測試區 MSI 並放到主機 2,VM `DESKTOP-1TB2UMP` 由 0.2.0 升級。部署時發現 endpoint-api 自動註冊被 Gateway 拒絕,修正後(MR !17)Gateway 發佈 v51(8 條指令路由);GigaItApp MR !1 以按鈕節點 `it.endpoint-device.command` 把 `endpoint.command.basic` 授予 it-admin(需求方同意只改 RBAC)。
 - 檔案:`docs/HANDOFF.md`(「P4 測試區 VM 驗證」)
