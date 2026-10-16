@@ -21,7 +21,7 @@ const env = setup();
 
 async function build(devSkipToken = false) {
   const gateway = loadGatewayEnv({ GW_ENV: 'dev', SERVICE_CODE: 'endpoint-api', GW_JWKS_URL: jwksUrl });
-  return buildMgmtApp({ config: { gateway, monitor: loadMonitorEnv('dev', {}), logLevel: 'silent', devSkipToken }, service: env.service });
+  return buildMgmtApp({ config: { gateway, monitor: loadMonitorEnv('dev', {}), logLevel: 'silent', devSkipToken, scopeAllRoles: ['it-admin'] }, service: env.service });
 }
 
 before(async () => {
@@ -31,7 +31,8 @@ before(async () => {
   await new Promise<void>((r) => jwks.listen(0, '127.0.0.1', r));
   jwksUrl = `http://127.0.0.1:${(jwks.address() as AddressInfo).port}/.well-known/jwks.json`;
   sign = (aud = 'endpoint-api') =>
-    new SignJWT({ sub: '1', emp: 'S112009', cos: ['GSMC'] })
+    // 全部公司角色(E6;資料範圍的逐條路由測試在 scope.test.ts)
+    new SignJWT({ sub: '1', emp: 'S112009', cos: ['GSMC'], roles: ['it-admin'] })
       .setProtectedHeader({ alg: 'ES256', kid: 'test' })
       .setIssuer('giganexus-bff')
       .setAudience(aud)
@@ -60,9 +61,9 @@ describe('OpenAPI(BACKEND-GUIDE.md §6.1)', () => {
     const declared = new Set(doc['x-permissions'].map((p: { code: string }) => p.code));
     assert.ok(declared.has('endpoint.device.read'));
     const ops = Object.values(doc.paths as Record<string, Record<string, Record<string, unknown>>>).flatMap((p) => Object.values(p));
-    // 管理等級(P3):裝置狀態與合併;其餘為查詢
-    const ADMIN_OPS = ['endpoint.device.status', 'endpoint.device.merge'];
-    assert.equal(ops.length, 6);
+    // 管理等級(P3):裝置狀態與合併;E6:指定所屬公司;其餘為查詢
+    const ADMIN_OPS = ['endpoint.device.status', 'endpoint.device.merge', 'endpoint.device.company'];
+    assert.equal(ops.length, 7);
     for (const op of ops) {
       const id = String(op.operationId);
       assert.match(id, CODE);
@@ -74,6 +75,7 @@ describe('OpenAPI(BACKEND-GUIDE.md §6.1)', () => {
     assert.deepEqual(Object.keys(doc.paths).sort(), [
       '/v1/devices',
       '/v1/devices/{deviceId}',
+      '/v1/devices/{deviceId}/company',
       '/v1/devices/{deviceId}/events',
       '/v1/devices/{deviceId}/inventory.json',
       '/v1/devices/{deviceId}/merge',

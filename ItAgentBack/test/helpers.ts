@@ -11,10 +11,13 @@ import { AppError } from '../src/errors.js';
 import { CommandDispatcher } from '../src/services/command-dispatcher.js';
 import { CommandFileService } from '../src/services/command-files.js';
 import { DeviceService } from '../src/services/device-service.js';
+import { SCOPE_ALL, type Scope } from '../src/services/scope.js';
 import type {
   Actor,
   AgentEvent,
   BatchRecord,
+  CompanyChange,
+  CompanySource,
   CommandFileRecord,
   CommandFileStore,
   CommandFilter,
@@ -59,6 +62,10 @@ class Failable {
   }
 }
 
+/** 資料範圍:全部公司 / 指定公司(E6 測試用) */
+export const ALL: Scope = SCOPE_ALL;
+export const only = (...companies: string[]): Scope => ({ all: false, companies });
+
 /** 清單不篩選、第一頁(測試用) */
 export const LIST_ALL = { statuses: [], page: 1, pageSize: 50 };
 
@@ -78,7 +85,15 @@ export class MemoryDeviceStore extends Failable implements DeviceStore {
     const d = this.devices.find((x) => x.certDn === certDn);
     return d ? { ...d } : null;
   }
-  async register(input: { certDn: string; certFp: string; computerName: string; requestId: string; at: Date }) {
+  async register(input: {
+    certDn: string;
+    certFp: string;
+    computerName: string;
+    requestId: string;
+    at: Date;
+    company?: string | null;
+    companySource?: CompanySource | null;
+  }) {
     this.hit('register');
     const d: DeviceRecord = {
       id: this.devices.length + 1,
@@ -93,6 +108,8 @@ export class MemoryDeviceStore extends Failable implements DeviceStore {
       lastInventoryAt: null,
       hwFingerprint: null,
       clockSkewMs: null,
+      company: input.company ?? null,
+      companySource: input.company ? (input.companySource ?? null) : null,
     };
     this.devices.push(d);
     this.events.push({ id: ++this.eventSeq, deviceRef: d.id, type: 'registered', detail: '' });
@@ -152,6 +169,7 @@ export class MemoryDeviceStore extends Failable implements DeviceStore {
       ...d,
       userName: s?.system.user_name ?? null,
       domain: s?.system.domain ?? null,
+      partOfDomain: s?.system.part_of_domain ?? null,
       osName: s?.system.os_name ?? null,
       osVersion: s ? `${s.system.os_display_version} / ${s.system.os_build}` : null,
       manufacturer: s?.system.manufacturer ?? null,
@@ -171,6 +189,8 @@ export class MemoryDeviceStore extends Failable implements DeviceStore {
     const has = (v: string | null | undefined, q: string) => !!v && v.toLowerCase().includes(q.toLowerCase());
     return this.devices
       .filter((d) => statuses.includes(d.status))
+      .filter((d) => !f.companies || (d.company !== null && f.companies.includes(d.company)))
+      .filter((d) => f.company === undefined || d.company === f.company)
       .filter((d) => {
         const inv = this.inventories.get(d.id)?.inventory;
         if (f.q) {
@@ -233,6 +253,7 @@ export class MemoryDeviceStore extends Failable implements DeviceStore {
         events++;
       }
     const oldDn = t.certDn;
+    if (t.company === null) Object.assign(t, { company: src.company, companySource: src.companySource });
     Object.assign(t, {
       certDn: src.certDn,
       certFp: src.certFp,
@@ -243,6 +264,33 @@ export class MemoryDeviceStore extends Failable implements DeviceStore {
     Object.assign(src, { certDn: `merged:${src.deviceId}`, status: 'retired', mergedInto: targetRef, retiredAt: new Date() });
     this.events.push({ id: ++this.eventSeq, deviceRef: targetRef, type: 'merged', detail: `${actor.emp};${src.deviceId};${oldDn};${detail}` });
     return { events, commands: this.mergedCommands?.(sourceRef, targetRef) ?? 0, canceledCommands: 0, inventoryFrom };
+  }
+  async setCompany(deviceRef: number, c: CompanyChange) {
+    this.hit('setCompany');
+    const d = this.byId(deviceRef);
+    if (d.mergedInto) return false;
+    if (c.mode === 'auto' && d.companySource !== null && d.companySource !== 'domain') return false;
+    const old = d.company;
+    d.company = c.company;
+    d.companySource = c.company === null ? null : c.source;
+    if (c.mode === 'manual' || old !== c.company)
+      this.events.push({ id: ++this.eventSeq, deviceRef, type: 'company_changed', detail: `${old ?? '-'}→${c.company ?? '-'};${c.detail}` });
+    return true;
+  }
+  async companyCandidates(afterRef: number, limit: number) {
+    this.hit('companyCandidates');
+    return this.devices
+      .filter((d) => d.id > afterRef && d.companySource === null && !d.mergedInto)
+      .sort((a, b) => a.id - b.id)
+      .slice(0, limit)
+      .map((d) => {
+        const sys = this.inventories.get(d.id)?.inventory.system;
+        return { id: d.id, deviceId: d.deviceId, certDn: d.certDn, domain: sys?.domain ?? null, partOfDomain: sys?.part_of_domain ?? null };
+      });
+  }
+  /** 模擬 migration 0005 前的版本或測試前置:直接改公司(不寫事件) */
+  setCompanyRaw(deviceRef: number, company: string | null, source: CompanySource | null = company ? 'manual' : null) {
+    Object.assign(this.byId(deviceRef), { company, companySource: source });
   }
   /** 指令儲存掛上時搬指令(MemoryCommandStore 設定) */
   mergedCommands?: (from: number, to: number) => number;
@@ -341,12 +389,12 @@ export class Clock {
   }
 }
 
-export function setup() {
+export function setup(opts: { companyDomains?: Map<string, string> } = {}) {
   const sql = new MemoryDeviceStore();
   const mongo = new MemorySnapshotStore();
   const redis = new MemoryStateStore();
   const clock = new Clock();
-  const service = new DeviceService(sql, mongo, redis, { heartbeatIntervalSec: 30, now: clock.now });
+  const service = new DeviceService(sql, mongo, redis, { heartbeatIntervalSec: 30, now: clock.now, companyDomains: opts.companyDomains });
   return { sql, mongo, redis, clock, service };
 }
 
@@ -384,6 +432,7 @@ export class MemoryCommandStore extends Failable implements CommandStore, Comman
       batchMaxConcurrent: b?.maxConcurrent ?? null,
       deviceId: d.deviceId,
       computerName: d.computerName,
+      deviceCompany: d.company,
       requestId: c.requestId,
     } as CommandRecord;
   }
@@ -424,9 +473,17 @@ export class MemoryCommandStore extends Failable implements CommandStore, Comman
     const b = this.batches.find((x) => x.batchId === batchId);
     return b ? this.batchRec(b) : null;
   }
+  async batchCompanies(batchRef: number) {
+    this.hit('batchCompanies');
+    return [...new Set(this.commands.filter((c) => c.batchRef === batchRef).map((c) => this.devices.byId(c.deviceRef).company))];
+  }
   async listCommands(f: CommandFilter) {
     this.hit('listCommands');
     return this.commands
+      .filter((c) => {
+        const co = this.devices.byId(c.deviceRef).company;
+        return !f.companies || (co !== null && f.companies.includes(co));
+      })
       .filter(
         (c) =>
           (f.deviceRef === undefined || c.deviceRef === f.deviceRef) &&
@@ -541,8 +598,8 @@ export class FakeConnection {
   }
 }
 
-export function setupCommands(opts: { batchMaxConcurrent?: number } = {}) {
-  const base = setup();
+export function setupCommands(opts: { batchMaxConcurrent?: number; companyDomains?: Map<string, string> } = {}) {
+  const base = setup({ companyDomains: opts.companyDomains });
   const store = new MemoryCommandStore(base.sql);
   const commands = new CommandDispatcher(store, base.sql, base.service, { now: base.clock.now, ...opts });
   // 指令附檔放在每次測試各自的暫存目錄

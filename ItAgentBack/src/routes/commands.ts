@@ -4,6 +4,7 @@
  *   - POST 支援 Idempotency-Key(同一工號 + 同一 key 回傳既有的那筆);建立指令設 x-audit-level: meta,不設 x-cache-ttl
  *   - 操作人(工號、姓名)取自內部 Token,寫入稽核(§8.5)
  *   - 指令附檔(logs.collect 日誌,P4-2):GET /commands/{id} 回應帶 files;下載 GET /commands/{id}/files/{fileId}(x-audit-level: meta)
+ *   - 資料範圍(E6):指令跟著裝置目前的公司,只回傳、只接受登入者所屬公司的電腦;範圍外與不存在同樣回 404
  * 路由只驗參數與宣告權限,邏輯在 CommandDispatcher(AGENT.md §8.1)。
  */
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
@@ -12,6 +13,7 @@ import { AppError } from '../errors.js';
 import { BATCH_MAX_DEVICES, type CommandDispatcher } from '../services/command-dispatcher.js';
 import type { CommandFileService } from '../services/command-files.js';
 import type { CommandState } from '../stores/types.js';
+import { mgmtCtx } from './mgmt-ctx.js';
 
 const STATES = ['queued', 'sent', 'acked', 'running', 'succeeded', 'failed', 'canceled', 'expired'] as const;
 const BASIC_KINDS = COMMAND_KINDS.filter((k) => k.level === 'basic').map((k) => k.kind);
@@ -105,7 +107,7 @@ interface ListQuery {
 
 export function commandRoutes(commands: CommandDispatcher, files?: CommandFileService): FastifyPluginAsync {
   return async (app) => {
-    const ctx = (req: FastifyRequest) => ({ log: req.log, requestId: req.id });
+    const ctx = mgmtCtx;
     const who = (req: FastifyRequest) => {
       if (!req.identity) throw new AppError(401, 'ITA_INTERNAL_TOKEN_INVALID', '缺少內部 Token');
       return req.identity;

@@ -20,6 +20,9 @@ import type {
   DeviceStore,
   InventorySnapshot,
   BackfillResult,
+  CompanyCandidate,
+  CompanyChange,
+  CompanySource,
   MergeResult,
   TouchPatch,
 } from './types.js';
@@ -30,8 +33,8 @@ const BY_AGENT = 'agent';
 const cut = (s: string | null | undefined, n: number): string | null => (s == null || s === '' ? null : s.length > n ? s.slice(0, n) : s);
 
 const DEVICE_COLS = `d.id, d.device_id, d.cert_dn, d.cert_fp, d.computer_name, d.status, d.agent_version, d.first_seen_at, d.last_seen_at, d.last_inventory_at,
-  d.hw_fingerprint, d.clock_skew_ms`;
-const SUMMARY_COLS = `${DEVICE_COLS}, i.user_name, i.domain, i.os_name, i.os_version, i.os_display_version, i.os_build, i.manufacturer, i.model, i.cpu_name, i.memory_total,
+  d.hw_fingerprint, d.clock_skew_ms, d.company, d.company_source`;
+const SUMMARY_COLS = `${DEVICE_COLS}, i.user_name, i.domain, i.part_of_domain, i.os_name, i.os_version, i.os_display_version, i.os_build, i.manufacturer, i.model, i.cpu_name, i.memory_total,
   d.retired_at, m.device_id AS merged_into_id,
   CASE WHEN d.hw_fingerprint IS NOT NULL AND EXISTS (
     SELECT 1 FROM ita.device o WHERE o.hw_fingerprint = d.hw_fingerprint AND o.id <> d.id AND o.merged_into IS NULL AND o.status <> 'retired'
@@ -59,6 +62,8 @@ function toDevice(r: Row): DeviceRecord {
     lastInventoryAt: (r.last_inventory_at as Date | null) ?? null,
     hwFingerprint: r.hw_fingerprint == null ? null : String(r.hw_fingerprint).trim(),
     clockSkewMs: r.clock_skew_ms == null ? null : Number(r.clock_skew_ms),
+    company: r.company == null ? null : String(r.company),
+    companySource: r.company_source == null ? null : (String(r.company_source) as CompanySource),
   };
 }
 
@@ -68,6 +73,7 @@ function toRow(r: Row, ips: string[]): DeviceRow {
     ...toDevice(r),
     userName: (r.user_name as string | null) ?? null,
     domain: (r.domain as string | null) ?? null,
+    partOfDomain: r.part_of_domain == null ? null : Boolean(r.part_of_domain),
     osName: (r.os_name as string | null) ?? null,
     osVersion,
     manufacturer: (r.manufacturer as string | null) ?? null,
@@ -99,6 +105,19 @@ async function insertSoftware(tx: sql.Transaction, deviceRef: number, list: Soft
     });
     await req.query(`INSERT INTO ita.device_software (device_ref, name, version, publisher, install_date) VALUES ${values.join(', ')}`);
   }
+}
+
+/** 公司名稱逐字比對(與 service 的 inScope 一致;資料庫預設定序不分大小寫與全半形) */
+export const COMPANY_EXACT = 'COLLATE Latin1_General_BIN2';
+
+/** d.company IN (@sc0, @sc1…);空清單 → 1 = 0(不回任何列) */
+export function companyIn(req: sql.Request, companies: readonly string[], col = 'd.company'): string {
+  if (companies.length === 0) return '1 = 0';
+  const ps = companies.map((c, k) => {
+    req.input(`sc${k}`, sql.NVarChar(20), c);
+    return `@sc${k}`;
+  });
+  return `${col} ${COMPANY_EXACT} IN (${ps.join(', ')})`;
 }
 
 const actorText = (a: Actor) => `操作人 ${a.emp}${a.name ? ` ${a.name}` : ''}`;
@@ -152,7 +171,15 @@ export class SqlDeviceStore implements DeviceStore {
     return row ? toDevice(row) : null;
   }
 
-  async register(input: { certDn: string; certFp: string; computerName: string; requestId: string; at: Date }): Promise<DeviceRecord> {
+  async register(input: {
+    certDn: string;
+    certFp: string;
+    computerName: string;
+    requestId: string;
+    at: Date;
+    company?: string | null;
+    companySource?: CompanySource | null;
+  }): Promise<DeviceRecord> {
     const pool = await this.ready();
     const tx = new sql.Transaction(pool);
     await tx.begin();
@@ -163,11 +190,13 @@ export class SqlDeviceStore implements DeviceStore {
         .input('name', sql.NVarChar(255), cut(input.computerName, 255))
         .input('at', sql.DateTime2(3), input.at)
         .input('by', sql.NVarChar(64), BY_AGENT)
+        .input('co', sql.NVarChar(20), input.company ?? null)
+        .input('cosrc', sql.VarChar(8), input.company ? (input.companySource ?? null) : null)
         .input('rid', sql.VarChar(64), cut(input.requestId, 64)).query(`
           DECLARE @ids TABLE (id INT);
-          INSERT INTO ita.device (cert_dn, cert_fp, computer_name, first_seen_at, last_seen_at, created_by, updated_by)
+          INSERT INTO ita.device (cert_dn, cert_fp, computer_name, first_seen_at, last_seen_at, created_by, updated_by, company, company_source)
           OUTPUT INSERTED.id INTO @ids
-          VALUES (@dn, @fp, @name, @at, @at, @by, @by);
+          VALUES (@dn, @fp, @name, @at, @at, @by, @by, @co, @cosrc);
           INSERT INTO ita.device_event (device_ref, event_type, cert_dn, cert_fp, detail, request_id)
           SELECT id, 'registered', @dn, @fp, N'首次連線自動登錄', @rid FROM @ids;
           SELECT ${DEVICE_COLS} FROM ita.device d WHERE d.id = (SELECT id FROM @ids);`);
@@ -407,6 +436,13 @@ export class SqlDeviceStore implements DeviceStore {
       req.input('os', sql.NVarChar(210), likeContains(filter.os));
       where.push(`(i.os_name LIKE @os ESCAPE '\\' OR i.os_display_version LIKE @os ESCAPE '\\')`);
     }
+    // 資料範圍(E6):不含未指定公司的裝置
+    if (filter.companies) where.push(companyIn(req, filter.companies));
+    if (filter.company === null) where.push('d.company IS NULL');
+    else if (filter.company !== undefined) {
+      req.input('co', sql.NVarChar(20), filter.company);
+      where.push(`d.company ${COMPANY_EXACT} = @co`);
+    }
     const r = await req.query(`SELECT ${SUMMARY_COLS} FROM ${SUMMARY_FROM} WHERE ${where.join(' AND ')} ORDER BY d.computer_name, d.id`);
     const ips = await this.ipv4Of();
     return (r.recordset as Row[]).map((row) => toRow(row, ips.get(Number(row.id)) ?? []));
@@ -526,6 +562,12 @@ export class SqlDeviceStore implements DeviceStore {
           FROM ita.device WHERE id = @s;
           UPDATE ita.device SET cert_dn = @srcdn, status = 'retired', merged_into = @t, retired_at = SYSUTCDATETIME(),
             updated_at = SYSUTCDATETIME(), updated_by = @by WHERE id = @s;
+          -- 所屬公司(E6 §3.3):目標不變;目標未指定時取來源的。SET 內引用的是更新前的值
+          DECLARE @co NVARCHAR(20), @cosrc VARCHAR(8);
+          SELECT @co = company, @cosrc = company_source FROM ita.device WHERE id = @s;
+          UPDATE ita.device SET company = CASE WHEN company IS NULL THEN @co ELSE company END,
+            company_source = CASE WHEN company IS NULL THEN @cosrc ELSE company_source END
+          WHERE id = @t;
           UPDATE ita.device SET cert_dn = @dn, cert_fp = @fp, computer_name = @name, agent_version = COALESCE(@ver, agent_version),
             hw_fingerprint = COALESCE(@hw, hw_fingerprint), clock_skew_ms = @skew, clock_checked_at = @checked,
             first_seen_at = CASE WHEN @first < first_seen_at THEN @first ELSE first_seen_at END,
@@ -547,6 +589,54 @@ export class SqlDeviceStore implements DeviceStore {
       await tx.rollback().catch(() => undefined);
       throw err;
     }
+  }
+
+  async setCompany(deviceRef: number, c: CompanyChange): Promise<boolean> {
+    const r = await (await this.request())
+      .input('id', sql.Int, deviceRef)
+      .input('co', sql.NVarChar(20), c.company)
+      .input('src', sql.VarChar(8), c.company === null ? null : c.source)
+      .input('manual', sql.Bit, c.mode === 'manual')
+      .input('detail', sql.NVarChar(1000), cut(c.detail, 1000) ?? '')
+      .input('by', sql.NVarChar(64), cut(c.by, 64))
+      .input('rid', sql.VarChar(64), cut(c.requestId, 64)).query(`
+        SET XACT_ABORT ON;
+        BEGIN TRAN;
+        DECLARE @old TABLE (company NVARCHAR(20), company_source VARCHAR(8));
+        UPDATE ita.device SET company = @co, company_source = @src, updated_at = SYSUTCDATETIME(), updated_by = @by
+        OUTPUT DELETED.company, DELETED.company_source INTO @old
+        WHERE id = @id AND merged_into IS NULL AND (@manual = 1 OR company_source IS NULL OR company_source = 'domain');
+        IF @@ROWCOUNT = 0
+        BEGIN
+          ROLLBACK;
+          SELECT CAST(0 AS BIT) AS ok;
+          RETURN;
+        END
+        -- 稽核:IT 指定一律記;自動判定只在公司有變時記
+        IF @manual = 1 OR EXISTS (SELECT 1 FROM @old WHERE ISNULL(company, N'') <> ISNULL(@co, N''))
+          INSERT INTO ita.device_event (device_ref, event_type, cert_dn, cert_fp, detail, request_id)
+          SELECT d.id, 'company_changed', d.cert_dn, d.cert_fp,
+            LEFT(N'公司 ' + ISNULL(o.company, N'(未指定)') + N'(' + ISNULL(o.company_source, N'-') + N')→ ' + ISNULL(@co, N'(未指定)')
+              + N'(' + ISNULL(@src, N'-') + N');' + @detail, 1000), @rid
+          FROM ita.device d CROSS JOIN @old o WHERE d.id = @id;
+        COMMIT;
+        SELECT CAST(1 AS BIT) AS ok;`);
+    return r.recordset[0]?.ok === true;
+  }
+
+  async companyCandidates(afterRef: number, limit: number): Promise<CompanyCandidate[]> {
+    const r = await (await this.request()).input('after', sql.Int, afterRef).input('limit', sql.Int, limit).query(`
+      SELECT TOP (@limit) d.id, d.device_id, d.cert_dn, i.domain, i.part_of_domain
+      FROM ita.device d LEFT JOIN ita.device_inventory i ON i.device_ref = d.id
+      WHERE d.id > @after AND d.company_source IS NULL AND d.merged_into IS NULL
+      ORDER BY d.id`);
+    return (r.recordset as Row[]).map((x) => ({
+      id: Number(x.id),
+      deviceId: String(x.device_id).toLowerCase(),
+      certDn: String(x.cert_dn),
+      domain: (x.domain as string | null) ?? null,
+      partOfDomain: x.part_of_domain == null ? null : Boolean(x.part_of_domain),
+    }));
   }
 
   async backfillSoftware(afterRef: number, limit: number): Promise<BackfillResult> {

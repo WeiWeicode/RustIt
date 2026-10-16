@@ -7,7 +7,7 @@ import type { DeviceService } from './services/device-service.js';
 
 const gateway = loadGatewayEnv({ SERVICE_CODE: 'endpoint-api', GW_ENV: 'dev', GW_JWKS_URL: 'http://127.0.0.1/.well-known/jwks.json' });
 const app = await buildMgmtApp({
-  config: { gateway, monitor: loadMonitorEnv('dev', {}), logLevel: 'silent', devSkipToken: false },
+  config: { gateway, monitor: loadMonitorEnv('dev', {}), logLevel: 'silent', devSkipToken: false, scopeAllRoles: [] },
   service: {} as DeviceService,
   // 與 server.ts 相同的路由(含指令與附檔下載),輸出內容才和自動註冊一致
   commands: {} as CommandDispatcher,

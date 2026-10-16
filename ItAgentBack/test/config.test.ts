@@ -42,6 +42,7 @@ const testEnv = {
   AGENT_TLS_KEY_FILE: file('key'),
   AGENT_TRUSTED_PROXIES: '172.16.0.0/12',
   COMMAND_FILES_DIR: '/data/command-files',
+  ENDPOINT_SCOPE_ALL_ROLES: 'it-admin',
 };
 
 const clean = (e: Record<string, string | undefined>) => Object.fromEntries(Object.entries(e).filter(([, v]) => v !== undefined)) as NodeJS.ProcessEnv;
@@ -91,5 +92,24 @@ describe('部署區設定', () => {
     assert.equal(loadConfig(clean({ ...testEnv, COMMAND_FILE_KEEP_DAYS: '30' })).commandFileKeepDays, 30);
     assert.throws(() => loadConfig(clean({ ...testEnv, COMMAND_FILE_KEEP_DAYS: '7' })), /COMMAND_FILE_KEEP_DAYS/);
     assert.throws(() => loadConfig(clean({ ...testEnv, COMMAND_FILE_KEEP_DAYS: '31' })), /COMMAND_FILE_KEEP_DAYS/);
+  });
+
+  it('資料範圍(E6):test / prod 必須設定全部公司角色(可為空字串),dev 預設空', () => {
+    assert.throws(() => loadConfig(clean({ ...testEnv, ENDPOINT_SCOPE_ALL_ROLES: undefined })), /ENDPOINT_SCOPE_ALL_ROLES 未設定/);
+    assert.deepEqual(loadConfig(clean({ ...testEnv, ENDPOINT_SCOPE_ALL_ROLES: '' })).scopeAllRoles, []);
+    assert.deepEqual(loadConfig(clean({ ...testEnv, ENDPOINT_SCOPE_ALL_ROLES: ' it-admin , endpoint-all,it-admin' })).scopeAllRoles, ['it-admin', 'endpoint-all']);
+    assert.deepEqual(loadConfig(clean(devEnv)).scopeAllRoles, []);
+  });
+
+  it('網域 → 公司對應(E6):格式錯誤、名稱過長、同一網域兩家公司即啟動失敗', () => {
+    const c = loadConfig(clean({ ...testEnv, ENDPOINT_COMPANY_DOMAINS: '碩禾=gsc.com.tw, GSMC.com.tw;鹽城碩禾=ygdmc.gsc.com.tw;' }));
+    assert.deepEqual([...c.companyDomains], [
+      ['gsc.com.tw', '碩禾'],
+      ['gsmc.com.tw', '碩禾'],
+      ['ygdmc.gsc.com.tw', '鹽城碩禾'],
+    ]);
+    assert.equal(loadConfig(clean(testEnv)).companyDomains.size, 0);
+    for (const bad of ['碩禾', '=gsc.com.tw', '碩禾=gsc', '碩禾=a..b', `${'公'.repeat(21)}=gsc.com.tw`, '碩禾=gsc.com.tw;禾迅=GSC.com.tw'])
+      assert.throws(() => loadConfig(clean({ ...testEnv, ENDPOINT_COMPANY_DOMAINS: bad })), /ENDPOINT_COMPANY_DOMAINS 格式錯誤/, bad);
   });
 });

@@ -20,7 +20,11 @@ const config = loadConfig();
 const sql = new SqlDeviceStore(config.sql);
 const mongo = new MongoSnapshotStore(config.mongoUrl, config.mongoDb, config.snapshotRetentionDays);
 const redis = new RedisStateStore(config.redisUrl, config.redisPrefix);
-const service = new DeviceService(sql, mongo, redis, { heartbeatIntervalSec: config.heartbeatIntervalSec, settings: config.agentSettings });
+const service = new DeviceService(sql, mongo, redis, {
+  heartbeatIntervalSec: config.heartbeatIntervalSec,
+  settings: config.agentSettings,
+  companyDomains: config.companyDomains,
+});
 // 指令派送(P4):SQL 與裝置共用連線池,推送經 DeviceService 的 WebSocket 連線表
 const commandStore = new SqlCommandStore(() => sql.connection());
 const commands = new CommandDispatcher(commandStore, sql, service);
@@ -67,6 +71,8 @@ mgmt.log.info(
     agentTls: !!config.agentTls,
     devTrustClientHeaders: config.trustedProxies === null,
     devSkipToken: config.devSkipToken,
+    scopeAllRoles: config.scopeAllRoles,
+    companyDomains: config.companyDomains.size,
     monitor: config.monitor.enabled,
     agentMonitor: config.agentMonitor.enabled,
   },
@@ -79,6 +85,8 @@ if (!ready.ok) mgmt.log.error({ checks: ready.checks }, 'SQL Server 無法連線
 else if (Object.values(ready.checks).some((c) => c !== 'ok')) mgmt.log.warn({ checks: ready.checks }, 'Mongo / Redis 無法連線,以降級模式運作');
 // migration 0004 之前寫入的資產回填軟體清單(P3);失敗只記 warn,下次啟動再試
 if (ready.ok) void service.backfillSoftware({ log: mgmt.log, requestId: 'startup' });
+// migration 0005 之前登錄的裝置判定所屬公司(E6);失敗只記 warn,下次啟動再試
+if (ready.ok) void service.backfillCompany({ log: mgmt.log, requestId: 'startup' });
 
 for (const signal of ['SIGINT', 'SIGTERM'])
   process.once(signal, () => {

@@ -13,6 +13,8 @@
  *   hello:記錄時鐘偏差(超過 ±5 分鐘寫 clock_skew 事件,A2)、硬體指紋(與其他裝置相同時寫 suspected_duplicate,不自動合併,A1)。
  *   管理 API(P3,docs/P3-DATA-DESIGN.md):清單篩選在 SQL、在線篩選與分頁在這裡(在線狀態在 Redis);
  *     停用 / 退役立即關閉 WebSocket;合併(A1)由 SQL 交易搬資料,交易後改 Mongo 歷史、清 Redis 快取、關閉來源的 WebSocket(Agent 重連即對到目標)。
+ *   資料範圍(E6,docs/E6-COMPANY-SCOPE-DESIGN.md):管理方法收 MgmtCtx,裝置查找集中在 found(),範圍外回與不存在相同的 404;
+ *     所屬公司在登錄(憑證 DN)與收到資產(回報網域)時自動判定,IT 指定(manual)後不再自動改;啟動時回填未判定的裝置。
  */
 import type { FastifyBaseLogger } from 'fastify';
 import { createHash, randomUUID } from 'node:crypto';
@@ -30,9 +32,12 @@ import {
 } from '../contracts.js';
 import { AppError, storageUnavailable } from '../errors.js';
 import type { CommandChannel } from './command-dispatcher.js';
+import { resolveCompany, type CompanyDomains } from './company.js';
+import { inScope, scopeCompanies, type MgmtCtx } from './scope.js';
 import type {
   Actor,
   AgentEvent,
+  CompanySource,
   DeviceFilter,
   DeviceRecord,
   DeviceRow,
@@ -91,6 +96,9 @@ export interface DeviceSummary {
   /** 已併入的目標裝置 deviceId */
   mergedInto: string | null;
   retiredAt: string | null;
+  /** 所屬公司(E6);null = 未指定 */
+  company: string | null;
+  companySource: CompanySource | null;
 }
 
 /** 疑似同一台的另一台裝置(詳情用) */
@@ -110,7 +118,7 @@ export interface DeviceDetail extends DeviceSummary {
   suspectedDuplicates: DuplicateCandidate[];
 }
 
-export interface DeviceListQuery extends DeviceFilter {
+export interface DeviceListQuery extends Omit<DeviceFilter, 'companies'> {
   online?: boolean;
   page: number;
   pageSize: number;
@@ -145,6 +153,8 @@ export interface DeviceServiceOptions {
   settings?: AgentSettings;
   /** SQL last_seen_at 落盤間隔(毫秒) */
   touchIntervalMs?: number;
+  /** 網域 → 公司(ENDPOINT_COMPANY_DOMAINS;E6);省略 = 不自動判定 */
+  companyDomains?: CompanyDomains;
   now?: () => Date;
 }
 
@@ -162,9 +172,20 @@ export const SYNC_NEED_LIMIT = 20;
 const EVENT_DATA_MAX = 4000;
 /** 主機停用 / 退役 / 合併時關閉 WebSocket 的代碼(Agent 照一般斷線重連,重連時由 identify 回 403 或對到合併後的裝置) */
 export const WS_CLOSE_DEVICE_CHANGED = 4403;
+/** 啟動時判定公司:每批台數與上限批數 */
+const COMPANY_BATCH = 200;
+const COMPANY_MAX_ROUNDS = 50;
 /** 回填軟體清單:每批台數與上限批數(避免異常資料造成無窮迴圈) */
 const BACKFILL_BATCH = 100;
 const BACKFILL_MAX_ROUNDS = 50;
+/** 事件內容中的 deviceId */
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
+/** 稽核內容提到範圍外的裝置時改顯示的說明(E6) */
+const HIDDEN_DETAIL: Record<string, string> = {
+  suspected_duplicate: '與另一台裝置硬體指紋相同',
+  merged: '已併入另一台裝置的資料',
+  default: '內容涉及其他裝置,已隱藏',
+};
 /** 合併的時間順序容許重疊(舊裝置最後回報在 SQL 每 5 分鐘落盤,再加時鐘誤差) */
 const MERGE_OVERLAP_MS = 15 * 60_000;
 
@@ -199,6 +220,7 @@ export class DeviceService implements CommandChannel {
   readonly heartbeatIntervalSec: number;
   private readonly settings: AgentSettings;
   private readonly settingsVersion: number;
+  private readonly companyDomains: CompanyDomains;
 
   /** 目前在線的 WebSocket 連線數(本行程;監控心跳回報) */
   get onlineCount(): number {
@@ -215,6 +237,7 @@ export class DeviceService implements CommandChannel {
     this.settings = opts.settings ?? DEFAULT_SETTINGS;
     this.settingsVersion = settingsVersion(this.settings);
     this.touchIntervalMs = opts.touchIntervalMs ?? 5 * 60_000;
+    this.companyDomains = opts.companyDomains ?? new Map();
     this.now = opts.now ?? (() => new Date());
   }
 
@@ -252,10 +275,20 @@ export class DeviceService implements CommandChannel {
   async identify(ctx: Ctx, certDn: string, certFp: string): Promise<DeviceRecord> {
     let device = await this.sqlDo(ctx, 'device.findByDn', () => this.sql.findByDn(certDn));
     if (!device) {
+      // 所屬公司先依憑證 DN 判定(E6 §3.3);判不出等收到資產再看回報網域
+      const co = resolveCompany(this.companyDomains, certDn, null);
       device = await this.sqlDo(ctx, 'device.register', () =>
-        this.sql.register({ certDn, certFp, computerName: cnOf(certDn), requestId: ctx.requestId, at: this.now() }),
+        this.sql.register({
+          certDn,
+          certFp,
+          computerName: cnOf(certDn),
+          requestId: ctx.requestId,
+          at: this.now(),
+          company: co?.company ?? null,
+          companySource: co?.source ?? null,
+        }),
       );
-      ctx.log.info({ deviceId: device.deviceId }, '新裝置登錄');
+      ctx.log.info({ deviceId: device.deviceId, company: device.company }, '新裝置登錄');
     } else if (device.certFp !== certFp) {
       const d = device;
       await this.sqlDo(ctx, 'device.updateFingerprint', () => this.sql.updateFingerprint(d, certFp, ctx.requestId));
@@ -314,7 +347,24 @@ export class DeviceService implements CommandChannel {
     await this.soft(ctx, 'mongo.insertSnapshot', () => this.snapshots.insertSnapshot({ deviceId: device.deviceId, snapshot }));
     await this.soft(ctx, 'redis.setHash', () => this.state.setHash(device.deviceId, req.content_hash));
     ctx.log.info({ deviceId: device.deviceId, agentSeq: req.agent_seq, software: req.inventory.software.length }, '資產快照已寫入');
+    await this.autoCompany(ctx, device, req.inventory.system.domain, req.inventory.system.part_of_domain);
     return reply('stored');
+  }
+
+  /**
+   * 依回報網域重新判定公司(E6 §3.3):來源為 cert / manual 不動;未判定或 domain 時跟著網域改(判不出改回未指定)。
+   * 資產已寫入,失敗只記 warn(下次資產變更或啟動回填再試)
+   */
+  private async autoCompany(ctx: Ctx, device: DeviceRecord, domain: string | null | undefined, partOfDomain: boolean | null | undefined): Promise<void> {
+    if (device.companySource === 'cert' || device.companySource === 'manual') return;
+    const co = resolveCompany(this.companyDomains, device.certDn, { domain, partOfDomain });
+    const company = co?.company ?? null;
+    const source = co?.source ?? null;
+    if (company === device.company && source === device.companySource) return;
+    const changed = await this.soft(ctx, 'sql.setCompany(auto)', () =>
+      this.sql.setCompany(device.id, { company, source, mode: 'auto', detail: '依回報網域自動判定', requestId: ctx.requestId, by: 'agent' }),
+    );
+    if (changed) ctx.log.info({ deviceId: device.deviceId, from: device.company, to: company, source }, '裝置所屬公司已自動判定');
   }
 
   // ---------- WebSocket 與心跳 ----------
@@ -567,12 +617,21 @@ export class DeviceService implements CommandChannel {
       suspectedDuplicate: row.suspectedDuplicate,
       mergedInto: row.mergedIntoId,
       retiredAt: row.retiredAt?.toISOString() ?? null,
+      company: row.company,
+      companySource: row.companySource,
     };
   }
 
-  /** 篩選在 SQL;在線篩選與分頁在這裡(在線狀態在 Redis,無法在 SQL 篩選) */
-  async listDevices(ctx: Ctx, q: DeviceListQuery): Promise<DeviceListPage> {
-    const rows = await this.sqlDo(ctx, 'device.list', () => this.sql.listDevices(q));
+  /** 篩選在 SQL;在線篩選與分頁在這裡(在線狀態在 Redis,無法在 SQL 篩選)。只列資料範圍內的公司(E6) */
+  async listDevices(ctx: MgmtCtx, q: DeviceListQuery): Promise<DeviceListPage> {
+    const companies = scopeCompanies(ctx.scope);
+    const empty = { items: [], total: 0, page: q.page, pageSize: q.pageSize };
+    // 範圍為空(cos 空)、或指定的公司 / 未指定不在範圍內:不查 SQL,與「沒有符合的電腦」相同
+    if (companies?.length === 0 || (companies && (q.company === null || (q.company !== undefined && !companies.includes(q.company))))) {
+      if (companies?.length === 0) ctx.log.info({ scope: 'empty' }, '資料範圍為空(登入者沒有所屬公司)');
+      return empty;
+    }
+    const rows = await this.scopeRows(ctx, await this.sqlDo(ctx, 'device.list', () => this.sql.listDevices({ ...q, companies })));
     const online = await this.onlineMap(
       ctx,
       rows.map((r) => r.deviceId),
@@ -582,26 +641,59 @@ export class DeviceService implements CommandChannel {
     return { items: all.slice(start, start + q.pageSize), total: all.length, page: q.page, pageSize: q.pageSize };
   }
 
-  private async found(ctx: Ctx, deviceId: string) {
+  /** 併入的目標不在資料範圍內時不顯示(E6:不洩漏範圍外的 deviceId) */
+  private async visibleMerged(ctx: MgmtCtx, mergedIntoId: string | null): Promise<string | null> {
+    if (!mergedIntoId || ctx.scope.all) return mergedIntoId;
+    const t = await this.sqlDo(ctx, 'device.get(mergedInto)', () => this.sql.getDevice(mergedIntoId));
+    return t && inScope(ctx.scope, t.row.company) ? mergedIntoId : null;
+  }
+
+  /**
+   * 非全部公司時重算跨裝置的欄位(E6):疑似同一台只看範圍內的另一台、併入的目標在範圍外不顯示。
+   * 只有標記為疑似同一台或已合併的列才多查一次(通常很少)
+   */
+  private async scopeRows(ctx: MgmtCtx, rows: DeviceRow[]): Promise<DeviceRow[]> {
+    if (ctx.scope.all) return rows;
+    const out: DeviceRow[] = [];
+    for (const r of rows) {
+      let row = r;
+      if (r.suspectedDuplicate && r.hwFingerprint) {
+        const same = await this.sqlDo(ctx, 'device.sameHw', () => this.sql.findByHwFingerprint(r.hwFingerprint!, r.id));
+        row = { ...row, suspectedDuplicate: same.some((d) => d.status !== 'retired' && inScope(ctx.scope, d.company)) };
+      }
+      if (r.mergedIntoId) row = { ...row, mergedIntoId: await this.visibleMerged(ctx, r.mergedIntoId) };
+      out.push(row);
+    }
+    return out;
+  }
+
+  /** 管理 API 唯一的裝置查找:不存在或不在資料範圍內回相同的 404(E6,不洩漏存在) */
+  private async found(ctx: MgmtCtx, deviceId: string) {
     const found = await this.sqlDo(ctx, 'device.get', () => this.sql.getDevice(deviceId));
-    if (!found) throw new AppError(404, 'ITA_DEVICE_NOT_FOUND', '找不到此電腦');
+    if (!found || !inScope(ctx.scope, found.row.company)) {
+      if (found) ctx.log.info({ deviceId, scopeDenied: true }, '裝置不在資料範圍內');
+      throw new AppError(404, 'ITA_DEVICE_NOT_FOUND', '找不到此電腦');
+    }
     return found;
   }
 
-  async getDevice(ctx: Ctx, deviceId: string): Promise<DeviceDetail> {
+  async getDevice(ctx: MgmtCtx, deviceId: string): Promise<DeviceDetail> {
     const found = await this.found(ctx, deviceId);
     const online = await this.onlineMap(ctx, [deviceId]);
     let inventory: Record<string, unknown> | null = null;
     if (found.payload) inventory = camelize(JSON.parse(found.payload) as ComputerInfo) as Record<string, unknown>;
-    const row = found.row;
-    const same = row.hwFingerprint && !row.mergedIntoId ? await this.sqlDo(ctx, 'device.sameHw', () => this.sql.findByHwFingerprint(row.hwFingerprint!, row.id)) : [];
+    const [row] = await this.scopeRows(ctx, [found.row]);
+    if (!row) throw storageUnavailable();
+    const raw = found.row;
+    const same =
+      raw.hwFingerprint && !raw.mergedIntoId ? await this.sqlDo(ctx, 'device.sameHw', () => this.sql.findByHwFingerprint(raw.hwFingerprint!, raw.id)) : [];
     return {
       ...this.summary(row, online.get(deviceId)),
       inventory,
       collectedAt: found.collectedAt?.toISOString() ?? null,
       clockSkewMs: row.clockSkewMs,
       suspectedDuplicates: same
-        .filter((d) => d.status !== 'retired')
+        .filter((d) => d.status !== 'retired' && inScope(ctx.scope, d.company))
         .map((d) => ({
           deviceId: d.deviceId,
           computerName: d.computerName,
@@ -613,9 +705,19 @@ export class DeviceService implements CommandChannel {
   }
 
   /** 事件新到舊(依寫入順序;離線補傳的端點事件 occurredAt 可能較早) */
-  async listEvents(ctx: Ctx, deviceId: string, beforeId: number | undefined, limit: number): Promise<{ items: DeviceEventView[]; nextCursor: string | null }> {
+  async listEvents(
+    ctx: MgmtCtx,
+    deviceId: string,
+    beforeId: number | undefined,
+    limit: number,
+  ): Promise<{ items: DeviceEventView[]; nextCursor: string | null }> {
     const { row } = await this.found(ctx, deviceId);
     const rows = await this.sqlDo(ctx, 'event.list', () => this.sql.listEvents(row.id, beforeId, limit));
+    const hidden = await this.outOfScopeIds(
+      ctx,
+      row.deviceId,
+      rows.map((e) => e.detail),
+    );
     const items = rows.map((e) => {
       let data: unknown = null;
       if (e.data) {
@@ -625,21 +727,44 @@ export class DeviceService implements CommandChannel {
           data = e.data;
         }
       }
-      return { id: e.id, type: e.type, occurredAt: e.occurredAt.toISOString(), receivedAt: e.receivedAt?.toISOString() ?? null, detail: e.detail, data };
+      // 稽核內容提到範圍外的裝置(疑似同一台、合併的對象):改為不含識別資訊的說明(E6)
+      const detail = e.detail && [...hidden].some((id) => e.detail!.toLowerCase().includes(id)) ? (HIDDEN_DETAIL[e.type] ?? HIDDEN_DETAIL.default!) : e.detail;
+      return { id: e.id, type: e.type, occurredAt: e.occurredAt.toISOString(), receivedAt: e.receivedAt?.toISOString() ?? null, detail, data };
     });
     return { items, nextCursor: rows.length === limit ? String(rows[rows.length - 1]!.id) : null };
   }
 
+  /** 事件內容提到的其他裝置中,不存在或不在資料範圍內的 deviceId(小寫) */
+  private async outOfScopeIds(ctx: MgmtCtx, self: string, details: (string | null)[]): Promise<Set<string>> {
+    const hidden = new Set<string>();
+    if (ctx.scope.all) return hidden;
+    const ids = new Set(details.flatMap((d) => (d ?? '').toLowerCase().match(UUID_RE) ?? []).filter((id) => id !== self));
+    for (const id of ids) {
+      const d = await this.sqlDo(ctx, 'device.get(event)', () => this.sql.getDevice(id));
+      if (!d || !inScope(ctx.scope, d.row.company)) hidden.add(id);
+    }
+    return hidden;
+  }
+
   /** 最新資產原樣(資料契約 snake_case) */
-  async inventoryJson(ctx: Ctx, deviceId: string): Promise<{ fileName: string; body: string }> {
+  async inventoryJson(ctx: MgmtCtx, deviceId: string): Promise<{ fileName: string; body: string }> {
     const found = await this.found(ctx, deviceId);
     if (!found.payload) throw new AppError(404, 'ITA_INVENTORY_NOT_FOUND', '此電腦尚未回報資產');
     return { fileName: inventoryFileName(found.row.computerName, found.collectedAt), body: found.payload };
   }
 
-  async setStatus(ctx: Ctx, actor: Actor, deviceId: string, status: DeviceStatus, reason: string): Promise<{ deviceId: string; status: DeviceStatus; changed: boolean }> {
+  async setStatus(
+    ctx: MgmtCtx,
+    actor: Actor,
+    deviceId: string,
+    status: DeviceStatus,
+    reason: string,
+  ): Promise<{ deviceId: string; status: DeviceStatus; changed: boolean }> {
     const { row } = await this.found(ctx, deviceId);
-    if (row.mergedIntoId) throw new AppError(409, 'ITA_DEVICE_STATUS_INVALID', '此裝置已併入其他裝置,不能變更狀態', { mergedInto: row.mergedIntoId });
+    if (row.mergedIntoId)
+      throw new AppError(409, 'ITA_DEVICE_STATUS_INVALID', '此裝置已併入其他裝置,不能變更狀態', {
+        mergedInto: await this.visibleMerged(ctx, row.mergedIntoId),
+      });
     if (row.status === status) return { deviceId, status, changed: false };
     const ok = await this.sqlDo(ctx, 'device.setStatus', () => this.sql.setStatus(row.id, status, reason ? `原因:${reason}` : '', ctx.requestId, actor));
     if (!ok) throw new AppError(409, 'ITA_DEVICE_STATUS_INVALID', '此裝置已併入其他裝置,不能變更狀態');
@@ -649,7 +774,7 @@ export class DeviceService implements CommandChannel {
   }
 
   /** 來源(重灌後的新登錄)併入目標(舊裝置,deviceId 保留);重送同一請求回 alreadyMerged */
-  async merge(ctx: Ctx, actor: Actor, targetId: string, sourceId: string, reason: string, force: boolean): Promise<MergeView> {
+  async merge(ctx: MgmtCtx, actor: Actor, targetId: string, sourceId: string, reason: string, force: boolean): Promise<MergeView> {
     if (targetId === sourceId) throw new AppError(400, 'ITA_MERGE_INVALID', '不能與自己合併', { reason: 'same_device' });
     const target = (await this.found(ctx, targetId)).row;
     const source = (await this.found(ctx, sourceId)).row;
@@ -685,6 +810,63 @@ export class DeviceService implements CommandChannel {
     await this.soft(ctx, 'redis.clearHash', () => this.state.clearHash(sourceId));
     await this.soft(ctx, 'redis.clearOnline', () => this.state.clearOnline(sourceId));
     return view(result, false);
+  }
+
+  /**
+   * 指定所屬公司(E6 §3.5):只有全部公司角色可用(避免兩家公司的 IT 互相改);company 為 null = 改回自動判定(立即依憑證 / 回報網域判定一次)。
+   * 寫 company_changed 稽核
+   */
+  async setCompany(
+    ctx: MgmtCtx,
+    actor: Actor,
+    deviceId: string,
+    company: string | null,
+    reason: string,
+  ): Promise<{ deviceId: string; company: string | null; companySource: CompanySource | null; changed: boolean }> {
+    if (!ctx.scope.all) throw new AppError(403, 'ITA_SCOPE_ALL_REQUIRED', '只有可管理所有公司的角色能指定電腦所屬公司');
+    const { row } = await this.found(ctx, deviceId);
+    if (row.mergedIntoId)
+      throw new AppError(409, 'ITA_DEVICE_STATUS_INVALID', '此裝置已併入其他裝置,不能變更公司', {
+        mergedInto: await this.visibleMerged(ctx, row.mergedIntoId),
+      });
+    let source: CompanySource | null = 'manual';
+    if (company === null) {
+      const co = resolveCompany(this.companyDomains, row.certDn, { domain: row.domain, partOfDomain: row.partOfDomain });
+      company = co?.company ?? null;
+      source = co?.source ?? null;
+    }
+    const changed = company !== row.company || source !== row.companySource;
+    const who = `操作人 ${actor.emp}${actor.name ? ` ${actor.name}` : ''}`;
+    const detail = `${who}${source === 'manual' ? '' : ';改回自動判定'}${reason ? `;原因:${reason}` : ''}`;
+    const ok = await this.sqlDo(ctx, 'device.setCompany', () =>
+      this.sql.setCompany(row.id, { company, source, mode: 'manual', detail, requestId: ctx.requestId, by: actor.emp }),
+    );
+    if (!ok) throw new AppError(409, 'ITA_DEVICE_STATUS_INVALID', '此裝置已併入其他裝置,不能變更公司');
+    ctx.log.info({ deviceId, from: row.company, to: company, source, emp: actor.emp }, '裝置所屬公司變更');
+    return { deviceId, company, companySource: source, changed };
+  }
+
+  /** 啟動時:尚未判定公司的裝置依憑證 DN / 回報網域判定(migration 0005 之前登錄的);SQL 失敗只記 warn,下次啟動再試 */
+  async backfillCompany(ctx: Ctx): Promise<number> {
+    if (this.companyDomains.size === 0) return 0;
+    let total = 0;
+    let after = 0;
+    for (let round = 0; round < COMPANY_MAX_ROUNDS; round++) {
+      const list = await this.soft(ctx, 'sql.companyCandidates', () => this.sql.companyCandidates(after, COMPANY_BATCH));
+      if (!list?.length) break;
+      for (const d of list) {
+        const co = resolveCompany(this.companyDomains, d.certDn, d);
+        if (!co) continue;
+        const ok = await this.soft(ctx, 'sql.setCompany(backfill)', () =>
+          this.sql.setCompany(d.id, { company: co.company, source: co.source, mode: 'auto', detail: '啟動時自動判定', requestId: ctx.requestId, by: 'agent' }),
+        );
+        if (ok) total++;
+      }
+      if (list.length < COMPANY_BATCH) break;
+      after = list[list.length - 1]!.id;
+    }
+    if (total) ctx.log.info({ devices: total }, '裝置所屬公司回填完成');
+    return total;
   }
 
   /** 啟動時:既有資產回填軟體清單(migration 0004 之前寫入的);SQL 失敗只記 warn,下次啟動再試 */

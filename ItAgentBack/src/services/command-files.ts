@@ -17,6 +17,7 @@ import { kindOf } from '../commands/kinds.js';
 import { AppError, storageUnavailable } from '../errors.js';
 import type { CommandFileRecord, CommandFileStore, CommandStore, DeviceRecord } from '../stores/types.js';
 import type { Ctx } from './device-service.js';
+import { inScope, type MgmtCtx } from './scope.js';
 
 /** 單檔上限(command-kinds.md;Agent 壓縮後超過會捨棄最舊的日期) */
 export const FILE_MAX_BYTES = 20 * 1024 * 1024;
@@ -180,10 +181,10 @@ export class CommandFileService {
     }
   }
 
-  /** 指令的附檔清單(GET /commands/{id}) */
-  async forCommand(ctx: Ctx, commandId: string): Promise<CommandFileView[]> {
+  /** 指令的附檔清單(GET /commands/{id});指令的裝置不在資料範圍內回空(E6) */
+  async forCommand(ctx: MgmtCtx, commandId: string): Promise<CommandFileView[]> {
     const cmd = await this.sqlDo(ctx, 'command.get', () => this.store.getCommand(commandId));
-    if (!cmd) return [];
+    if (!cmd || !inScope(ctx.scope, cmd.deviceCompany)) return [];
     const now = this.now();
     const files = await this.sqlDo(ctx, 'commandFile.list', () => this.store.listFiles(cmd.id));
     return files.map((f) => ({
@@ -197,10 +198,15 @@ export class CommandFileService {
     }));
   }
 
-  /** 下載:fileId 屬於 commandId;過期或檔案已不在回 410 */
-  async open(ctx: Ctx, commandId: string, fileId: string): Promise<{ file: CommandFileRecord; stream: ReadStream }> {
+  /** 下載:fileId 屬於 commandId、指令的裝置在資料範圍內(E6,否則與不存在相同回 404);過期或檔案已不在回 410 */
+  async open(ctx: MgmtCtx, commandId: string, fileId: string): Promise<{ file: CommandFileRecord; stream: ReadStream }> {
     const f = await this.sqlDo(ctx, 'commandFile.get', () => this.store.getFile(fileId));
     if (!f || f.commandId !== commandId) throw new AppError(404, 'ITA_COMMAND_FILE_NOT_FOUND', '找不到此附檔');
+    const cmd = await this.sqlDo(ctx, 'command.get', () => this.store.getCommand(commandId));
+    if (!cmd || !inScope(ctx.scope, cmd.deviceCompany)) {
+      ctx.log.info({ commandId, fileId, scopeDenied: true }, '附檔的裝置不在資料範圍內');
+      throw new AppError(404, 'ITA_COMMAND_FILE_NOT_FOUND', '找不到此附檔');
+    }
     const gone = () => new AppError(410, 'ITA_COMMAND_FILE_EXPIRED', '附檔已超過保存期限並刪除');
     if (f.expiresAt <= this.now()) throw gone();
     const p = this.abs(f.storagePath);

@@ -9,6 +9,9 @@ import type { ComputerInfo } from '../contracts.js';
 /** retired:報廢 / 退役(PLATFORM-PLAN A1;畫面在 P3) */
 export type DeviceStatus = 'active' | 'disabled' | 'retired';
 
+/** 所屬公司的判定來源(E6-COMPANY-SCOPE-DESIGN §3.3):cert 憑證 DN、domain Agent 回報的網域、manual IT 指定(之後不自動改) */
+export type CompanySource = 'cert' | 'domain' | 'manual';
+
 export interface DeviceRecord {
   /** SQL 內部主鍵 */
   id: number;
@@ -25,6 +28,9 @@ export interface DeviceRecord {
   hwFingerprint: string | null;
   /** 最近一次 hello 的時鐘偏差(端點 − 主機,毫秒;A2) */
   clockSkewMs: number | null;
+  /** 所屬公司(Gateway 公司名稱,同內部 Token 的 cos;E6);null = 未指定 */
+  company: string | null;
+  companySource: CompanySource | null;
 }
 
 /** 主機產生的稽核事件;Agent 回報的端點事件另走 addAgentEvents */
@@ -41,7 +47,9 @@ export type DeviceEventType =
   /** IT 設為退役(P3) */
   | 'retired'
   /** IT 合併:目標裝置記一筆(detail 帶來源 deviceId 與舊 DN;P3、A1) */
-  | 'merged';
+  | 'merged'
+  /** 所屬公司變更(自動判定或 IT 指定;E6) */
+  | 'company_changed';
 
 /** Agent 回報的端點事件(event.schema.json;PLATFORM-PLAN §4.2) */
 export interface AgentEvent {
@@ -74,6 +82,8 @@ export interface InventorySnapshot {
 export interface DeviceRow extends DeviceRecord {
   userName: string | null;
   domain: string | null;
+  /** 最新資產的 part_of_domain(公司自動判定用) */
+  partOfDomain: boolean | null;
   osName: string | null;
   osVersion: string | null;
   manufacturer: string | null;
@@ -97,6 +107,10 @@ export interface DeviceFilter {
   software?: string;
   os?: string;
   statuses: DeviceStatus[];
+  /** 資料範圍(E6):只列這些公司;undefined = 不限(全部公司角色)。不含未指定公司的裝置 */
+  companies?: string[];
+  /** 指定一家公司;null = 只列未指定公司的裝置;undefined = 不篩選 */
+  company?: string | null;
 }
 
 /** 裝置事件(主機稽核 + Agent 端點事件;ita.device_event) */
@@ -135,6 +149,27 @@ export interface MergeResult {
   inventoryFrom: 'source' | 'target' | 'none';
 }
 
+/** 變更所屬公司(E6) */
+export interface CompanyChange {
+  company: string | null;
+  source: CompanySource | null;
+  /** auto:只在目前來源為未判定或 domain 時變更(收到資產、啟動回填);manual:IT 指定 */
+  mode: 'auto' | 'manual';
+  detail: string;
+  requestId: string;
+  /** 寫入 updated_by:工號或 agent */
+  by: string;
+}
+
+/** 啟動回填用:尚未判定公司的裝置 */
+export interface CompanyCandidate {
+  id: number;
+  deviceId: string;
+  certDn: string;
+  domain: string | null;
+  partOfDomain: boolean | null;
+}
+
 export interface TouchPatch {
   computerName?: string;
   agentVersion?: string;
@@ -146,7 +181,15 @@ export interface DeviceStore {
   ping(): Promise<void>;
   findByDn(certDn: string): Promise<DeviceRecord | null>;
   /** 新裝置:建立登錄並寫稽核 registered */
-  register(input: { certDn: string; certFp: string; computerName: string; requestId: string; at: Date }): Promise<DeviceRecord>;
+  register(input: {
+    certDn: string;
+    certFp: string;
+    computerName: string;
+    requestId: string;
+    at: Date;
+    company?: string | null;
+    companySource?: CompanySource | null;
+  }): Promise<DeviceRecord>;
   /** 同一 DN 出現新指紋(憑證續約):更新並寫稽核 fingerprint_changed(指南 §3.3) */
   updateFingerprint(device: DeviceRecord, certFp: string, requestId: string): Promise<void>;
   addEvent(device: DeviceRecord | null, type: DeviceEventType, detail: string, requestId: string): Promise<void>;
@@ -170,6 +213,13 @@ export interface DeviceStore {
   setStatus(deviceRef: number, status: DeviceStatus, detail: string, requestId: string, actor: Actor): Promise<boolean>;
   /** 一個交易:來源併入目標(P3-DATA-DESIGN §4);檢查失敗丟 AppError */
   merge(targetRef: number, sourceRef: number, detail: string, requestId: string, actor: Actor): Promise<MergeResult>;
+  /**
+   * 變更所屬公司並寫稽核 company_changed(manual 一律寫,auto 只在公司有變時寫);已合併、或 auto 但來源已是 cert / manual 時不變更。
+   * 回傳是否變更;找不到或不符條件回 false
+   */
+  setCompany(deviceRef: number, change: CompanyChange): Promise<boolean>;
+  /** 尚未判定公司(company_source IS NULL)、未合併的裝置(id > afterRef),附最新資產的網域;依 id 排序 */
+  companyCandidates(afterRef: number, limit: number): Promise<CompanyCandidate[]>;
   /** 有資產但沒有軟體列的裝置(device_ref > afterRef),從 payload 回填 device_software;每次最多 limit 台 */
   backfillSoftware(afterRef: number, limit: number): Promise<BackfillResult>;
   close(): Promise<void>;
@@ -220,6 +270,8 @@ export interface CommandRecord {
   deviceRef: number;
   deviceId: string;
   computerName: string;
+  /** 裝置目前的所屬公司(資料範圍檢查用;E6 §2 第 7 項:指令跟著裝置) */
+  deviceCompany: string | null;
   /** 建立當下的 DN(稽核) */
   certDn: string;
   kind: string;
@@ -309,6 +361,8 @@ export interface CommandFilter {
   kind?: string;
   /** 游標:內部 id 小於此值(新到舊) */
   beforeId?: number;
+  /** 資料範圍(E6):只列這些公司的裝置的指令;undefined = 不限 */
+  companies?: string[];
   limit: number;
 }
 
@@ -319,6 +373,8 @@ export interface CommandStore {
   findByIdempotency(emp: string, key: string): Promise<CommandRecord | null>;
   findBatchByIdempotency(emp: string, key: string): Promise<BatchRecord | null>;
   getBatch(batchId: string): Promise<BatchRecord | null>;
+  /** 批次內各裝置目前的所屬公司(去重;資料範圍檢查用,E6) */
+  batchCompanies(batchRef: number): Promise<(string | null)[]>;
   listCommands(filter: CommandFilter): Promise<CommandRecord[]>;
   /** 條件更新:目前狀態在 from 之內才更新,回傳是否更新(狀態只能往前,指南 §8.4) */
   transition(id: number, from: CommandState[], patch: CommandPatch): Promise<boolean>;

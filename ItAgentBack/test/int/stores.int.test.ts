@@ -19,9 +19,10 @@ import { SqlCommandStore } from '../../src/stores/sql-command-store.js';
 import { CommandFileService } from '../../src/services/command-files.js';
 import { SqlDeviceStore } from '../../src/stores/sql-store.js';
 import { CommandDispatcher } from '../../src/services/command-dispatcher.js';
+import { parseCompanyDomains } from '../../src/services/company.js';
 import { MongoClient } from 'mongodb';
 import { Redis } from 'ioredis';
-import { DN, FakeConnection, FP, inventoryRequest, LIST_ALL } from '../helpers.js';
+import { ALL, DN, FakeConnection, FP, inventoryRequest, LIST_ALL } from '../helpers.js';
 
 const env = process.env;
 const testDb = env.ITA_TEST_DB_NAME ?? '';
@@ -30,7 +31,7 @@ if (!testDb.endsWith('_poc_test')) throw new Error(`ITA_TEST_DB_NAME 必須是�
 const MONGO_DB = 'ita_int_test';
 const REDIS_PREFIX = 'ita:int_test:';
 const log = Fastify({ logger: { level: 'silent' } }).log;
-const ctx = { log, requestId: 'int-test' };
+const ctx = { log, requestId: 'int-test', scope: ALL };
 
 let sql: SqlDeviceStore;
 let mongo: MongoSnapshotStore;
@@ -319,6 +320,78 @@ describe('SQL Server + Mongo + Redis', () => {
         .input('id', target.id)
         .query(`SELECT COUNT(*) AS n FROM ita.device_event WHERE device_ref = @id AND event_type = 'merged'`);
       assert.equal(r.recordset[0].n, 2);
+    } finally {
+      await pool.close();
+    }
+  });
+
+  it('E6(0005):所屬公司登錄 / 自動判定 / 指定、清單與指令的 IN 參數、未指定篩選、回填、合併繼承', async () => {
+    const domains = parseCompanyDomains('甲公司=a.example;乙公司=b.example');
+    const svc = new DeviceService(sql, mongo, redis, { heartbeatIntervalSec: 30, companyDomains: domains });
+    const store = new SqlCommandStore(() => sql.connection());
+    const commands = new CommandDispatcher(store, sql, svc);
+    const who = { sub: '1', emp: 'S000001', name: '測試人員' };
+    const actor = { emp: 'S000001', name: '測試人員' };
+    const scoped = (...companies: string[]) => ({ log, requestId: 'int-e6', scope: { all: false as const, companies } });
+    const names = async (c: ReturnType<typeof scoped> | typeof ctx, patch: object = {}) =>
+      (await svc.listDevices(c, { ...LIST_ALL, pageSize: 200, ...patch })).items.map((d) => d.computerName).sort();
+
+    // 登錄:憑證 FQDN → cert;回報網域 → domain;判不出 → 未指定
+    const a = await svc.identify(ctx, 'O=GigaNexus Dev,CN=PC-E6-A.a.example', 'e'.repeat(40));
+    assert.deepEqual([a.company, a.companySource], ['甲公司', 'cert']);
+    const b = await svc.identify(ctx, 'O=GigaNexus Dev,CN=PC-E6-B', 'f'.repeat(40));
+    const invB = inventoryRequest({ content_hash: 'b'.repeat(64), agent_seq: 1 });
+    invB.inventory = structuredClone(invB.inventory);
+    invB.inventory.system.host_name = 'PC-E6-B';
+    invB.inventory.system.domain = 'B.Example';
+    await svc.ingestInventory(ctx, b, invB);
+    const bRow = (await sql.findByDn(b.certDn))!;
+    assert.deepEqual([bRow.company, bRow.companySource], ['乙公司', 'domain']);
+    const u = await svc.identify(ctx, 'O=GigaNexus Dev,CN=PC-E6-U', '0'.repeat(40));
+
+    // 清單:IN 0 / 1 / 多家、指定公司、未指定(IS NULL)
+    assert.deepEqual(await names(scoped(), { q: 'PC-E6' }), []);
+    assert.deepEqual(await names(scoped('甲公司'), { q: 'PC-E6' }), ['PC-E6-A.a.example']);
+    assert.deepEqual(await names(scoped('甲公司', '乙公司'), { q: 'PC-E6' }), ['PC-E6-A.a.example', 'PC-E6-B']);
+    assert.deepEqual(await names(ctx, { q: 'PC-E6', company: null }), ['PC-E6-U']);
+    assert.deepEqual(await names(ctx, { q: 'PC-E6', company: '乙公司' }), ['PC-E6-B']);
+    await assert.rejects(svc.getDevice(scoped('甲公司'), b.deviceId), { code: 'ITA_DEVICE_NOT_FOUND' });
+
+    // 指令:清單 IN、批次公司
+    const cmdA = await commands.create(ctx, who, 'basic', a.deviceId, { kind: 'inventory.collect' });
+    const batch = await commands.createBatch(ctx, who, 'basic', [a.deviceId, b.deviceId], { kind: 'inventory.collect' });
+    const listA = await commands.list(scoped('甲公司'), { limit: 100 });
+    assert.ok(listA.items.some((c) => c.commandId === cmdA.commandId));
+    assert.ok(listA.items.every((c) => c.deviceId === a.deviceId));
+    await assert.rejects(commands.getBatch(scoped('甲公司'), batch.batchId), { code: 'ITA_BATCH_NOT_FOUND' });
+    assert.equal((await commands.getBatch(scoped('甲公司', '乙公司'), batch.batchId)).targetCount, 2);
+    assert.equal((await commands.get(scoped('甲公司'), cmdA.commandId)).deviceId, a.deviceId);
+
+    // IT 指定(manual,寫事件)→ 回報網域不再改;null 改回自動
+    assert.equal((await svc.setCompany(ctx, actor, u.deviceId, '乙公司', '整合測試')).companySource, 'manual');
+    assert.deepEqual(await names(scoped('乙公司'), { q: 'PC-E6' }), ['PC-E6-B', 'PC-E6-U']);
+    const ev = await svc.listEvents(ctx, u.deviceId, undefined, 10);
+    assert.ok(ev.items.some((e) => e.type === 'company_changed' && /乙公司/.test(e.detail ?? '')));
+    assert.equal(await sql.setCompany(u.id, { company: '甲公司', source: 'domain', mode: 'auto', detail: '', requestId: 't', by: 'agent' }), false, 'manual 不被自動判定覆寫');
+    const reset = await svc.setCompany(ctx, actor, b.deviceId, null, '');
+    assert.deepEqual([reset.company, reset.companySource], ['乙公司', 'domain']);
+
+    // 回填:清掉後依 DN / 回報網域補回;判不出的維持未指定
+    const pool = await connect(migrateConfig(env, testDb));
+    try {
+      await pool.request().query(`UPDATE ita.device SET company = NULL, company_source = NULL WHERE computer_name LIKE N'PC-E6-%' AND company_source <> 'manual'`);
+      assert.ok((await svc.backfillCompany(ctx)) >= 2);
+      assert.deepEqual([(await sql.findByDn(a.certDn))!.company, (await sql.findByDn(b.certDn))!.company], ['甲公司', '乙公司']);
+      assert.equal((await sql.findByDn(u.certDn))!.company, '乙公司', 'manual 不受回填影響');
+
+      // 合併:目標未指定時取來源的公司
+      const t = await svc.identify(ctx, 'O=GigaNexus Dev,CN=PC-E6-T', '7'.repeat(40));
+      const s = await svc.identify(ctx, 'O=GigaNexus Dev,CN=PC-E6-S.a.example', '8'.repeat(40));
+      await svc.merge(ctx, actor, t.deviceId, s.deviceId, '', true);
+      const merged = (await sql.findByDn(s.certDn))!;
+      assert.deepEqual([merged.deviceId, merged.company, merged.companySource], [t.deviceId, '甲公司', 'cert']);
+      const chk = await pool.request().query(`SELECT COUNT(*) AS n FROM sys.check_constraints WHERE name = 'ck_device_company_source'`);
+      assert.equal(chk.recordset[0].n, 1);
     } finally {
       await pool.close();
     }

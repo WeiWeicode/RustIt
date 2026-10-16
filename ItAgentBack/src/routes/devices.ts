@@ -3,13 +3,16 @@
  * 回傳 camelCase,與 GigaItApp 的 EndpointDevice 相容(只新增欄位)。清單不帶軟體清單,只在詳情的 inventory。
  *   - 查詢(endpoint.device.read):清單分頁與篩選、詳情、事件、下載資產 JSON
  *   - 裝置狀態與合併(endpoint.command.admin,指南 §8.2「停用 / 啟用裝置」屬管理等級):x-audit-level: meta,操作人取自內部 Token
- * 資料範圍依 Token 的 cos(所屬公司)過濾尚待定案(指南 §10 E6),目前回傳全部裝置。
+ * 資料範圍依 Token 的 cos(所屬公司)過濾(指南 §8.2、§10 E6;docs/E6-COMPANY-SCOPE-DESIGN.md):只回傳、只接受該公司的電腦,範圍外回與不存在相同的 404;
+ *   指定所屬公司(PUT /company)只有全部公司角色可用。
  * 路由只驗參數與宣告權限,邏輯在 DeviceService(AGENT.md §8.1)。
  */
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { AppError } from '../errors.js';
+import { COMPANY_NAME_MAX } from '../services/company.js';
 import type { DeviceService } from '../services/device-service.js';
 import type { Actor, DeviceStatus } from '../stores/types.js';
+import { mgmtCtx } from './mgmt-ctx.js';
 
 const str = { type: 'string' } as const;
 const strOrNull = { type: ['string', 'null'] } as const;
@@ -41,6 +44,8 @@ const summaryProps = {
   suspectedDuplicate: { type: 'boolean', description: '有其他未合併、未退役的裝置硬體指紋相同(疑似同一台)' },
   mergedInto: { type: ['string', 'null'], format: 'uuid', description: '已併入的目標裝置' },
   retiredAt: dateOrNull,
+  company: { type: ['string', 'null'], description: '所屬公司(Gateway 公司名稱);null = 未指定,只有可管理所有公司的角色看得到' },
+  companySource: { type: ['string', 'null'], enum: ['cert', 'domain', 'manual', null], description: '公司的判定來源:憑證 DN / Agent 回報的網域 / IT 指定' },
 } as const;
 
 const summarySchema = { type: 'object', properties: summaryProps } as const;
@@ -57,6 +62,7 @@ const listQuery = {
       pattern: '^(active|disabled|retired)(,(active|disabled|retired))*$',
       description: '逗號分隔;預設 active,disabled(不含退役與已合併)',
     },
+    company: { type: 'string', maxLength: COMPANY_NAME_MAX, description: '只列此公司;空字串 = 未指定公司(只有可管理所有公司的角色)' },
     page: { type: 'integer', minimum: 1, default: 1 },
     pageSize: { type: 'integer', minimum: 1, maximum: 200, default: 50 },
   },
@@ -68,6 +74,7 @@ interface ListQuery {
   os?: string;
   online?: boolean;
   status?: string;
+  company?: string;
   page: number;
   pageSize: number;
 }
@@ -76,7 +83,7 @@ const reason = { type: 'string', maxLength: 200, description: '原因(寫入稽�
 
 export function deviceRoutes(service: DeviceService): FastifyPluginAsync {
   return async (app) => {
-    const ctx = (req: { log: typeof app.log; id: string }) => ({ log: req.log, requestId: req.id });
+    const ctx = mgmtCtx;
     const actor = (req: FastifyRequest): Actor => {
       if (!req.identity) throw new AppError(401, 'ITA_INTERNAL_TOKEN_INVALID', '缺少內部 Token');
       return { emp: req.identity.emp ?? req.identity.sub, name: req.identity.name ?? null };
@@ -91,7 +98,7 @@ export function deviceRoutes(service: DeviceService): FastifyPluginAsync {
           operationId: 'endpoint.device.list',
           summary: '電腦清單',
           description:
-            '列出已連線過的端點電腦:名稱、在線狀態、使用者、IP、作業系統、CPU、記憶體、最後回報。分頁(page、pageSize,依電腦名稱排序),可依關鍵字(名稱、使用者、IP、MAC、裝置代碼)、軟體名稱、作業系統、在線、狀態篩選;預設不列退役與已合併的裝置。在線狀態由 Agent 的 WebSocket 心跳決定(90 秒無心跳即離線)。',
+            '列出已連線過的端點電腦:名稱、在線狀態、使用者、IP、作業系統、CPU、記憶體、所屬公司、最後回報。只列登入者所屬公司(內部 Token 的 cos)的電腦,可管理所有公司的角色看得到全部(含未指定公司)。分頁(page、pageSize,依電腦名稱排序),可依關鍵字(名稱、使用者、IP、MAC、裝置代碼)、軟體名稱、作業系統、在線、狀態、公司篩選;預設不列退役與已合併的裝置。在線狀態由 Agent 的 WebSocket 心跳決定(90 秒無心跳即離線)。',
           tags: ['端點電腦'],
           'x-permission': 'endpoint.device.read',
           'x-gherkin': [
@@ -106,6 +113,11 @@ export function deviceRoutes(service: DeviceService): FastifyPluginAsync {
             '  當 呼叫 GET /api/endpoint/devices?software=7-zip',
             '  那麼 回應 200',
             '  而且 items 包含 computerName 為 "PC-EXAMPLE-01" 的電腦',
+            '場景: 只看得到自己公司的電腦',
+            '  假如 電腦 PC-EXAMPLE-02 屬於另一家公司',
+            '  而且 使用者擁有 endpoint.device.read,所屬公司不含該公司',
+            '  當 呼叫 GET /api/endpoint/devices',
+            '  那麼 items 不包含 PC-EXAMPLE-02',
           ].join('\n'),
           querystring: listQuery,
           response: {
@@ -129,6 +141,7 @@ export function deviceRoutes(service: DeviceService): FastifyPluginAsync {
           os: trimmed(q.os),
           online: q.online,
           statuses: q.status ? ([...new Set(q.status.split(','))] as DeviceStatus[]) : [],
+          company: q.company === undefined ? undefined : q.company.trim() || null,
           page: q.page,
           pageSize: q.pageSize,
         });
@@ -142,7 +155,7 @@ export function deviceRoutes(service: DeviceService): FastifyPluginAsync {
           operationId: 'endpoint.device.get',
           summary: '電腦詳情',
           description:
-            '單一電腦的摘要與最新一份完整資產快照(硬體、網卡、磁碟、防毒、軟體清單),以及硬體指紋相同的其他裝置(疑似同一台);不存在回 404 ITA_DEVICE_NOT_FOUND。',
+            '單一電腦的摘要與最新一份完整資產快照(硬體、網卡、磁碟、防毒、軟體清單),以及硬體指紋相同的其他裝置(疑似同一台,只列資料範圍內的);不存在或不屬於登入者所屬公司回 404 ITA_DEVICE_NOT_FOUND。',
           tags: ['端點電腦'],
           'x-permission': 'endpoint.device.read',
           'x-gherkin': [
@@ -342,6 +355,50 @@ export function deviceRoutes(service: DeviceService): FastifyPluginAsync {
       },
       async (req) =>
         service.merge(ctx(req), actor(req), id(req), req.body.sourceDeviceId.toLowerCase(), req.body.reason?.trim() ?? '', req.body.force ?? false),
+    );
+
+    app.put<{ Params: { deviceId: string }; Body: { company: string | null; reason?: string } }>(
+      '/v1/devices/:deviceId/company',
+      {
+        schema: {
+          operationId: 'endpoint.device.company',
+          summary: '指定電腦所屬公司',
+          description:
+            '指定電腦所屬公司(資料範圍依此過濾:只有該公司的 IT 看得到、管得到),之後不再依憑證或回報網域自動變更;company 為 null 時改回自動判定並立即判定一次。只有可管理所有公司的角色能使用,其他人回 403 ITA_SCOPE_ALL_REQUIRED;已併入其他裝置者回 409 ITA_DEVICE_STATUS_INVALID。公司名稱須與 Gateway 的公司名稱相同。',
+          tags: ['端點電腦'],
+          'x-permission': 'endpoint.command.admin',
+          'x-audit-level': 'meta',
+          'x-gherkin': [
+            '場景: 指定工作群組電腦的公司',
+            '  假如 電腦 PC-EXAMPLE-01 未指定公司',
+            '  而且 使用者擁有 endpoint.command.admin,且為可管理所有公司的角色',
+            '  當 呼叫 PUT /api/endpoint/devices/{deviceId}/company,company 為 "範例公司"',
+            '  那麼 回應 200',
+            '  而且 companySource 為 "manual"',
+            '場景: 一般 IT 不能改公司',
+            '  假如 使用者擁有 endpoint.command.admin,但不是可管理所有公司的角色',
+            '  當 呼叫 PUT /api/endpoint/devices/{deviceId}/company',
+            '  那麼 回應 403',
+            '  而且 回應的 code 為 "ITA_SCOPE_ALL_REQUIRED"',
+          ].join('\n'),
+          params: deviceParams,
+          body: {
+            type: 'object',
+            required: ['company'],
+            properties: {
+              company: { type: ['string', 'null'], minLength: 1, maxLength: COMPANY_NAME_MAX, pattern: '\\S', description: '公司名稱;null = 改回自動判定' },
+              reason,
+            },
+          },
+          response: {
+            200: {
+              type: 'object',
+              properties: { deviceId: uuid, company: summaryProps.company, companySource: summaryProps.companySource, changed: { type: 'boolean' } },
+            },
+          },
+        },
+      },
+      async (req) => service.setCompany(ctx(req), actor(req), id(req), req.body.company?.trim() ?? null, req.body.reason?.trim() ?? ''),
     );
   };
 }

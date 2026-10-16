@@ -13,10 +13,10 @@ import { buildAgentApp } from '../src/agent-app.js';
 import { compileWsEnvelope } from '../src/contracts.js';
 import { buildMgmtApp } from '../src/mgmt-app.js';
 import type { DeviceRecord } from '../src/stores/types.js';
-import { CONTRACTS_DIR, DN, FP, FakeConnection, certHeaders, setupCommands } from './helpers.js';
+import { ALL, CONTRACTS_DIR, DN, FP, FakeConnection, certHeaders, setupCommands } from './helpers.js';
 
 const log = Fastify({ logger: { level: 'silent' } }).log;
-const ctx = { log, requestId: 'req-cmd-1' };
+const ctx = { log, requestId: 'req-cmd-1', scope: ALL };
 const IT: GatewayIdentity = { sub: '1', emp: 'S000001', name: '測試人員' };
 const OTHER: GatewayIdentity = { sub: '2', emp: 'S000002', name: '另一位' };
 const validateEnvelope = compileWsEnvelope(CONTRACTS_DIR);
@@ -295,7 +295,7 @@ describe('指令管理 API(:51240)', () => {
     device = await addDevice(DN);
     const gateway = loadGatewayEnv({ GW_ENV: 'dev', SERVICE_CODE: 'endpoint-api', GW_JWKS_URL: 'http://127.0.0.1:1/jwks.json' });
     mgmt = await buildMgmtApp({
-      config: { gateway, monitor: loadMonitorEnv('dev', {}), logLevel: 'silent', devSkipToken: true },
+      config: { gateway, monitor: loadMonitorEnv('dev', {}), logLevel: 'silent', devSkipToken: true, scopeAllRoles: [] },
       service: env.service,
       commands: env.commands,
     });

@@ -10,7 +10,7 @@ import type { InventoryRequest } from '../src/contracts.js';
 import { buildMgmtApp } from '../src/mgmt-app.js';
 import { inventoryFileName, WS_CLOSE_DEVICE_CHANGED } from '../src/services/device-service.js';
 import { likeContains } from '../src/stores/sql-store.js';
-import { FakeConnection, inventoryRequest, setup } from './helpers.js';
+import { ALL, FakeConnection, inventoryRequest, setup } from './helpers.js';
 
 const HW = 'a'.repeat(64);
 const DN2 = 'O=GigaNexus Dev,CN=PC-EXAMPLE-02';
@@ -18,7 +18,7 @@ const FP2 = 'b'.repeat(40);
 
 let env: ReturnType<typeof setup>;
 let app: FastifyInstance;
-const ctx = () => ({ log: app.log, requestId: 't' });
+const ctx = () => ({ log: app.log, requestId: 't', scope: ALL });
 
 /** 第二台電腦:名稱、IP、MAC、軟體、OS 都不同 */
 function secondInventory(patch: Partial<InventoryRequest> = {}): InventoryRequest {
@@ -46,7 +46,7 @@ const json = (method: 'PUT' | 'POST', url: string, payload: object) => app.injec
 beforeEach(async () => {
   env = setup();
   const gateway = loadGatewayEnv({ GW_ENV: 'dev', SERVICE_CODE: 'endpoint-api', GW_JWKS_URL: 'http://127.0.0.1:1/jwks' });
-  app = await buildMgmtApp({ config: { gateway, monitor: loadMonitorEnv('dev', {}), logLevel: 'silent', devSkipToken: true }, service: env.service });
+  app = await buildMgmtApp({ config: { gateway, monitor: loadMonitorEnv('dev', {}), logLevel: 'silent', devSkipToken: true, scopeAllRoles: [] }, service: env.service });
 });
 
 describe('清單分頁與篩選', () => {
