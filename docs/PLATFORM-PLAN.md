@@ -441,7 +441,7 @@ Demo(Tauri)改造為使用者端程式 `desktop`:使用者會用的頁面保留(
 | B6 | **大量異常偵測** | giga-observe 加入「端點在線率驟降(例如 10 分鐘內下降 20%)」「同一錯誤碼暴增(憑證被拒、503)」告警,通知**維運人員**;CRL / 憑證過期會造成全公司同時掉線,這是最可能的大規模事故 | 高 |
 | B7 | **壓測工具** | `RustIt/tools/agent-sim`(Node.js 或 Rust):模擬 500–1,000 台 Agent 的 WebSocket、心跳、補傳、事件、指令回應;驗證主機與 Gateway(指南 G3) | 中 |
 | B8 | **CI 安全掃描** | CI 加 `cargo audit`、`npm audit`(高風險即失敗)、產出 SBOM;發版檢查清單(版本號、變更說明、簽章、雜湊、`pilot` 環觀察) | 中 |
-| B9 | **公司間的資料範圍** | 依指南 E6:管理 API 依內部 Token 的 `cos` 過濾;另設「全部公司」角色給 IT 主管 | 中 |
+| B9 | **公司間的資料範圍** | 依指南 E6:管理 API 依內部 Token 的 `cos` 過濾;另設「全部公司」角色給 IT 主管。✅ 後端 2026-10-16 上測試區(`E6-COMPANY-SCOPE-DESIGN.md`,`ENDPOINT_SCOPE_ALL_ROLES`);尚待 GigaItApp 公司欄與指定按鈕(E6-2)、正式區裝置憑證 CN 必須是 FQDN | 中 |
 | B10 | **維運手冊與使用者文件** | `docs/RUNBOOK.md`:大量離線、憑證過期、版本回滾、手動解除安裝、NAS 無法掛載的處理步驟;IT 安裝指南(GPO 派送、非網域電腦);使用者 FAQ(托盤是什麼、蒐集哪些資料、如何回報電腦資訊) | 中 |
 
 ---

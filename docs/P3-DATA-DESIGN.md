@@ -59,7 +59,7 @@ CREATE INDEX ix_device_software_name ON ita.device_software (name) INCLUDE (devi
 
 - 錯誤代碼只新增:`ITA_INVENTORY_NOT_FOUND`、`ITA_MERGE_INVALID`(`details.reason`:`same_device`、`fingerprint_mismatch`、`overlap`、`target_online`、`target_retired`、`source_not_active`、`source_merged`、`target_merged`)、`ITA_DEVICE_STATUS_INVALID`(已合併的裝置不能變更狀態)。
 - 清單分頁在 service:SQL 依篩選取出全部符合的列,在線篩選(狀態在 Redis)後再分頁;台數到數千台時改為 SQL 分頁(無在線篩選時)。
-- 資料範圍依 `cos` 過濾仍待指南 §10 E6,本階段不做。
+- 資料範圍依 `cos` 過濾仍待指南 §10 E6,本階段不做。→ 2026-10-16 已另案完成(`E6-COMPANY-SCOPE-DESIGN.md`):清單只列所屬公司、範圍外回 404,回應加 `company`、`companySource`,新路由 `PUT /v1/devices/{id}/company`。
 
 ## 4. 合併(A1)
 
@@ -99,8 +99,8 @@ Tab 只在切換時載入(事件、軟體表格大),沿用 `DeviceCommands` 的�
 - ItAgentBack:`npm test` 104 項、`npm run test:int` 9 項(SQL Server 2012 `giganexus_It_Agent_poc_test`:軟體表與回填、篩選、事件、狀態、兩種方向的合併與指令取消)全部通過;本機 ItAgentBack(唯讀)對 `giganexus_It_Agent_test` 實測分頁、關鍵字、OS、退役篩選、事件游標、下載 JSON 標頭、詳情的時鐘偏差。軟體名稱篩選在 0004 套用前回 503(預期,確認部署順序)。
 - 整合測試抓到:`LIKE N'%"software":[{%'` 的 `[` 在 SQL Server LIKE 是字元集合開頭,改為跳脫。
 - `code-reviewer`、`security-auditor` 子代理審查後的修正:合併後先關閉 WebSocket 再清理;回填改游標並在交易內鎖住資產列重讀(與資產寫入不重複、不飢餓,無法解析的記 warn);合併不覆蓋目標狀態、目標退役或來源停用 / 退役拒絕;合併取消兩台未完成的指令(避免偽造指紋取得舊裝置的排隊指令);新登錄早於舊裝置最後回報需 force;並行重送回 `alreadyMerged`;`setStatus` 交易內確認未合併;LIKE 參數長度放寬為跳脫後上限;交易後也關閉目標連線。
-- **未處理(已知)**:資料範圍依 `cos` 過濾(指南 §10 E6)仍未做,目前有 `endpoint.device.read` 即可看全部公司的電腦、有 `endpoint.command.admin` 即可管理全部;上線前必須完成(列入指南 §11)。合併路由尚未寫入指南 §8.3 表格(需 Gateway repo 同意)。
-- **部署順序**(1、3 已完成,2026-10-16):1. migration 0004 套用到 `giganexus_It_Agent_test` → 2. RustIt 合併 develop(endpoint-server 自動註冊 OpenAPI,建立 `endpoint.command.admin`)→ 3. GigaItApp 合併 develop(rbac-test 套用 `it.endpoint-device.admin`)。GigaItApp 先部署也可用(清單相容舊回應,只是沒有分頁與新功能)。
+- **未處理(已知)**:資料範圍依 `cos` 過濾(指南 §10 E6)仍未做,目前有 `endpoint.device.read` 即可看全部公司的電腦、有 `endpoint.command.admin` 即可管理全部;上線前必須完成(列入指南 §11)。→ 2026-10-16 已完成並上測試區(`E6-COMPANY-SCOPE-DESIGN.md` §6.1)。合併路由尚未寫入指南 §8.3 表格(需 Gateway repo 同意)。
+- **部署與測試區驗證**(2026-10-16):1. migration 0004 套用到 `giganexus_It_Agent_test` → 2. RustIt 合併 develop(MR !23,OpenAPI 批次 110 已發佈,建立 `endpoint.command.admin`,啟動時回填 3 台軟體清單)→ 3. GigaItApp 合併 develop(MR !4、!5,rbac-test 套用 `it.endpoint-device.admin`)。測試區 VM(`DESKTOP-1TB2UMP`,Agent 0.4.1)實測:清單分頁 / 篩選、7 個 Tab、下載 JSON、**停用 → 啟用(期間排隊指令於重連後送出)、退役 → 改回使用中皆正常**;VM 改名重簽憑證驗證「疑似同一台」與合併尚未測。
 
 ## 7. 決定事項(2026-10-16)
 
