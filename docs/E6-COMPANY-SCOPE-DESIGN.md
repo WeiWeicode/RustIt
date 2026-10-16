@@ -184,7 +184,7 @@ export interface MgmtCtx extends Ctx { scope: Scope }
 
 ## 6. 部署順序
 
-1. migration 0005 套用 `giganexus_It_Agent_test`(**先問**)。
+1. migration 0005 套用 `giganexus_It_Agent_test`(**先問**)。✅ 2026-10-16
 2. 需求方更新主機 2 `/srv/giganexus/deploy/ita.env`(兩個新變數;未設定時新版啟動失敗,所以**必須在合併前**)。
 3. RustIt 合併 develop(群組告知)→ endpoint-server 自動註冊 OpenAPI(新路由 `PUT .../company` 進草稿,IT 發佈)。
 4. E6-2 / E6-3 依同意另行處理。
@@ -195,7 +195,8 @@ export interface MgmtCtx extends Ctx { scope: Scope }
 - 測試:`npm test` 124 項(新增 `test/scope.test.ts`:純函式、四種 Token × 每條管理 API、範圍外與不存在回應逐欄相同、批次與合併不留下資料、Idempotency-Key、公司自動判定與指定、回填、路由清單比對)全部通過;暫時拿掉 `found()` 的範圍檢查時 5 項失敗(測試有效)。`npm run test:int` 10 項(SQL Server 2012 `giganexus_It_Agent_poc_test`:0005、IN 參數 0 / 1 / 多家、`IS NULL`、`setCompany` 不覆寫 manual、回填、合併繼承、CHECK)全部通過。
 - 子代理審查(`code-reviewer`、`security-auditor`,無高嚴重度)後的修正:`suspected_duplicate` 事件內容提到範圍外的裝置時改為不含識別資訊的說明;清單 / 詳情的 `suspectedDuplicate` 標記只看範圍內的另一台;併入的目標在範圍外時 `mergedInto`(含 409 details)回 null;SQL 公司比對改二進位定序;`GET /v1/commands?batchId=` 與 `GET /v1/batches/{id}` 一致(含範圍外裝置視同不存在);批次 Idempotency-Key 命中範圍外的批次回 404。
 - **與設計不同**:`ENDPOINT_COMPANY_DOMAINS` 由 JSON 改為 `公司=網域,網域;公司=網域`(§2 #4、§3.2 已改);`CommandFileService` 自行檢查範圍(不經 dispatcher,邏輯相同)。
-- **未做**:migration 0005 尚未套用 `giganexus_It_Agent_test`(待同意);E6-2(GigaItApp)、E6-3(指南回寫)待同意;`test.env.example` 的公司名稱(碩禾、鹽城碩禾)須與測試區 Gateway `gw.company.comp_name` 核對。
+- migration 0005 已套用 `giganexus_It_Agent_test`(2026-10-16,經需求方同意;欄位、CHECK、索引確認,既有 3 台皆未指定,新版部署後啟動回填)。
+- **未做**:E6-2(GigaItApp)、E6-3(指南回寫)待同意;`test.env.example` 的公司名稱(碩禾、鹽城碩禾)須與測試區 Gateway `gw.company.comp_name` 核對。
 
 ## 7. 風險
 
