@@ -11,6 +11,8 @@
  *     其餘同 hash 只取最新一份,依 collected_at 由舊到新列入 need(單次最多 20 筆,A3),Agent 再逐筆 POST /inventory。
  *   端點事件 POST /agent/v1/events:以 (裝置, event_id) 去重寫入 ita.device_event(occurred_at = 端點時間,另記 received_at)。
  *   hello:記錄時鐘偏差(超過 ±5 分鐘寫 clock_skew 事件,A2)、硬體指紋(與其他裝置相同時寫 suspected_duplicate,不自動合併,A1)。
+ *   管理 API(P3,docs/P3-DATA-DESIGN.md):清單篩選在 SQL、在線篩選與分頁在這裡(在線狀態在 Redis);
+ *     停用 / 退役立即關閉 WebSocket;合併(A1)由 SQL 交易搬資料,交易後改 Mongo 歷史、清 Redis 快取、關閉來源的 WebSocket(Agent 重連即對到目標)。
  */
 import type { FastifyBaseLogger } from 'fastify';
 import { createHash, randomUUID } from 'node:crypto';
@@ -28,7 +30,20 @@ import {
 } from '../contracts.js';
 import { AppError, storageUnavailable } from '../errors.js';
 import type { CommandChannel } from './command-dispatcher.js';
-import type { AgentEvent, DeviceRecord, DeviceRow, DeviceStore, OnlineInfo, SnapshotStore, StateStore, TouchPatch } from '../stores/types.js';
+import type {
+  Actor,
+  AgentEvent,
+  DeviceFilter,
+  DeviceRecord,
+  DeviceRow,
+  DeviceStatus,
+  DeviceStore,
+  MergeResult,
+  OnlineInfo,
+  SnapshotStore,
+  StateStore,
+  TouchPatch,
+} from '../stores/types.js';
 
 /** 一則請求或一條 WebSocket 的日誌與追蹤(指南 §5.7:x-request-id、DN、指紋) */
 export interface Ctx {
@@ -71,12 +86,57 @@ export interface DeviceSummary {
   ips: string[];
   agentVersion: string | null;
   lastInventoryAt: string | null;
+  /** 有其他裝置硬體指紋相同(疑似同一台,A1) */
+  suspectedDuplicate: boolean;
+  /** 已併入的目標裝置 deviceId */
+  mergedInto: string | null;
+  retiredAt: string | null;
+}
+
+/** 疑似同一台的另一台裝置(詳情用) */
+export interface DuplicateCandidate {
+  deviceId: string;
+  computerName: string;
+  status: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
 }
 
 export interface DeviceDetail extends DeviceSummary {
   /** 最新一份完整快照(Agent 的 ComputerInfo,鍵名轉 camelCase);尚未回報資產時為 null */
   inventory: Record<string, unknown> | null;
   collectedAt: string | null;
+  clockSkewMs: number | null;
+  suspectedDuplicates: DuplicateCandidate[];
+}
+
+export interface DeviceListQuery extends DeviceFilter {
+  online?: boolean;
+  page: number;
+  pageSize: number;
+}
+
+export interface DeviceListPage {
+  items: DeviceSummary[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+export interface DeviceEventView {
+  id: number;
+  type: string;
+  occurredAt: string;
+  receivedAt: string | null;
+  detail: string | null;
+  data: unknown;
+}
+
+export interface MergeView extends MergeResult {
+  deviceId: string;
+  sourceDeviceId: string;
+  /** 重送:來源早已併入此目標,未再處理 */
+  alreadyMerged: boolean;
 }
 
 export interface DeviceServiceOptions {
@@ -100,6 +160,20 @@ export const CLOCK_SKEW_ALERT_MS = 5 * 60_000;
 export const SYNC_NEED_LIMIT = 20;
 /** device_event.data 上限 */
 const EVENT_DATA_MAX = 4000;
+/** 主機停用 / 退役 / 合併時關閉 WebSocket 的代碼(Agent 照一般斷線重連,重連時由 identify 回 403 或對到合併後的裝置) */
+export const WS_CLOSE_DEVICE_CHANGED = 4403;
+/** 回填軟體清單:每批台數與上限批數(避免異常資料造成無窮迴圈) */
+const BACKFILL_BATCH = 100;
+const BACKFILL_MAX_ROUNDS = 50;
+/** 合併的時間順序容許重疊(舊裝置最後回報在 SQL 每 5 分鐘落盤,再加時鐘誤差) */
+const MERGE_OVERLAP_MS = 15 * 60_000;
+
+/** 下載檔名:只留安全字元,日期為台北時間(UTC+8) */
+export function inventoryFileName(computerName: string, collectedAt: Date | null): string {
+  const name = computerName.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 64) || 'device';
+  const day = collectedAt ? new Date(collectedAt.getTime() + 8 * 3_600_000).toISOString().slice(0, 10).replace(/-/g, '') : 'unknown';
+  return `${name}-${day}.json`;
+}
 
 /** 設定內容的版本號:內容不變則版本不變(Agent 依此判斷是否要更新本機保存的設定) */
 export function settingsVersion(settings: AgentSettings): number {
@@ -416,6 +490,14 @@ export class DeviceService implements CommandChannel {
     return n;
   }
 
+  /** 主機端變更裝置(停用、退役、合併):關閉該裝置的 WebSocket */
+  private kick(ctx: Ctx, deviceId: string, reason: string): void {
+    const live = this.connections.get(deviceId);
+    if (!live) return;
+    ctx.log.info({ deviceId, reason }, '裝置狀態變更,關閉 WebSocket');
+    live.conn.close(WS_CLOSE_DEVICE_CHANGED, reason);
+  }
+
   /** 指令推送通道(CommandChannel):只對本行程握有的連線(單一實例,指南 §8.4) */
   isOnline(deviceId: string): boolean {
     return this.connections.has(deviceId);
@@ -482,24 +564,142 @@ export class DeviceService implements CommandChannel {
       ips: row.ips,
       agentVersion: online?.agentVersion ?? row.agentVersion,
       lastInventoryAt: row.lastInventoryAt?.toISOString() ?? null,
+      suspectedDuplicate: row.suspectedDuplicate,
+      mergedInto: row.mergedIntoId,
+      retiredAt: row.retiredAt?.toISOString() ?? null,
     };
   }
 
-  async listDevices(ctx: Ctx): Promise<DeviceSummary[]> {
-    const rows = await this.sqlDo(ctx, 'device.list', () => this.sql.listDevices());
+  /** 篩選在 SQL;在線篩選與分頁在這裡(在線狀態在 Redis,無法在 SQL 篩選) */
+  async listDevices(ctx: Ctx, q: DeviceListQuery): Promise<DeviceListPage> {
+    const rows = await this.sqlDo(ctx, 'device.list', () => this.sql.listDevices(q));
     const online = await this.onlineMap(
       ctx,
       rows.map((r) => r.deviceId),
     );
-    return rows.map((r) => this.summary(r, online.get(r.deviceId)));
+    const all = rows.map((r) => this.summary(r, online.get(r.deviceId))).filter((d) => q.online === undefined || d.online === q.online);
+    const start = (q.page - 1) * q.pageSize;
+    return { items: all.slice(start, start + q.pageSize), total: all.length, page: q.page, pageSize: q.pageSize };
+  }
+
+  private async found(ctx: Ctx, deviceId: string) {
+    const found = await this.sqlDo(ctx, 'device.get', () => this.sql.getDevice(deviceId));
+    if (!found) throw new AppError(404, 'ITA_DEVICE_NOT_FOUND', '找不到此電腦');
+    return found;
   }
 
   async getDevice(ctx: Ctx, deviceId: string): Promise<DeviceDetail> {
-    const found = await this.sqlDo(ctx, 'device.get', () => this.sql.getDevice(deviceId));
-    if (!found) throw new AppError(404, 'ITA_DEVICE_NOT_FOUND', '找不到此電腦');
+    const found = await this.found(ctx, deviceId);
     const online = await this.onlineMap(ctx, [deviceId]);
     let inventory: Record<string, unknown> | null = null;
     if (found.payload) inventory = camelize(JSON.parse(found.payload) as ComputerInfo) as Record<string, unknown>;
-    return { ...this.summary(found.row, online.get(deviceId)), inventory, collectedAt: found.collectedAt?.toISOString() ?? null };
+    const row = found.row;
+    const same = row.hwFingerprint && !row.mergedIntoId ? await this.sqlDo(ctx, 'device.sameHw', () => this.sql.findByHwFingerprint(row.hwFingerprint!, row.id)) : [];
+    return {
+      ...this.summary(row, online.get(deviceId)),
+      inventory,
+      collectedAt: found.collectedAt?.toISOString() ?? null,
+      clockSkewMs: row.clockSkewMs,
+      suspectedDuplicates: same
+        .filter((d) => d.status !== 'retired')
+        .map((d) => ({
+          deviceId: d.deviceId,
+          computerName: d.computerName,
+          status: d.status,
+          firstSeenAt: d.firstSeenAt.toISOString(),
+          lastSeenAt: d.lastSeenAt.toISOString(),
+        })),
+    };
+  }
+
+  /** 事件新到舊(依寫入順序;離線補傳的端點事件 occurredAt 可能較早) */
+  async listEvents(ctx: Ctx, deviceId: string, beforeId: number | undefined, limit: number): Promise<{ items: DeviceEventView[]; nextCursor: string | null }> {
+    const { row } = await this.found(ctx, deviceId);
+    const rows = await this.sqlDo(ctx, 'event.list', () => this.sql.listEvents(row.id, beforeId, limit));
+    const items = rows.map((e) => {
+      let data: unknown = null;
+      if (e.data) {
+        try {
+          data = JSON.parse(e.data);
+        } catch {
+          data = e.data;
+        }
+      }
+      return { id: e.id, type: e.type, occurredAt: e.occurredAt.toISOString(), receivedAt: e.receivedAt?.toISOString() ?? null, detail: e.detail, data };
+    });
+    return { items, nextCursor: rows.length === limit ? String(rows[rows.length - 1]!.id) : null };
+  }
+
+  /** 最新資產原樣(資料契約 snake_case) */
+  async inventoryJson(ctx: Ctx, deviceId: string): Promise<{ fileName: string; body: string }> {
+    const found = await this.found(ctx, deviceId);
+    if (!found.payload) throw new AppError(404, 'ITA_INVENTORY_NOT_FOUND', '此電腦尚未回報資產');
+    return { fileName: inventoryFileName(found.row.computerName, found.collectedAt), body: found.payload };
+  }
+
+  async setStatus(ctx: Ctx, actor: Actor, deviceId: string, status: DeviceStatus, reason: string): Promise<{ deviceId: string; status: DeviceStatus; changed: boolean }> {
+    const { row } = await this.found(ctx, deviceId);
+    if (row.mergedIntoId) throw new AppError(409, 'ITA_DEVICE_STATUS_INVALID', '此裝置已併入其他裝置,不能變更狀態', { mergedInto: row.mergedIntoId });
+    if (row.status === status) return { deviceId, status, changed: false };
+    const ok = await this.sqlDo(ctx, 'device.setStatus', () => this.sql.setStatus(row.id, status, reason ? `原因:${reason}` : '', ctx.requestId, actor));
+    if (!ok) throw new AppError(409, 'ITA_DEVICE_STATUS_INVALID', '此裝置已併入其他裝置,不能變更狀態');
+    ctx.log.info({ deviceId, from: row.status, to: status, emp: actor.emp }, '裝置狀態變更');
+    if (status !== 'active') this.kick(ctx, deviceId, `device ${status}`);
+    return { deviceId, status, changed: true };
+  }
+
+  /** 來源(重灌後的新登錄)併入目標(舊裝置,deviceId 保留);重送同一請求回 alreadyMerged */
+  async merge(ctx: Ctx, actor: Actor, targetId: string, sourceId: string, reason: string, force: boolean): Promise<MergeView> {
+    if (targetId === sourceId) throw new AppError(400, 'ITA_MERGE_INVALID', '不能與自己合併', { reason: 'same_device' });
+    const target = (await this.found(ctx, targetId)).row;
+    const source = (await this.found(ctx, sourceId)).row;
+    const view = (r: MergeResult, alreadyMerged: boolean): MergeView => ({ deviceId: targetId, sourceDeviceId: sourceId, alreadyMerged, ...r });
+    const already = view({ events: 0, commands: 0, canceledCommands: 0, inventoryFrom: 'none' }, true);
+    if (source.mergedIntoId === targetId) return already;
+    if (target.status === 'retired') throw new AppError(409, 'ITA_MERGE_INVALID', '目標裝置已退役,請先改回使用中再合併', { reason: 'target_retired' });
+    if (source.status !== 'active') throw new AppError(409, 'ITA_MERGE_INVALID', '來源裝置已停用或退役,不能合併', { reason: 'source_not_active' });
+    // 硬體指紋由端點自行回報,只是提示;再要求「來源在舊裝置最後回報之後才登錄」(重灌的時間順序),不符時需 IT 確認後以 force 合併
+    if (!force && (!target.hwFingerprint || target.hwFingerprint !== source.hwFingerprint))
+      throw new AppError(409, 'ITA_MERGE_INVALID', '兩台硬體指紋不同(或未回報),確認是同一台後以 force 合併', { reason: 'fingerprint_mismatch' });
+    if (!force && source.firstSeenAt.getTime() < target.lastSeenAt.getTime() - MERGE_OVERLAP_MS)
+      throw new AppError(409, 'ITA_MERGE_INVALID', '新登錄的時間早於舊裝置最後回報,兩台曾同時使用,確認是同一台後以 force 合併', { reason: 'overlap' });
+    // 舊裝置還在線:舊憑證仍在使用,通常不是重灌,不能合併
+    if ((await this.onlineMap(ctx, [targetId])).has(targetId))
+      throw new AppError(409, 'ITA_MERGE_INVALID', '目標裝置目前在線,不能合併', { reason: 'target_online' });
+
+    let result: MergeResult;
+    try {
+      result = await this.sqlDo(ctx, 'device.merge', () => this.sql.merge(target.id, source.id, reason ? `原因:${reason}` : '', ctx.requestId, actor));
+    } catch (err) {
+      // 同一請求並行送達:另一個已完成
+      if (err instanceof AppError && (err.details as { reason?: string } | undefined)?.reason === 'already_merged') return already;
+      throw err;
+    }
+    ctx.log.info({ target: targetId, source: sourceId, emp: actor.emp, ...result }, '裝置已合併');
+    // 先關閉來源的 WebSocket:避免 Agent 在 Mongo / Redis 清理期間仍以來源身分寫入
+    this.kick(ctx, sourceId, 'device merged');
+    // 檢查之後目標才上線(競態):一併關閉,讓它以自己的憑證重新識別
+    this.kick(ctx, targetId, 'device merged');
+    await this.soft(ctx, `mongo.reassign(${sourceId} → ${targetId})`, () => this.snapshots.reassign(sourceId, targetId));
+    await this.soft(ctx, 'redis.clearHash', () => this.state.clearHash(targetId));
+    await this.soft(ctx, 'redis.clearHash', () => this.state.clearHash(sourceId));
+    await this.soft(ctx, 'redis.clearOnline', () => this.state.clearOnline(sourceId));
+    return view(result, false);
+  }
+
+  /** 啟動時:既有資產回填軟體清單(migration 0004 之前寫入的);SQL 失敗只記 warn,下次啟動再試 */
+  async backfillSoftware(ctx: Ctx): Promise<number> {
+    let total = 0;
+    let after = 0;
+    for (let round = 0; round < BACKFILL_MAX_ROUNDS; round++) {
+      const r = await this.soft(ctx, 'sql.backfillSoftware', () => this.sql.backfillSoftware(after, BACKFILL_BATCH));
+      if (!r) break;
+      total += r.done;
+      if (r.failed.length) ctx.log.warn({ deviceRefs: r.failed }, '資產 payload 無法解析,略過軟體清單回填');
+      if (r.lastRef === null) break;
+      after = r.lastRef;
+    }
+    if (total) ctx.log.info({ devices: total }, '軟體清單回填完成');
+    return total;
   }
 }

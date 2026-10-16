@@ -39,9 +39,13 @@
 
 一張網卡的每個 IP 一列(沒有 IP 的網卡一列 `ip_address = NULL`),索引 `mac`、`ip_address`,供依 IP / MAC 查詢;隨最新資產整批替換。管理 API 的 `ips` 取 IPv4,有閘道的網卡優先。
 
+### `ita.device_software` — 軟體清單(0004,P3)
+
+最新一份資產的軟體清單,一個軟體一列(`name` NVARCHAR(400)、`version`、`publisher`、`install_date` 原樣字串),隨資產寫入整批替換;索引 `name`(含 `device_ref`),供管理 API 依軟體名稱找電腦(`LIKE` 部分比對)。0004 之前寫入的資產由服務啟動時從 `payload` 回填(`DeviceService.backfillSoftware`,依 `device_ref` 游標分批;鎖住資產列後重讀,與 Agent 同時回報不會重複)。**部署順序:先套用 0004,再部署新版 endpoint-server**(新版寫入資產時會替換此表)。
+
 ### `ita.device_event` — 稽核與端點事件
 
-主機產生(`event_uid` 為 NULL,`occurred_at` = 寫入時間):`registered`(首次連線)、`fingerprint_changed`(憑證續約或被複製)、`duplicate_connection`(同一裝置第二條 WebSocket)、`clock_skew`(時鐘偏差由正常變成超過 ±5 分鐘)、`suspected_duplicate`(硬體指紋與另一台相同)、`disabled` / `enabled`(管理 API 實作後)。
+主機產生(`event_uid` 為 NULL,`occurred_at` = 寫入時間):`registered`(首次連線)、`fingerprint_changed`(憑證續約或被複製)、`duplicate_connection`(同一裝置第二條 WebSocket)、`clock_skew`(時鐘偏差由正常變成超過 ±5 分鐘)、`suspected_duplicate`(硬體指紋與另一台相同)、`disabled` / `enabled` / `retired`(P3 管理 API `PUT /v1/devices/{id}/status`,detail 帶操作人工號與原因)、`merged`(P3 合併,記在保留的舊裝置,detail 帶操作人、來源 deviceId、舊 DN 與原因)。
 
 Agent 回報(0002,`POST /agent/v1/events`;`event.schema.json`):`offline_period`、`usb_inserted` / `usb_removed`、`agent_started`、`local_overflow` 等。`occurred_at` 為**端點上的發生時間**,`received_at` 為主機收到時間,`event_uid` 為 Agent 產生的 event_id,`(device_ref, event_uid)` 篩選唯一索引去重(重送不重複),`data` 為事件內容 JSON(上限 4,000 字元,過長只記長度)。不認得的 type 照常保存。
 
@@ -72,8 +76,19 @@ Agent 回報(0002,`POST /agent/v1/events`;`event.schema.json`):`offline_period`�
 
 1. 比對 `content_hash`:Redis → SQL;相同 → 只更新 `last_seen_at`、`last_inventory_at`(`unchanged`)。
 2. `collected_at` 比目前資料舊(補傳)→ 只進 Mongo 歷史(`archived`)。
-3. 否則在**一個交易**寫 `device_inventory`(upsert)、`device_nic`(替換)、`device`(名稱、版本、時間)→ 成功後寫 Mongo 快照 → 更新 Redis hash(`stored`)。
+3. 否則在**一個交易**寫 `device_inventory`(upsert)、`device_nic`、`device_software`(替換)、`device`(名稱、版本、時間)→ 成功後寫 Mongo 快照 → 更新 Redis hash(`stored`)。
 4. SQL 失敗回 503 `ITA_STORAGE_UNAVAILABLE`,不寫 Mongo / Redis;Mongo / Redis 失敗只記 warn。
+
+### 合併疑似同一台(`SqlDeviceStore.merge`,P3、PLATFORM-PLAN A1)
+
+一個交易,先以 `UPDLOCK, HOLDLOCK` 鎖定兩列 `ita.device` 再檢查(目標 / 來源未合併過、目標未退役、來源為 active):
+
+1. 資產取 `collected_at` 較新的一份:刪除另一份的 `device_inventory` / `device_nic` / `device_software`,來源的改掛到目標。
+2. `device_event` 改掛到目標;兩台尚未結束(queued / sent / acked / running)的 `ita.command` 一律 `canceled`(`error_code = DEVICE_MERGED`),再把來源的指令改掛到目標。
+3. 來源 `cert_dn` 改為 `merged:<來源 device_id>`(釋放唯一鍵)、`status = retired`、`merged_into`、`retired_at`;目標改用來源的 `cert_dn` / `cert_fp` / 電腦名稱 / Agent 版本 / 硬體指紋 / 時鐘偏差,`first_seen_at` 取較早、`last_seen_at` 取較晚,**狀態不變**。
+4. 目標寫一筆 `merged` 事件。
+
+交易後(失敗只記 warn):關閉兩台的 WebSocket(Agent 重連時以 DN 對到目標)、Mongo `snapshots` / `heartbeats` 的 `device_id` 改為目標、清除 Redis 兩台的 hash 與來源的 online 鍵。
 
 ## 2. MongoDB 7(資料庫 `ita_{env}`)
 

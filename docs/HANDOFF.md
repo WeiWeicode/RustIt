@@ -18,13 +18,13 @@
 
 ## 2. 下一步
 
-0. **下一個工作階段從這裡開始(2026-10-15 收工時)**:
-   - VM `DESKTOP-1TB2UMP` 升級 Agent **0.4.1**:MSI 已放主機 2 `C:\Users\user\agent-msi\GigaNexusAgent-0.4.1-test.msi`(SHA-256 `880e46d9…da794c`,自 develop `8568f55` 建置),由需求方在 VM 以系統管理員執行 `msiexec /i … /qn /l*v install-0.4.1.log`;確認 GigaItApp 電腦詳情 Agent 版本 0.4.1,再收集一次日誌,zip 內檔案時間應為日誌修改時間(不是 1980-01-01)。
-   - 選下一階段:P3 資料呈現(可交給同仁)、P5 監測(Watchdog)、P8-1 使用者端外殼;開工前讀 PLATFORM-PLAN 對應章節。
+0. **下一個工作階段從這裡開始(2026-10-16)**:
+   - VM `DESKTOP-1TB2UMP` 已由需求方升級 Agent **0.4.1**(2026-10-16;MSI SHA-256 `880e46d9…da794c`,自 develop `8568f55` 建置)。尚待確認:收集一次日誌,zip 內檔案時間應為日誌修改時間(不是 1980-01-01)。
+   - **P3 資料呈現實作完成(未合併)**:設計 [P3-DATA-DESIGN.md](P3-DATA-DESIGN.md)(需求方 2026-10-16 確認);RustIt `feature/p3-data`(含設計文件提交)、GigaItApp `feature/p3-device-tabs`。測試全過(設計 §6.1)。**進度**:GigaItApp 已合併 develop(MR !4,2026-10-16;MR !3 誤合到 main,內容相同);migration 0004 已套用 `giganexus_It_Agent_test`(2026-10-16,經需求方同意,`ita.device_software` 與索引已建)。**下一步依序**:RustIt MR 合併 develop(新版啟動時回填軟體清單)→ 瀏覽器實測(各 Tab、篩選、下載)→ P3-4:VM 改名 + 以新名稱簽新憑證,驗證「疑似同一台」與合併(設計 §6)。上線前仍須完成資料範圍依 `cos` 過濾(指南 E6)。
    - P4 後續(未排程,見 `P4-COMMAND-DESIGN.md` §6.1、§8.4):WebSocket 訊息速率上限、`result` 依類型以 schema 限制、慢速上傳佔用回報名額、`ita.command_file.command_ref` 唯一索引(多實例前)、附檔總量上限與磁碟告警、批次下指令畫面。
 1. **P1 已完成**(2026-10-14 Hyper-V VM 驗證 7 項通過,見下方「P1 收尾:VM 測試」)。Win11 VM 可之後補測;VM 保留作 P2 以後的測試機(檢查點「匯入憑證」)。
 2. **P3 資料呈現**、**P8-1 使用者端外殼與我的電腦** 可並行:P3(管理 API 回完整資產 + GigaItApp 詳情分 Tab)只動後端與前端,適合交給同仁。
-3. **P2 已完成**(主機端與 Agent 端已合併 `develop`;2026-10-15 P2-3 VM 驗證 7 項通過,見下方)。驗證時發現裝置被停用期間會記成 `offline_period`(rejected),已於 0.2.1 排除(BugFix.md 2026-10-15;測試區 VM 仍為 0.2.0,下次重建 MSI 時一併升級)。**P4 指令通道已完成**(測試區;設計 `P4-COMMAND-DESIGN.md`,需求方 2026-10-15 確認;甘特圖 W6-17;Gateway 指南 v0.6 已回寫):P4-1 已合併 develop;P4-2 已合併並於 2026-10-15 測試區 VM 驗證通過(見下方「P4 測試區 VM 驗證」;含 P4-1 的服務模式 `agent.restart`);`endpoint.command.basic` 已由 GigaItApp `gateway-rbac.yaml` 按鈕節點 `it.endpoint-device.command` 授予 it-admin(GigaItApp MR !1)。**P4-3(2026-10-15,GigaItApp MR !2)**:電腦詳情「指令」Tab(六個指令、結果、日誌下載、指令紀錄、取消)與「端點管理 › 指令紀錄」Tab,本機連測試區 Gateway 對 VM 實測通過(GigaItApp NewFeatures 2026-10-15);已合併(GigaItApp `02f12d2`),「指令紀錄」Tab 由 CI rbac-test 套用權限後可見。小項已修(BugFix.md 2026-10-15,Agent 0.4.1:zip 檔案時間、瞬間完成的指令補 started_at;VM 仍為 0.4.0,下次重建 MSI 時升級)。
+3. **P2 已完成**(主機端與 Agent 端已合併 `develop`;2026-10-15 P2-3 VM 驗證 7 項通過,見下方)。驗證時發現裝置被停用期間會記成 `offline_period`(rejected),已於 0.2.1 排除(BugFix.md 2026-10-15;測試區 VM 已升級)。**P4 指令通道已完成**(測試區;設計 `P4-COMMAND-DESIGN.md`,需求方 2026-10-15 確認;甘特圖 W6-17;Gateway 指南 v0.6 已回寫):P4-1 已合併 develop;P4-2 已合併並於 2026-10-15 測試區 VM 驗證通過(見下方「P4 測試區 VM 驗證」;含 P4-1 的服務模式 `agent.restart`);`endpoint.command.basic` 已由 GigaItApp `gateway-rbac.yaml` 按鈕節點 `it.endpoint-device.command` 授予 it-admin(GigaItApp MR !1)。**P4-3(2026-10-15,GigaItApp MR !2)**:電腦詳情「指令」Tab(六個指令、結果、日誌下載、指令紀錄、取消)與「端點管理 › 指令紀錄」Tab,本機連測試區 Gateway 對 VM 實測通過(GigaItApp NewFeatures 2026-10-15);已合併(GigaItApp `02f12d2`),「指令紀錄」Tab 由 CI rbac-test 套用權限後可見。小項已修(BugFix.md 2026-10-15,Agent 0.4.1:zip 檔案時間、瞬間完成的指令補 started_at;VM 已於 2026-10-16 升級 0.4.1)。
 
 ### P4 測試區 VM 驗證(2026-10-15)
 
