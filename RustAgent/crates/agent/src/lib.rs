@@ -1,8 +1,8 @@
 //! GigaNexus 端點 Agent(RustIt INTEGRATION-PLAN M2;規範 Gateway ENDPOINT-AGENT-GUIDE §6)。
 //!
-//! 流程:開啟本機暫存([`store`])→ 結束上次未結束的離線期間、記 `agent_started` → 啟動隨機延遲 0–30 秒 → 四個獨立工作
+//! 流程:開啟本機暫存([`store`])→ 結束上次未結束的離線期間、記 `agent_started`(含上次結束原因,P5)→ 啟動隨機延遲 0–30 秒 → 四個獨立工作
 //!   - 資產回報([`inventory`]):蒐集 → 本機暫存 → `POST /agent/v1/inventory`(多份時先 `/sync` 比對)
-//!   - WebSocket([`ws`]):`hello`(端點時間、硬體指紋)+ 每 30 秒 `heartbeat`,斷線退避重連;`hello_ack` 的主機設定寫入本機
+//!   - WebSocket([`ws`]):`hello`(端點時間、硬體指紋、憑證到期日)+ 每 30 秒 `heartbeat`(附健康摘要,P5),斷線退避重連;`hello_ack` 的主機設定寫入本機
 //!   - 端點事件([`events`]):本機暫存 → `POST /agent/v1/events`
 //!   - USB 插拔([`usb`]):每 10 秒比對可移除磁碟區
 //!   - 指令([`command`],P4):WebSocket 收到 `command` 在背景執行,結果先寫本機再經 WebSocket 回報;
@@ -47,6 +47,12 @@ pub static SERVICE_MODE: AtomicBool = AtomicBool::new(false);
 static BASE_LOG_LEVEL: std::sync::OnceLock<log::LevelFilter> = std::sync::OnceLock::new();
 /// 依指令 agent.restart 結束:服務以專屬結束代碼停止,由失敗復原重新啟動
 pub static RESTART_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// 服務收到 Windows 關機(service.rs 設定);結束原因記為 shutdown 而不是 stop
+pub static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// 本機 kv:上次結束原因(P5,agent_started.previous_exit)。啟動時讀出後改為 unexpected,
+/// 收到停止 / 關機 / agent.restart 時改成對應原因;下次啟動讀到 unexpected 表示上次沒有正常結束(被結束行程、當掉、斷電)
+const LAST_EXIT: &str = "last_exit";
 
 /// 各工作共用的狀態
 pub(crate) struct Shared {
@@ -98,7 +104,15 @@ impl Shared {
     /// 指令 agent.restart:結束所有工作,服務以專屬結束代碼停止
     pub fn request_restart(&self) {
         RESTART_REQUESTED.store(true, Ordering::Relaxed);
+        self.mark_exit("restart_command");
         let _ = self.stop.send(true);
+    }
+
+    /// 記下這次的結束原因(收到結束訊號當下就寫:收尾逾時被中斷也不會誤判為非正常結束)
+    fn mark_exit(&self, reason: &str) {
+        if let Err(e) = self.store.lock().set(LAST_EXIT, reason) {
+            warn!("無法記錄結束原因:{e}");
+        }
     }
 
     pub fn is_disabled(&self) -> bool {
@@ -154,8 +168,17 @@ where
 pub async fn run(settings: Settings, mut shutdown: watch::Receiver<bool>) -> Result<(), String> {
     let transport = Transport::new(&settings, &protocol::user_agent())?;
     let store = SharedStore::new(Store::open(&settings.state_dir)?);
-    let (saved_settings, disabled) = {
+    let (saved_settings, disabled, previous_exit) = {
         let s = store.lock();
+        // 上次結束原因;沒有紀錄 = 第一次執行(新安裝或本機暫存重建)。之後先標成 unexpected,正常結束時再改
+        let previous_exit = s
+            .get(LAST_EXIT)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "first_run".into());
+        if let Err(e) = s.set(LAST_EXIT, "unexpected") {
+            warn!("無法記錄執行狀態:{e}");
+        }
         let saved = s
             .get("settings")
             .ok()
@@ -168,16 +191,23 @@ pub async fn run(settings: Settings, mut shutdown: watch::Receiver<bool>) -> Res
         if let Err(e) = s.purge_conn_log(&before) {
             warn!("無法清除舊的連線紀錄:{e}");
         }
-        (saved, disabled)
+        (saved, disabled, previous_exit)
     };
     let events = EventQueue::new(store.clone());
     let conn = ConnTracker::new(store.clone(), events.clone());
     // 上次執行時連不上主機、之後 Agent 停止:以最後一次嘗試結束該期間(停止的時間不算離線)
     conn.recover_after_restart();
+    if previous_exit == "unexpected" {
+        warn!("上次 Agent 沒有正常結束(被結束行程、當掉或斷電)");
+    }
     events.record(
         "agent_started",
         now_rfc3339(),
-        json!({ "agent_version": protocol::AGENT_VERSION }),
+        json!({
+            "agent_version": protocol::AGENT_VERSION,
+            "previous_exit": previous_exit,
+            "boot_time": rustit_collector::boot_time(),
+        }),
     );
     // 所有工作共用的結束訊號:外部停止(服務停止、Ctrl+C)轉送過來,agent.restart 也從這裡結束
     let (stop_tx, stop_rx) = watch::channel(false);
@@ -209,6 +239,11 @@ pub async fn run(settings: Settings, mut shutdown: watch::Receiver<bool>) -> Res
         let mut external = shutdown.clone();
         tokio::spawn(async move {
             if external.wait_for(|s| *s).await.is_ok() {
+                shared.mark_exit(if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+                    "shutdown"
+                } else {
+                    "stop"
+                });
                 let _ = shared.stop.send(true);
             }
         });

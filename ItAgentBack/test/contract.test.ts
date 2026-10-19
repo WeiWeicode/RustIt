@@ -43,6 +43,7 @@ describe('資料契約範例', () => {
       'ws-command-update.sample.json',
       'ws-command.sample.json',
       'ws-heartbeat-ack.sample.json',
+      'ws-heartbeat-health.sample.json',
       'ws-heartbeat.sample.json',
       'ws-hello-ack.sample.json',
       'ws-hello.sample.json',
@@ -74,6 +75,20 @@ describe('資料契約範例', () => {
 
   it('WebSocket 信封:hello / hello_ack / heartbeat / heartbeat_ack / unsupported', () => {
     for (const f of ['ws-hello', 'ws-hello-ack', 'ws-heartbeat', 'ws-heartbeat-ack', 'ws-unsupported']) check(CONTRACT_IDS.wsEnvelope, `${f}.sample.json`);
+  });
+
+  it('P5:心跳健康摘要、hello 憑證到期日、agent_started 上次結束原因;超出範圍不通過', () => {
+    check(CONTRACT_IDS.wsEnvelope, 'ws-heartbeat-health.sample.json');
+    const validate = compileWsEnvelope(CONTRACTS_DIR);
+    const hb = example<{ body: { health: Record<string, unknown> } }>('ws-heartbeat-health.sample.json');
+    assert.equal(validate({ ...hb, body: { ...hb.body, health: { ...hb.body.health, cpu_pct: 101 } } }), false);
+    assert.equal(validate({ ...hb, body: { ...hb.body, health: { ...hb.body.health, disk_min_free_pct: 12.5 } } }), false);
+    // 舊版 Agent 沒有 health
+    check(CONTRACT_IDS.wsEnvelope, 'ws-heartbeat.sample.json');
+    const ev = ajv.getSchema(CONTRACT_IDS.event)!;
+    const base = { event_id: '3b9d2f5e-7c41-4a8e-9f06-1d2c3b4a5e61', occurred_at: '2026-10-06T09:00:00Z', type: 'agent_started' };
+    assert.ok(ev({ events: [{ ...base, data: { agent_version: '0.4.2' } }] }));
+    assert.equal(ev({ events: [{ ...base, data: { agent_version: '0.5.0', previous_exit: 'crashed' } }] }), false);
   });
 
   it('WebSocket 指令(P4):command / command_update / command_update_ack / prepare_shutdown;缺必要欄位、未知 state 不通過', () => {

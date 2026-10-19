@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { primaryIpv4, type InventoryRequest } from '../src/contracts.js';
 import { AppError } from '../src/errors.js';
+import { AlertService, DEFAULT_THRESHOLDS } from '../src/services/alert-service.js';
 import { CommandDispatcher } from '../src/services/command-dispatcher.js';
 import { CommandFileService } from '../src/services/command-files.js';
 import { DeviceService } from '../src/services/device-service.js';
@@ -15,6 +16,10 @@ import { SCOPE_ALL, type Scope } from '../src/services/scope.js';
 import type {
   Actor,
   AgentEvent,
+  AlertFilter,
+  AlertOpen,
+  AlertRecord,
+  AlertRule,
   BatchRecord,
   CompanyChange,
   CompanySource,
@@ -29,16 +34,22 @@ import type {
   DeviceEventRecord,
   DeviceEventType,
   DeviceFilter,
+  DeviceHealthRecord,
   DeviceRecord,
   DeviceRow,
   DeviceStatus,
   DeviceStore,
+  HealthSample,
+  HostEventInput,
   InventorySnapshot,
   MergeResult,
+  MonitorStore,
+  MonitorTarget,
   NewBatch,
   NewCommand,
   NewCommandFile,
   OnlineInfo,
+  SavedHostEvent,
   SnapshotStore,
   StateStore,
   TouchPatch,
@@ -74,6 +85,8 @@ export class MemoryDeviceStore extends Failable implements DeviceStore {
   inventories = new Map<number, InventorySnapshot>();
   events: { id?: number; deviceRef: number | null; type: DeviceEventType; detail: string }[] = [];
   agentEvents: (AgentEvent & { id?: number; deviceRef: number; receivedAt: Date })[] = [];
+  /** 主機比對產生的事件(P5,軟硬體變更) */
+  hostEvents: (SavedHostEvent & { deviceRef: number; occurredAt: Date })[] = [];
   /** 主機稽核與端點事件共用的寫入順序(對應 device_event.id) */
   private eventSeq = 0;
 
@@ -147,14 +160,18 @@ export class MemoryDeviceStore extends Failable implements DeviceStore {
     const s = this.inventories.get(deviceRef);
     return s ? { agentSeq: s.agentSeq, contentHash: s.contentHash, collectedAt: s.collectedAt } : null;
   }
-  async saveInventory(device: DeviceRecord, s: InventorySnapshot) {
+  async saveInventory(device: DeviceRecord, s: InventorySnapshot, diff?: (prevPayload: string | null) => HostEventInput[]) {
     this.hit('saveInventory');
+    const changes = diff ? diff(this.inventories.get(device.id)?.payload ?? null) : [];
+    const saved = changes.map((e) => ({ ...e, id: ++this.eventSeq }));
+    this.hostEvents.push(...saved.map((e) => ({ ...e, deviceRef: device.id, occurredAt: s.collectedAt })));
     this.inventories.set(device.id, s);
     const d = this.byId(device.id);
     d.computerName = s.inventory.system.host_name;
     d.agentVersion = s.agentVersion;
     d.lastSeenAt = s.receivedAt;
     d.lastInventoryAt = s.receivedAt;
+    return saved;
   }
   async markInventoryUnchanged(deviceRef: number, at: Date) {
     this.hit('markInventoryUnchanged');
@@ -219,6 +236,9 @@ export class MemoryDeviceStore extends Failable implements DeviceStore {
       ...this.agentEvents
         .filter((e) => e.deviceRef === deviceRef)
         .map((e) => ({ id: e.id ?? 0, type: e.type, occurredAt: e.occurredAt, receivedAt: e.receivedAt, detail: null, data: e.data })),
+      ...this.hostEvents
+        .filter((e) => e.deviceRef === deviceRef)
+        .map((e) => ({ id: e.id, type: e.type, occurredAt: e.occurredAt, receivedAt: null, detail: null, data: JSON.stringify(e.data) })),
     ];
     return all
       .filter((e) => beforeId === undefined || e.id < beforeId)
@@ -321,7 +341,7 @@ export class MemoryDeviceStore extends Failable implements DeviceStore {
 
 export class MemorySnapshotStore extends Failable implements SnapshotStore {
   snapshots: { deviceId: string; agentSeq: number; contentHash: string }[] = [];
-  heartbeats: { deviceId: string; at: Date }[] = [];
+  heartbeats: { deviceId: string; at: Date; body?: Record<string, unknown> }[] = [];
   async ping() {
     this.hit('ping');
   }
@@ -330,9 +350,17 @@ export class MemorySnapshotStore extends Failable implements SnapshotStore {
     if (!this.snapshots.some((s) => s.deviceId === deviceId && s.agentSeq === snapshot.agentSeq && s.contentHash === snapshot.contentHash))
       this.snapshots.push({ deviceId, agentSeq: snapshot.agentSeq, contentHash: snapshot.contentHash });
   }
-  async recordHeartbeat({ deviceId, at }: { deviceId: string; at: Date }) {
+  async recordHeartbeat({ deviceId, at, body }: { deviceId: string; at: Date; body: Record<string, unknown> }) {
     this.hit('recordHeartbeat');
-    this.heartbeats.push({ deviceId, at });
+    this.heartbeats.push({ deviceId, at, body });
+  }
+  async healthSince(deviceId: string, since: Date, limit: number) {
+    this.hit('healthSince');
+    return this.heartbeats
+      .filter((h) => h.deviceId === deviceId && h.at >= since && h.body?.health)
+      .sort((a, b) => a.at.getTime() - b.at.getTime())
+      .slice(-limit)
+      .map((h) => ({ at: h.at, health: h.body!.health as Record<string, unknown> }));
   }
   async reassign(fromDeviceId: string, toDeviceId: string) {
     this.hit('reassign');
@@ -394,8 +422,185 @@ export function setup(opts: { companyDomains?: Map<string, string> } = {}) {
   const mongo = new MemorySnapshotStore();
   const redis = new MemoryStateStore();
   const clock = new Clock();
-  const service = new DeviceService(sql, mongo, redis, { heartbeatIntervalSec: 30, now: clock.now, companyDomains: opts.companyDomains });
-  return { sql, mongo, redis, clock, service };
+  const monitor = new MemoryMonitorStore(sql);
+  let alerts: AlertService | undefined;
+  const service = new DeviceService(sql, mongo, redis, {
+    heartbeatIntervalSec: 30,
+    now: clock.now,
+    companyDomains: opts.companyDomains,
+    monitor,
+    onHostEvents: (ctx, ref, events) => alerts!.onHostEvents(ctx, ref, events),
+  });
+  alerts = new AlertService(monitor, (id) => service.lookup(id), DEFAULT_THRESHOLDS, clock.now);
+  return { sql, mongo, redis, clock, service, monitor, alerts };
+}
+
+type MemoryAlert = AlertOpen & {
+  id: number;
+  alertId: string;
+  state: 'open' | 'resolved';
+  openedAt: Date;
+  lastSeenAt: Date;
+  resolvedAt: Date | null;
+  resolvedBy: 'auto' | 'manual' | null;
+  resolvedByEmp: string | null;
+  resolvedByName: string | null;
+  resolveNote: string | null;
+};
+
+/** 監測儲存(記憶體版;與 SqlMonitorStore 相同的「同一台同一規則只有一筆未結束」語意) */
+export class MemoryMonitorStore extends Failable implements MonitorStore {
+  health = new Map<number, DeviceHealthRecord>();
+  alerts: MemoryAlert[] = [];
+  constructor(private readonly devices: MemoryDeviceStore) {
+    super();
+  }
+  row(ref: number): DeviceHealthRecord {
+    let h = this.health.get(ref);
+    if (!h) {
+      h = {
+        deviceRef: ref,
+        healthAt: null,
+        certNotAfter: null,
+        watchdogVersion: null,
+        watchdogReportAt: null,
+        agentServiceState: null,
+        agentStartType: null,
+        agentStatusOk: null,
+        agentLastError: null,
+        agentRestarts24h: null,
+      };
+      this.health.set(ref, h);
+    }
+    return h;
+  }
+  async saveHealth(ref: number, at: Date, s: HealthSample) {
+    this.hit('saveHealth');
+    const h = this.row(ref);
+    // 與 SQL 相同:這一則沒有的欄位保留上一次的值
+    Object.assign(h, s, { healthAt: at });
+  }
+  async saveCertNotAfter(ref: number, notAfter: Date) {
+    this.hit('saveCertNotAfter');
+    this.row(ref).certNotAfter = notAfter;
+  }
+  async healthOf(refs: number[]) {
+    this.hit('healthOf');
+    return new Map(refs.filter((r) => this.health.has(r)).map((r) => [r, { ...this.health.get(r)! }]));
+  }
+  async monitorTargets(since: Date): Promise<MonitorTarget[]> {
+    this.hit('monitorTargets');
+    return this.devices.devices
+      .filter((d) => d.status === 'active' && !d.mergedInto)
+      .map((d) => ({
+        deviceRef: d.id,
+        lastSeenAt: d.lastSeenAt,
+        clockSkewMs: d.clockSkewMs,
+        health: this.health.get(d.id) ? { ...this.health.get(d.id)! } : null,
+        unexpectedRestarts24h: this.devices.agentEvents.filter(
+          (e) => e.deviceRef === d.id && e.type === 'agent_started' && e.occurredAt >= since && e.data.includes('"previous_exit":"unexpected"'),
+        ).length,
+        openRules: this.alerts.filter((a) => a.deviceRef === d.id && a.state === 'open').map((a) => a.rule),
+      }));
+  }
+  async openAlert(a: AlertOpen) {
+    this.hit('openAlert');
+    const open = this.alerts.find((x) => x.deviceRef === a.deviceRef && x.rule === a.rule && x.state === 'open');
+    if (open) {
+      Object.assign(open, { lastSeenAt: a.at, severity: a.severity, detail: a.keepDetail ? open.detail : a.detail, eventRef: open.eventRef ?? a.eventRef ?? null });
+      return { alertId: open.alertId, created: false };
+    }
+    const alertId = randomUUID();
+    this.alerts.push({
+      ...a,
+      eventRef: a.eventRef ?? null,
+      id: this.alerts.length + 1,
+      alertId,
+      state: 'open',
+      openedAt: a.at,
+      lastSeenAt: a.at,
+      resolvedAt: null,
+      resolvedBy: null,
+      resolvedByEmp: null,
+      resolvedByName: null,
+      resolveNote: null,
+    });
+    return { alertId, created: true };
+  }
+  async resolveAuto(ref: number, rule: AlertRule, at: Date, note: string) {
+    this.hit('resolveAuto');
+    const open = this.alerts.find((x) => x.deviceRef === ref && x.rule === rule && x.state === 'open');
+    if (!open) return false;
+    Object.assign(open, { state: 'resolved', resolvedAt: at, resolvedBy: 'auto', resolveNote: note });
+    return true;
+  }
+  async resolveInactive(at: Date) {
+    this.hit('resolveInactive');
+    let n = 0;
+    for (const a of this.alerts) {
+      const d = this.devices.byId(a.deviceRef);
+      if (a.state === 'open' && (d.status !== 'active' || d.mergedInto)) {
+        Object.assign(a, { state: 'resolved', resolvedAt: at, resolvedBy: 'auto', resolveNote: '裝置已停用' });
+        n++;
+      }
+    }
+    return n;
+  }
+  async resolveManual(alertId: string, at: Date, actor: Actor, note: string) {
+    this.hit('resolveManual');
+    const a = this.alerts.find((x) => x.alertId === alertId && x.state === 'open');
+    if (!a) return false;
+    Object.assign(a, { state: 'resolved', resolvedAt: at, resolvedBy: 'manual', resolvedByEmp: actor.emp, resolvedByName: actor.name, resolveNote: note });
+    return true;
+  }
+  private rec(a: MemoryAlert): AlertRecord {
+    const d = this.devices.byId(a.deviceRef);
+    return {
+      id: a.id,
+      alertId: a.alertId,
+      deviceRef: a.deviceRef,
+      deviceId: d.deviceId,
+      computerName: d.computerName,
+      deviceCompany: d.company,
+      rule: a.rule,
+      severity: a.severity,
+      state: a.state,
+      openedAt: a.openedAt,
+      lastSeenAt: a.lastSeenAt,
+      resolvedAt: a.resolvedAt,
+      resolvedBy: a.resolvedBy,
+      resolvedByEmp: a.resolvedByEmp,
+      resolvedByName: a.resolvedByName,
+      resolveNote: a.resolveNote,
+      detail: a.detail,
+      eventRef: a.eventRef ?? null,
+    };
+  }
+  async getAlert(alertId: string) {
+    this.hit('getAlert');
+    const a = this.alerts.find((x) => x.alertId === alertId);
+    return a ? this.rec(a) : null;
+  }
+  async listAlerts(f: AlertFilter) {
+    this.hit('listAlerts');
+    return this.alerts
+      .filter((a) => (!f.state || a.state === f.state) && (!f.rule || a.rule === f.rule) && (!f.severity || a.severity === f.severity))
+      .filter((a) => f.deviceRef === undefined || a.deviceRef === f.deviceRef)
+      .filter((a) => f.beforeId === undefined || a.id < f.beforeId)
+      .filter((a) => {
+        const c = this.devices.byId(a.deviceRef).company;
+        return !f.companies || (c !== null && f.companies.includes(c));
+      })
+      .sort((a, b) => b.id - a.id)
+      .slice(0, f.limit)
+      .map((a) => this.rec(a));
+  }
+  async openAlertCounts(refs: number[]) {
+    this.hit('openAlertCounts');
+    const m = new Map<number, number>();
+    for (const a of this.alerts) if (a.state === 'open' && refs.includes(a.deviceRef)) m.set(a.deviceRef, (m.get(a.deviceRef) ?? 0) + 1);
+    return m;
+  }
 }
 
 /** 範例回報,可覆寫序號、時間、hash */

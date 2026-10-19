@@ -18,6 +18,8 @@ import { RedisStateStore } from '../../src/stores/redis-store.js';
 import { SqlCommandStore } from '../../src/stores/sql-command-store.js';
 import { CommandFileService } from '../../src/services/command-files.js';
 import { SqlDeviceStore } from '../../src/stores/sql-store.js';
+import { SqlMonitorStore } from '../../src/stores/sql-monitor-store.js';
+import { AlertService } from '../../src/services/alert-service.js';
 import { CommandDispatcher } from '../../src/services/command-dispatcher.js';
 import { parseCompanyDomains } from '../../src/services/company.js';
 import { MongoClient } from 'mongodb';
@@ -395,5 +397,68 @@ describe('SQL Server + Mongo + Redis', () => {
     } finally {
       await pool.close();
     }
+  });
+
+  it('P5(0006):健康落盤與讀取、憑證到期日、資產變更事件(同一交易)、告警開 / 更新 / 自動關閉 / 手動關閉、清單 IN、停用時關閉', async () => {
+    const monitor = new SqlMonitorStore(() => sql.connection());
+    let alerts: AlertService | undefined;
+    const svc = new DeviceService(sql, mongo, redis, {
+      heartbeatIntervalSec: 30,
+      monitor,
+      onHostEvents: (c, ref, events) => alerts!.onHostEvents(c, ref, events),
+    });
+    alerts = new AlertService(monitor, (id) => svc.lookup(id));
+    const d = await svc.identify(ctx, 'O=GigaNexus Dev,CN=PC-P5', '9'.repeat(40));
+    await svc.connected(ctx, d, new FakeConnection());
+
+    // 健康:第一則落盤;超出範圍的值不讓整筆失敗
+    await svc.heartbeat(ctx, d, { health: { cpu_pct: 12, mem_used_pct: 63, disk_min_free_pct: 4, disk_min_free_drive: 'C:', uptime_s: 100, agent_rss_mb: 14 } });
+    await monitor.saveCertNotAfter(d.id, new Date('2026-11-01T00:00:00Z'));
+    const h = (await monitor.healthOf([d.id])).get(d.id)!;
+    assert.deepEqual([h.cpuPct, h.memUsedPct, h.diskMinFreePct, h.diskMinFreeDrive, h.uptimeS, h.agentRssMb], [12, 63, 4, 'C:', 100, 14]);
+    assert.equal(h.certNotAfter?.toISOString(), '2026-11-01T00:00:00.000Z');
+    await monitor.saveHealth(d.id, new Date(), { cpuPct: 250, memUsedPct: -3, diskMinFreePct: 4 });
+    assert.equal((await monitor.healthOf([d.id])).get(d.id)!.cpuPct, 100);
+
+    // 資產變更:第二份移除一個軟體、換 BIOS 序號 → 兩筆主機事件 + 硬體告警
+    const inv1 = inventoryRequest({ content_hash: '1'.repeat(64), agent_seq: 1, collected_at: '2026-10-19T00:00:00Z' });
+    assert.equal((await svc.ingestInventory(ctx, d, inv1)).result, 'stored');
+    const inv2 = inventoryRequest({ content_hash: '2'.repeat(64), agent_seq: 2, collected_at: '2026-10-19T01:00:00Z' });
+    inv2.inventory = structuredClone(inv2.inventory);
+    inv2.inventory.software.shift();
+    inv2.inventory.identity.bios_serial = 'P5-NEW-SN';
+    assert.equal((await svc.ingestInventory(ctx, d, inv2)).result, 'stored');
+    const ev = await svc.listEvents(ctx, d.deviceId, undefined, 20);
+    assert.ok(ev.items.some((e) => e.type === 'software_removed'));
+    assert.ok(ev.items.some((e) => e.type === 'hardware_changed' && (e.data as { component: string }).component === 'bios'));
+
+    // 掃描:磁碟 4%、憑證 30 天內 → 開;再掃一次只更新;hardware_changed 不自動關
+    const first = await alerts.sweep(ctx);
+    assert.ok(first.opened >= 2);
+    assert.equal((await alerts.sweep(ctx)).opened, 0);
+    const open = await monitor.listAlerts({ state: 'open', deviceRef: d.id, limit: 50 });
+    assert.deepEqual(open.map((a) => a.rule).sort(), ['cert_expiring', 'disk_low', 'hardware_changed']);
+    assert.equal(open.find((a) => a.rule === 'disk_low')!.severity, 'critical');
+    assert.equal((await monitor.openAlertCounts([d.id])).get(d.id), 3);
+    assert.equal((await monitor.listAlerts({ state: 'open', companies: [], limit: 50 })).length, 0, 'IN 空清單不回任何列');
+
+    // 恢復 → 自動關閉;手動關閉硬體告警;停用 → 其餘關閉
+    await monitor.saveHealth(d.id, new Date(), { diskMinFreePct: 50 });
+    assert.equal(await monitor.resolveAuto(d.id, 'disk_low', new Date(), '條件已恢復'), true);
+    const hw = open.find((a) => a.rule === 'hardware_changed')!;
+    assert.equal(await monitor.resolveManual(hw.alertId, new Date(), { emp: 'S000001', name: '測試人員' }, '已確認', 'int-p5'), true);
+    assert.equal(await monitor.resolveManual(hw.alertId, new Date(), { emp: 'S000001', name: '測試人員' }, '已確認', 'int-p5'), false);
+    const hwAfter = (await monitor.getAlert(hw.alertId))!;
+    assert.deepEqual([hwAfter.state, hwAfter.resolvedBy, hwAfter.resolvedByEmp, hwAfter.eventRef !== null], ['resolved', 'manual', 'S000001', true]);
+    await svc.setStatus(ctx, { emp: 'S000001', name: '測試人員' }, d.deviceId, 'disabled', '整合測試');
+    assert.ok((await monitor.resolveInactive(new Date())) >= 1);
+    assert.equal((await monitor.openAlertCounts([d.id])).get(d.id), undefined);
+
+    // 非正常重啟的計數(LIKE data)
+    const e = await svc.identify(ctx, 'O=GigaNexus Dev,CN=PC-P5-R', '6'.repeat(40));
+    const started = (i: number, exit: string) => ({ event_id: `00000000-0000-4000-8000-0000000005${String(i).padStart(2, '0')}`, type: 'agent_started', occurred_at: new Date().toISOString(), data: { agent_version: '0.5.0', previous_exit: exit } });
+    await svc.ingestEvents(ctx, e, { events: [started(1, 'unexpected'), started(2, 'stop'), started(3, 'unexpected')] });
+    const t = (await monitor.monitorTargets(new Date(Date.now() - 86_400_000))).find((x) => x.deviceRef === e.id)!;
+    assert.equal(t.unexpectedRestarts24h, 2);
   });
 });

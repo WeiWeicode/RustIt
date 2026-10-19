@@ -8,6 +8,7 @@
  *   - POST /agent/v1/commands/{commandId}/files(指令附檔,logs.collect 日誌 zip,上限 20 MB;command-file.schema.json,P4-2)
  *   - HTTPS 回報同時處理中的請求超過 AGENT_MAX_INFLIGHT 時回 429 ITA_BUSY + Retry-After,在驗證身分前就擋下(A3)
  *   - 與 :51240 是不同的 Fastify 實例,不共用 hook(§5.2);日誌帶 x-request-id、DN、指紋(§5.7)
+ *   - 告警評估(P5):每 5 分鐘由這裡的計時器呼叫 AlertService.sweep(與心跳逾時、指令逾期掃描同一處管理)
  *   - 監控(giga-observe 服務 endpoint-agent,與管理 API 分開的 Key):HTTPS 回報逐筆;WebSocket 每條連線關閉時記一筆
  *     (method WS、持續時間、關閉碼、訊息數;非正常關閉為 warn);心跳附上在線連線數。Agent 的 heartbeat 訊息不逐筆記錄(量大)
  */
@@ -30,6 +31,7 @@ import {
   type WsEnvelope,
 } from './contracts.js';
 import { AppError } from './errors.js';
+import type { AlertService } from './services/alert-service.js';
 import type { CommandDispatcher, CommandUpdateBody } from './services/command-dispatcher.js';
 import type { CommandFileService } from './services/command-files.js';
 import type { AgentConnection, Ctx, DeviceService } from './services/device-service.js';
@@ -61,6 +63,10 @@ export interface AgentAppOptions {
   files?: CommandFileService;
   /** 到期附檔清除間隔(毫秒) */
   fileSweepIntervalMs?: number;
+  /** 告警評估(P5;省略 = 不評估) */
+  alerts?: AlertService;
+  /** 告警評估間隔(毫秒) */
+  alertSweepIntervalMs?: number;
   /** giga-observe 監控(loadMonitorEnv;省略 = 不監控) */
   monitor?: MonitorEnv;
   /** 監控心跳附帶的相依服務狀態(SQL Server / Mongo / Redis) */
@@ -342,6 +348,7 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
   let timer: NodeJS.Timeout | undefined;
   let commandTimer: NodeJS.Timeout | undefined;
   let fileTimer: NodeJS.Timeout | undefined;
+  let alertTimer: NodeJS.Timeout | undefined;
   app.addHook('onReady', async () => {
     timer = setInterval(() => void service.sweep({ log: app.log, requestId: 'sweep' }), opts.sweepIntervalMs ?? 10_000);
     timer.unref();
@@ -355,11 +362,18 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
       fileTimer = setInterval(() => void files.sweep({ log: app.log, requestId: 'file-sweep' }), opts.fileSweepIntervalMs ?? 3_600_000);
       fileTimer.unref();
     }
+    // 告警評估,每 5 分鐘(P5-MONITOR-DESIGN §4)
+    const alerts = opts.alerts;
+    if (alerts) {
+      alertTimer = setInterval(() => void alerts.sweep({ log: app.log, requestId: 'alert-sweep' }), opts.alertSweepIntervalMs ?? 300_000);
+      alertTimer.unref();
+    }
   });
   app.addHook('preClose', async () => {
     clearInterval(timer);
     clearInterval(commandTimer);
     clearInterval(fileTimer);
+    clearInterval(alertTimer);
     await service.closeAll();
   });
   return app;

@@ -26,8 +26,22 @@
       "allOf": [
         { "if": { "properties": { "type": { "const": "offline_period" } } }, "then": { "required": ["data"], "properties": { "data": { "$ref": "#/definitions/OfflinePeriod" } } } },
         { "if": { "properties": { "type": { "enum": ["usb_inserted", "usb_removed"] } } }, "then": { "required": ["data"], "properties": { "data": { "$ref": "#/definitions/UsbVolume" } } } },
-        { "if": { "properties": { "type": { "const": "local_overflow" } } }, "then": { "required": ["data"], "properties": { "data": { "$ref": "#/definitions/LocalOverflow" } } } }
+        { "if": { "properties": { "type": { "const": "local_overflow" } } }, "then": { "required": ["data"], "properties": { "data": { "$ref": "#/definitions/LocalOverflow" } } } },
+        { "if": { "properties": { "type": { "const": "agent_started" } } }, "then": { "properties": { "data": { "$ref": "#/definitions/AgentStarted" } } } }
       ]
+    },
+    "AgentStarted": {
+      "description": "Agent 行程啟動(P2);P5 起帶上次結束原因,Server 以 previous_exit = unexpected 的筆數判斷「24 小時內非正常重啟」告警(P5-MONITOR-DESIGN §4)。0.5.0 之前的 Agent 只有 agent_version",
+      "type": "object",
+      "properties": {
+        "agent_version": { "type": "string", "maxLength": 32 },
+        "previous_exit": {
+          "type": "string",
+          "enum": ["stop", "shutdown", "restart_command", "unexpected", "first_run"],
+          "description": "上次結束原因:stop 服務被停止、shutdown Windows 關機、restart_command 指令 agent.restart、unexpected 上次沒有正常結束(被結束行程、當掉、斷電、被 Watchdog 強制重啟)、first_run 本機暫存沒有任何執行紀錄(新安裝或暫存重建)"
+        },
+        "boot_time": { "type": "integer", "minimum": 0, "description": "Windows 開機時間(Unix 秒)" }
+      }
     },
     "OfflinePeriod": {
       "description": "Agent 連不上主機的一段期間(主機有回應的 429 / 400 不算);恢復後送出一筆,不到 60 秒的短暫中斷不送。occurred_at = started_at。期間內 Agent 重啟(10 分鐘內)視為同一段;停止超過 10 分鐘(關機)則以最後一次嘗試結束,停止的時間不算,由主機以最後心跳判斷",

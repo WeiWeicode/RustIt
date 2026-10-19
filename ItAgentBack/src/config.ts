@@ -12,7 +12,9 @@
  *   DEV_SKIP_TOKEN            dev 專用:管理 API 不驗證 X-Internal-Token(本機 GigaItApp proxy 直連)
  *   MONITOR_URL + MONITOR_API_KEY_FILE        管理 API 的監控(giga-observe 服務 endpoint-api)
  *   AGENT_MONITOR_API_KEY_FILE(或 _KEY)      Agent 通道的監控(服務 endpoint-agent,另一把 Key;同一個 MONITOR_URL)
- *   AGENT_INVENTORY_INTERVAL_SEC / AGENT_USB_EVENTS   主機下發給 Agent 的設定(hello_ack.settings;PLATFORM-PLAN §4.2),預設 3600 / 1
+ *   AGENT_INVENTORY_INTERVAL_SEC / AGENT_USB_EVENTS / AGENT_HEALTH_ENABLED   主機下發給 Agent 的設定(hello_ack.settings;PLATFORM-PLAN §4.2),預設 3600 / 1 / 1
+ *   ALERT_OFFLINE_DAYS / ALERT_DISK_FREE_PCT / ALERT_DISK_CLEAR_PCT / ALERT_RESTARTS_24H / ALERT_CERT_DAYS / ALERT_SILENT_MIN
+ *                             告警門檻(P5-MONITOR-DESIGN §4),預設 7 / 10 / 15 / 3 / 30 / 15
  *   AGENT_MAX_INFLIGHT / AGENT_BUSY_RETRY_AFTER_SEC  HTTPS 回報同時處理上限,超過回 429 + Retry-After(A3),預設 32 / 30
  *   COMMAND_FILES_DIR         指令附檔(logs.collect 日誌 zip)存放目錄;test / prod 必填(容器 /data/command-files),dev 預設 data/dev/command-files
  *   COMMAND_FILE_KEEP_DAYS    指令附檔保存天數 14–30,預設 14(PLATFORM-PLAN B5)
@@ -24,6 +26,7 @@ import { readFileSync } from 'node:fs';
 import { isGatewayPort, loadGatewayEnv, loadMonitorEnv, type GatewayEnv, type MonitorEnv } from '@giganexus/backend-sdk';
 import type { AgentSettings } from './contracts.js';
 import { parseCompanyDomains } from './services/company.js';
+import { DEFAULT_THRESHOLDS, type AlertThresholds } from './services/alert-service.js';
 
 export interface SqlConfig {
   server: string;
@@ -74,6 +77,8 @@ export interface Config {
   scopeAllRoles: string[];
   /** 網域(小寫)→ 公司(E6) */
   companyDomains: Map<string, string>;
+  /** 告警門檻(P5-MONITOR-DESIGN §4) */
+  alertThresholds: AlertThresholds;
 }
 
 export class ConfigError extends Error {
@@ -189,6 +194,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd?: string): 
     agentSettings: {
       inventory_interval_sec: int('AGENT_INVENTORY_INTERVAL_SEC', env.AGENT_INVENTORY_INTERVAL_SEC, 3600, 300, 86400),
       usb_events: env.AGENT_USB_EVENTS === undefined ? true : flag(env.AGENT_USB_EVENTS),
+      health_enabled: env.AGENT_HEALTH_ENABLED === undefined ? true : flag(env.AGENT_HEALTH_ENABLED),
     },
     agentMaxInflight: int('AGENT_MAX_INFLIGHT', env.AGENT_MAX_INFLIGHT, 32, 1, 10000),
     busyRetryAfterSec: int('AGENT_BUSY_RETRY_AFTER_SEC', env.AGENT_BUSY_RETRY_AFTER_SEC, 30, 1, 3600),
@@ -196,5 +202,22 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd?: string): 
     commandFileKeepDays: int('COMMAND_FILE_KEEP_DAYS', env.COMMAND_FILE_KEEP_DAYS, 14, 14, 30),
     scopeAllRoles,
     companyDomains,
+    alertThresholds: alertThresholds(env),
+  };
+}
+
+/** 告警門檻(P5);disk_low 的關閉門檻不可低於開啟門檻(否則會反覆開關) */
+function alertThresholds(env: NodeJS.ProcessEnv): AlertThresholds {
+  const d = DEFAULT_THRESHOLDS;
+  const diskFreePct = int('ALERT_DISK_FREE_PCT', env.ALERT_DISK_FREE_PCT, d.diskFreePct, 1, 50);
+  const diskClearPct = int('ALERT_DISK_CLEAR_PCT', env.ALERT_DISK_CLEAR_PCT, Math.max(d.diskClearPct, diskFreePct), 1, 60);
+  if (diskClearPct < diskFreePct) throw new ConfigError(`ALERT_DISK_CLEAR_PCT(${diskClearPct})不可小於 ALERT_DISK_FREE_PCT(${diskFreePct})`);
+  return {
+    offlineDays: int('ALERT_OFFLINE_DAYS', env.ALERT_OFFLINE_DAYS, d.offlineDays, 1, 365),
+    diskFreePct,
+    diskClearPct,
+    restarts24h: int('ALERT_RESTARTS_24H', env.ALERT_RESTARTS_24H, d.restarts24h, 1, 100),
+    certDays: int('ALERT_CERT_DAYS', env.ALERT_CERT_DAYS, d.certDays, 1, 365),
+    silentMin: int('ALERT_SILENT_MIN', env.ALERT_SILENT_MIN, d.silentMin, 5, 1440),
   };
 }

@@ -135,7 +135,7 @@ P5-1 與 P5-2 互不依賴程式碼(只共用 migration 0006,一次建好),P5-1 
 
 | 檔案 | 內容 |
 | --- | --- |
-| `src/services/health-service.ts`(新) | 心跳健康:Redis `ita:{env}:health:{deviceId}`(TTL 90 秒)、每 5 分鐘寫 `device_health`(與 `touch` 同節奏);Watchdog 回報寫入;走勢查詢(Mongo `heartbeats`,依 5 分鐘分桶取平均 / 最大) |
+| ~~`src/services/health-service.ts`(新)~~ | **實作時併入 `device-service.ts`**(P5-1):心跳健康放進既有的 Redis 在線資訊(`ita:{env}:online:{deviceId}` 加 `health`,不另開 key)、每 5 分鐘寫 `device_health`;走勢查詢(Mongo `heartbeats`,5 分鐘分桶,CPU / 記憶體取平均、磁碟取最小)。Watchdog 回報寫入在 P5-2 |
 | `src/services/change-detector.ts`(新,純函式) | 前後兩份 `ComputerInfo` → 變更清單(§3.2);不碰儲存,單元測試直接餵範例 JSON |
 | `src/services/alert-service.ts`(新) | 規則評估(§4):事件觸發 + 每 5 分鐘掃描;開 / 更新 / 自動關閉;手動關閉 |
 | `src/routes/alerts.ts`(新) | 管理 API(§3.3) |
@@ -147,10 +147,10 @@ PLATFORM-PLAN §5.1 原訂 `event-service.ts` 一個檔案,拆成比對(純函�
 
 ### 3.2 資產前後比對(PLATFORM-PLAN §4.3:由 Server 比對,Agent 不記上一份)
 
-- **何時比**:`ingestInventory` 的 `stored` 分支(內容變了且比目前的新)。`unchanged`、`archived`(補傳的舊快照)不比;第一份資產(沒有上一份)不比;合併後第一份不比(兩台的軟體不同會誤報)。
+- **何時比**:`ingestInventory` 的 `stored` 分支(內容變了且比目前的新)。`unchanged`、`archived`(補傳的舊快照)不比;第一份資產(沒有上一份)不比。合併後第一份**照常比對**(實作時決定:合併的是同一台重灌,差異是真的;大量差異會變成一筆 `software_changed_bulk`)。
 - **在同一個交易**:讀舊 `payload` → 寫新資產 → 寫變更事件;交易失敗整批 503(Agent 重送時重新比對,不會漏也不會重複)。
 - **軟體**:以 `name` 為鍵,同名多版本以版本集合比較 → `software_installed` / `software_removed` / `software_updated`;一份超過 50 項改記一筆 `software_changed_bulk`。
-- **硬體**:`memory_modules`、`physical_disks` 以序號比對(序號空白的項目以「型號 + 容量」比對,VM 常見);`gpus` 以名稱 + PNP 裝置 ID;`bios_serial`、`system_uuid` → `bios` / `board`;CPU 名稱。每個元件一筆 `hardware_changed`。
+- **硬體**:`physical_disks` 以序號比對(序號空白以「型號 + 容量」,VM 常見;排除 USB 外接);`memory_modules` 以「插槽 + 容量 + 料號」(collector 沒有記憶體序號);`gpus` 以名稱(collector 沒有 PNP ID);`bios_serial` → `bios`、`board_serial` + `system_uuid` → `board`;CPU 名稱。前後任一份查不到某元件(WMI 偶發失敗)時不比該元件。每個元件一筆 `hardware_changed`。
 - 只新增事件,不改既有資產寫入順序(DB_SCHEMA「寫入順序」第 3 步多一個動作)。
 
 ### 3.3 管理 API(`:51240`,對外 `/api/endpoint/*`)
@@ -161,7 +161,7 @@ PLATFORM-PLAN §5.1 原訂 `event-service.ts` 一個檔案,拆成比對(純函�
 | POST | `/v1/alerts/{alertId}/resolve` | **待決 §9-2** | `{ note }`(1–500 字);只能關 `open` 的;`x-audit-level: meta`;自動類規則條件仍成立時,下次評估會再開一筆新的 |
 | GET | `/v1/devices/{deviceId}/health` | `endpoint.device.read` | `hours` 1–24(預設 24),5 分鐘分桶;Mongo 不可用回 503 |
 | GET | `/v1/devices`(改) | 同既有 | 每台加 `health`(在線取 Redis、否則 SQL 最後一次,附 `at`)、`openAlerts`(未結束告警數) |
-| GET | `/v1/devices/{deviceId}`(改) | 同既有 | 加 `health`、`watchdog`(版本、最後回報、Agent 服務狀態、啟動類型、24 小時重啟次數)、`certNotAfter`、`openAlerts[]` |
+| GET | `/v1/devices/{deviceId}`(改) | 同既有 | 加 `health`、`openAlerts`(數字)、`watchdog`(版本、最後回報、Agent 服務狀態、啟動類型、24 小時重啟次數)、`certNotAfter`、`alerts[]`(未結束的告警) |
 
 錯誤:`404 ITA_ALERT_NOT_FOUND`、`409 ITA_ALERT_NOT_OPEN`。
 
@@ -170,11 +170,11 @@ PLATFORM-PLAN §5.1 原訂 `event-service.ts` 一個檔案,拆成比對(純函�
 | 規則 `rule` | 條件 | 嚴重度 | 自動關閉 | 評估時機 | 預設門檻(環境變數) |
 | --- | --- | --- | --- | --- | --- |
 | `offline_long` | active 裝置 `last_seen_at` 超過 N 天 | warn | 重新連線 | 每 5 分鐘 | 7 天(`ALERT_OFFLINE_DAYS`) |
-| `disk_low` | `disk_min_free_pct` < 10 | warn(< 5 為 critical) | ≥ 15(緩衝,避免在門檻上下反覆開關) | 健康落盤時 | 10 / 15(`ALERT_DISK_FREE_PCT`、`ALERT_DISK_CLEAR_PCT`) |
+| `disk_low` | `disk_min_free_pct` < 10 | warn(< 5 為 critical) | ≥ 15(緩衝,避免在門檻上下反覆開關) | 每 5 分鐘 | 10 / 15(`ALERT_DISK_FREE_PCT`、`ALERT_DISK_CLEAR_PCT`) |
 | `hardware_changed` | 收到 `hardware_changed` 事件 | critical | **否,IT 確認** | 事件寫入時 | — |
 | `agent_restarts` | 24 小時內非正常重啟 ≥ 3:`agent_started.previous_exit = unexpected` 的筆數,有 Watchdog 時取兩者較大的 `agent_restarts_24h` | warn | 24 小時視窗內降到 3 以下 | 事件寫入時 + 每 5 分鐘 | 3(`ALERT_RESTARTS_24H`) |
-| `cert_expiring` | `cert_not_after` 在 30 天內(已過期為 critical) | warn | 換新憑證後到期日超過門檻 | hello、Watchdog 回報、每日一次 | 30 天(`ALERT_CERT_DAYS`) |
-| `clock_skew` | `clock_skew_ms` 絕對值 > 5 分鐘(A2;P2 只記事件) | warn | 偏差恢復正常 | hello | 沿用 P2 的 5 分鐘 |
+| `cert_expiring` | `cert_not_after` 在 30 天內(已過期為 critical) | warn | 換新憑證後到期日超過門檻 | 每 5 分鐘 | 30 天(`ALERT_CERT_DAYS`) |
+| `clock_skew` | `clock_skew_ms` 絕對值 > 5 分鐘(A2;P2 只記事件) | warn | 偏差恢復正常 | 每 5 分鐘 | 沿用 P2 的 5 分鐘 |
 | `agent_tampered`(P5-2) | Watchdog 事件 `agent_service_stopped`、`agent_start_type_changed`、`agent_binary_missing`,或 Agent 事件 `watchdog_stopped` / `watchdog_missing` | critical | **否,IT 確認**(有人動了服務,要有人看過) | 事件寫入時 | — |
 | `agent_silent`(P5-2,A5 主機端) | Watchdog 15 分鐘內有回報,但 Agent 心跳超過 15 分鐘沒有(電腦開著、Agent 不工作) | critical | Agent 心跳恢復 | 每 5 分鐘 | 15 分鐘(`ALERT_SILENT_MIN`) |
 
@@ -255,6 +255,18 @@ PLATFORM-PLAN §5.1 原訂 `event-service.ts` 一個檔案,拆成比對(純函�
 - **ItAgentBack**:契約測試(新範例 `ws-heartbeat-health`、`ws-hello` 加欄位、`event` 新類型、`watchdog-report` 請求 / 回應);`change-detector` 單元測試(安裝 / 移除 / 更新 / 同名多版本 / 超過 50 項 / 硬體序號空白 / 第一份不比);`alert-service`(開、重複只更新、緩衝關閉、手動關閉、停用時關閉、24 小時視窗);管理 API;`test:int` 的 SQL store(`giganexus_It_Agent_poc_test`)。
 - **Agent / Watchdog**:契約測試;`HealthSampler`(數值範圍、第一次無 CPU);`last_exit` 讀寫;Watchdog `monitor` 狀態機以假 SCM / 假管道測試(手動停止、當掉寬限、卡住 3 次、啟動類型、關機中不動作、啟動失敗退避)。
 - **測試區 VM**(`RUSTIT-P34`;Claude 經 `ssh host2` 操作 Hyper-V,VM 內指令由需求方執行):P5-1 移除軟體 + `inventory.collect`;用大檔把 VM C: 塞到剩 < 10%(VM 本來就只剩 8%,可能一上線就出現 `disk_low`,正好驗證);P5-2 MSI 升級後完成標準兩項(結束行程、手動停止)+ 停用 Watchdog 啟動類型 + 刪除 exe(之後還原檢查點)。先建檢查點「P5 前(0.4.2)」。
+
+## 8.1 P5-1 審查後的修正(code-reviewer、security-auditor 子代理,2026-10-19)
+
+- **健康走勢**:每小時最多讀 240 筆心跳(取最新的),分桶取最小改用 reduce(異常端點大量送心跳時不拖垮查詢)。
+- **磁碟代號**:Agent 只送 `X:` 代號,資料夾掛載點不送(契約加 `pattern: ^[A-Z]:$`,否則整則心跳被拒、Agent 反覆斷線,也避免送出含使用者名稱的路徑);排除 1 GB 以下的分割區(復原 / EFI)。
+- **健康取樣**:上一次還在跑(逾時後背景執行緒未結束)時 `try_lock` 失敗直接略過,不累積阻塞執行緒;讀不到憑證到期日改記 warn。
+- **健康落盤**:這一則沒有的欄位保留上一次的值(重連後第一則沒有 CPU);`healthFrom` 百分比夾到 0–100。
+- **主機事件時間**:不晚於收到時間 + 5 分鐘(端點時鐘或偽造的未來時間不會讓事件永遠排在最前面)。
+- **事件類告警**:已有未結束的 `hardware_changed` 時保留第一次的 `detail`(完整內容看事件 Tab);硬體變更每側最多 8 項、每項 80 字,序列化後不超過 2,000 字元。
+- **硬體比對誤報**:磁碟兩邊都讀到序號才比序號,否則比「型號 + 容量」;遠端桌面 / 虛擬 / USB 顯示卡不列入比對。
+- **告警掃描**:一台失敗(死結、逾時)不中斷整輪;`resolveInactive` 失敗不擋規則評估;`disk_low` 只用 1 天內的健康資料(離線很久的電腦交給 `offline_long`)。
+- **未處理(列為後續)**:WebSocket 每條連線的訊息速率上限(P4 已列,這次再次提到:心跳寫 Mongo 不受限);每台裝置的資產比對冷卻或事件數上限、`device_event` 保存期限(B5);憑證到期日改由 Nginx 轉送 `$ssl_client_v_end`(跨 Gateway repo,需同意;目前以端點自報為準,只影響自己那一台);Windows 更新重開機若走 PRESHUTDOWN 可能被記成 `unexpected`,P5-2 VM 實測時確認;`monitorTargets` 的重啟次數子查詢在裝置數成長時改為一次 GROUP BY。
 
 ## 9. 要你決定的事
 

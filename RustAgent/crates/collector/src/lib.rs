@@ -4,9 +4,11 @@
 //! 任何單一來源失敗都不會中斷整體蒐集，錯誤會記錄在 [`ComputerInfo::warnings`]。
 
 mod background;
+mod health;
 mod registry;
 mod wmi_query;
 
+pub use health::{Health, HealthSampler, boot_time};
 pub use registry::find_installed;
 
 use serde::Serialize;

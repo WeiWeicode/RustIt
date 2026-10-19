@@ -8,23 +8,31 @@ import type { DepStatus } from '@giganexus/backend-sdk';
 import { loadConfig } from './config.js';
 import { buildAgentApp } from './agent-app.js';
 import { buildMgmtApp } from './mgmt-app.js';
+import { AlertService } from './services/alert-service.js';
 import { CommandDispatcher } from './services/command-dispatcher.js';
 import { CommandFileService } from './services/command-files.js';
 import { DeviceService } from './services/device-service.js';
 import { MongoSnapshotStore } from './stores/mongo-store.js';
 import { RedisStateStore } from './stores/redis-store.js';
 import { SqlCommandStore } from './stores/sql-command-store.js';
+import { SqlMonitorStore } from './stores/sql-monitor-store.js';
 import { SqlDeviceStore } from './stores/sql-store.js';
 
 const config = loadConfig();
 const sql = new SqlDeviceStore(config.sql);
 const mongo = new MongoSnapshotStore(config.mongoUrl, config.mongoDb, config.snapshotRetentionDays);
 const redis = new RedisStateStore(config.redisUrl, config.redisPrefix);
+// 監測(P5):健康、告警與裝置共用連線池;資產比對產生的硬體變更事件交給告警
+const monitorStore = new SqlMonitorStore(() => sql.connection());
+let alerts: AlertService | undefined;
 const service = new DeviceService(sql, mongo, redis, {
   heartbeatIntervalSec: config.heartbeatIntervalSec,
   settings: config.agentSettings,
   companyDomains: config.companyDomains,
+  monitor: monitorStore,
+  onHostEvents: (ctx, deviceRef, events) => alerts?.onHostEvents(ctx, deviceRef, events) ?? Promise.resolve(),
 });
+alerts = new AlertService(monitorStore, (deviceId) => service.lookup(deviceId), config.alertThresholds);
 // 指令派送(P4):SQL 與裝置共用連線池,推送經 DeviceService 的 WebSocket 連線表
 const commandStore = new SqlCommandStore(() => sql.connection());
 const commands = new CommandDispatcher(commandStore, sql, service);
@@ -58,8 +66,8 @@ const deps = (): Promise<DepStatus[]> =>
     }),
   );
 
-const mgmt = await buildMgmtApp({ config, service, commands, files, readiness, deps });
-const agent = await buildAgentApp({ config, service, commands, files, monitor: config.agentMonitor, deps });
+const mgmt = await buildMgmtApp({ config, service, commands, files, alerts, readiness, deps });
+const agent = await buildAgentApp({ config, service, commands, files, alerts, monitor: config.agentMonitor, deps });
 
 await mgmt.listen({ host: config.host, port: config.port });
 await agent.listen({ host: config.host, port: config.agentPort });

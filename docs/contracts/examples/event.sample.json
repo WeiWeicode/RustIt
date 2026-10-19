@@ -28,7 +28,7 @@
       "event_id": "5f1e2d3c-4b5a-4968-8776-655443322114",
       "type": "agent_started",
       "occurred_at": "2026-10-06T09:35:00.000Z",
-      "data": { "agent_version": "0.2.0" }
+      "data": { "agent_version": "0.5.0", "previous_exit": "unexpected", "boot_time": 1791273000 }
     }
   ]
 }

@@ -14,8 +14,10 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import type { Config } from './config.js';
 import { AppError } from './errors.js';
 import { swaggerOptions } from './openapi.js';
+import { alertRoutes } from './routes/alerts.js';
 import { commandRoutes } from './routes/commands.js';
 import { deviceRoutes } from './routes/devices.js';
+import type { AlertService } from './services/alert-service.js';
 import type { CommandDispatcher } from './services/command-dispatcher.js';
 import type { CommandFileService } from './services/command-files.js';
 import type { DeviceService } from './services/device-service.js';
@@ -43,6 +45,8 @@ export interface MgmtAppOptions {
   commands?: CommandDispatcher;
   /** 指令附檔下載(P4-2;省略 = 不註冊) */
   files?: CommandFileService;
+  /** 告警 API(P5;省略 = 不註冊) */
+  alerts?: AlertService;
   /** 就緒檢查:SQL Server 可用(唯一真相);Mongo / Redis 只回報狀態,不影響就緒 */
   readiness?: () => Promise<{ ok: boolean; checks: Record<string, string> }>;
   /** 監控心跳附帶的相依服務狀態(SQL Server / Mongo / Redis) */
@@ -120,5 +124,6 @@ export async function buildMgmtApp(opts: MgmtAppOptions): Promise<FastifyInstanc
 
   await app.register(deviceRoutes(service));
   if (opts.commands) await app.register(commandRoutes(opts.commands, opts.files));
+  if (opts.alerts) await app.register(alertRoutes(opts.alerts));
   return app;
 }
