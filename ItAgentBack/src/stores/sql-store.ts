@@ -260,9 +260,9 @@ export class SqlDeviceStore implements DeviceStore {
       .query(`INSERT INTO ita.device_event (device_ref, event_type, cert_dn, cert_fp, detail, request_id) VALUES (@id, @type, @dn, @fp, @detail, @rid)`);
   }
 
-  /** 端點事件逐筆「不存在才寫入」;同一批同時重送撞到唯一索引(2601)時重跑一次,已存在者即略過 */
-  async addAgentEvents(device: DeviceRecord, events: AgentEvent[], receivedAt: Date, requestId: string): Promise<void> {
-    if (events.length === 0) return;
+  /** 端點事件逐筆「不存在才寫入」;同一批同時重送撞到唯一索引(2601)時重跑一次,已存在者即略過。回傳這次新增的 eventUid(小寫) */
+  async addAgentEvents(device: DeviceRecord, events: AgentEvent[], receivedAt: Date, requestId: string): Promise<string[]> {
+    if (events.length === 0) return [];
     const run = async () => {
       const req = (await this.request())
         .input('id', sql.Int, device.id)
@@ -278,15 +278,19 @@ export class SqlDeviceStore implements DeviceStore {
           .input(`d${k}`, sql.NVarChar(4000), e.data);
         return `IF NOT EXISTS (SELECT 1 FROM ita.device_event WHERE device_ref = @id AND event_uid = @u${k})
           INSERT INTO ita.device_event (device_ref, event_type, cert_dn, cert_fp, request_id, occurred_at, received_at, event_uid, data)
+          OUTPUT INSERTED.event_uid INTO @new
           VALUES (@id, @t${k}, @dn, @fp, @rid, @o${k}, @received, @u${k}, @d${k});`;
       });
-      await req.query(`SET XACT_ABORT ON; BEGIN TRAN; ${stmts.join('\n')} COMMIT;`);
+      const r = await req.query(
+        `SET XACT_ABORT ON; DECLARE @new TABLE (event_uid UNIQUEIDENTIFIER); BEGIN TRAN; ${stmts.join('\n')} COMMIT; SELECT event_uid FROM @new;`,
+      );
+      return (r.recordset as Row[]).map((x) => String(x.event_uid).toLowerCase());
     };
     try {
-      await run();
+      return await run();
     } catch (err) {
       if (!isDuplicateKey(err)) throw err;
-      await run();
+      return run();
     }
   }
 

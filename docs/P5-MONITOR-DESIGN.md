@@ -268,6 +268,33 @@ PLATFORM-PLAN §5.1 原訂 `event-service.ts` 一個檔案,拆成比對(純函�
 - **告警掃描**:一台失敗(死結、逾時)不中斷整輪;`resolveInactive` 失敗不擋規則評估;`disk_low` 只用 1 天內的健康資料(離線很久的電腦交給 `offline_long`)。
 - **未處理(列為後續)**:WebSocket 每條連線的訊息速率上限(P4 已列,這次再次提到:心跳寫 Mongo 不受限);每台裝置的資產比對冷卻或事件數上限、`device_event` 保存期限(B5);憑證到期日改由 Nginx 轉送 `$ssl_client_v_end`(跨 Gateway repo,需同意;目前以端點自報為準,只影響自己那一台);Windows 更新重開機若走 PRESHUTDOWN 可能被記成 `unexpected`,P5-2 VM 實測時確認;`monitorTargets` 的重啟次數子查詢在裝置數成長時改為一次 GROUP BY。
 
+## 8.2 P5-2 實作時的調整
+
+- **管道 `status` 加 `previous_exit`**:Watchdog 看到 PID 變更後,等新行程的 `get_status` 回報上次結束原因(`unexpected` → crashed、`restart_command` → restart_command、`stop` / `shutdown` / `first_run` 不記);管道 3 輪都不通(舊版 Agent)才改用 SCM 看到的結束代碼。原因是 SCM 失敗復原 10 秒就重啟,30 秒一輪的看守常看不到停止狀態。
+- **管道從未成功過不判定卡住**:避免 0.5.0 以前沒有管道的 Agent 被當成卡住而反覆重啟。
+- **開機時 Watchdog 先啟動、看到 Agent 尚未啟動(結束代碼 0)**:啟動它但不記 `agent_service_stopped`(這次執行從未看過 Agent 在跑)。
+- **Windows Installer 執行中不看守**:兩邊都檢查全域 mutex `Global\_MSIExecute`,MSI 安裝 / 升級 / 解除安裝依序停止兩個服務時不會被對方拉起(也涵蓋 P6 升級)。
+- **Agent 看守 Watchdog**:Watchdog 當掉(結束代碼非 0)時先交給 SCM 失敗復原,下一輪(60 秒後)仍停止才啟動,不記竄改事件;被手動停止或改啟動類型才記 `watchdog_stopped`。
+- **共用程式**:SCM 操作、失敗復原、服務 ACL、管道放 `rustit-common`(`scm.rs`、`pipe.rs`);Agent 原本的失敗復原搬過去共用,行為不變。
+- **Watchdog 沒有開發用 install / uninstall**:要看守已安裝的 Agent 服務,一律以 MSI 安裝測試;本機開發用 `run` 前景執行。
+
+## 8.3 P5-2 審查後的修正(code-reviewer、security-auditor 子代理,2026-10-19)
+
+- **H1 Installer 判斷可被偽造**:一般使用者也能建立 `Global\_MSIExecute` 讓兩邊看守停擺。改為:mutex 擁有者必須是 SYSTEM(`GetSecurityInfo` + `IsWellKnownSid`)、`msiserver` 服務執行中;連續超過 30 分鐘視為異常,恢復看守。
+- **M1 管道空窗**:伺服端隨時保留一個等待中的執行個體(連線後先建立下一個);沒有存活的執行個體時一律以 `first_pipe_instance` 建立,不會加入別人搶先建立、ACL 寬鬆的管道。
+- **M2 結束錯誤的行程**:送出停止前先握住行程控制代碼(PID 不會被重用)並確認是服務設定的程式;只有「等待停止逾時」才結束行程,結束前再確認 SCM 的 PID 沒變;結束後等到服務停止才啟動。停止等待 50 秒(大於 Agent 收尾)。
+- **M3 程式路徑被改**:Watchdog 檢查 Agent 服務的程式是同目錄的 `rustit-agent.exe`(服務模式),Agent 檢查 Watchdog 同理;不符記 `agent_binary_changed` / `watchdog_binary_changed`(列入 `agent_tampered`)。
+- **L1 路徑白名單**:Watchdog 事件(`agent_restarted`、`agent_service_stopped`、`agent_start_type_changed`、`agent_binary_missing`、`agent_binary_changed`、`agent_start_failed`、`agent_pipe_impersonation`)只收 Watchdog 上報,`/agent/v1/events` 不收;反之亦然(回 accepted、不寫入、記 warn)。
+- **L2 重送重開告警**:`addAgentEvents` 回傳真正新增的事件,只有新事件才開 `agent_tampered`。
+- **L3 冒充時先送請求**:用戶端在送出請求前比對伺服端 PID,不符立即中斷並記 `agent_pipe_impersonation`(同一個 PID 一次)。
+- **L5 本機紀錄**:Watchdog 服務模式開啟 `watchdog.db` 前把 `state\` 目錄 ACL 設為只允許 SYSTEM、Administrators;檔案損壞時改名保留後重建,看守不停擺。
+- **Agent 看守 Watchdog**:這次執行沒看過 Watchdog 在跑(剛安裝、開機)的停止不記竄改;啟動失敗退避 1、2、5、10 分鐘,事件只記前 3 次、之後每 6 次一次。
+- **管道回應**:伺服端回覆後等用戶端關閉(讀到 EOF,最多 2 秒)再釋放,不直接中斷以免丟掉未讀的回應;狀態在阻塞執行緒組出(讀本機暫存要取同步鎖)。
+- **Watchdog 狀態機**:快速連續當掉(新行程還沒回報原因就又停止 / 換行程)時依結束代碼補記,不漏算;1 小時內非正常重啟 ≥ 3 次時,當掉後的寬限拉長到 10 分鐘(交給 SCM 失敗復原)。
+- **上報**:失敗後照退避等完(429 的 Retry-After、停用的 10 分鐘),有新事件也不提早送;裝置憑證暫時讀不到時只暫停上報、每 10 分鐘重試,看守照常。
+- **不改**:`watchdog_missing` 維持 critical — 0.6.0 Agent 只隨含 Watchdog 的監控 MSI 發佈,不存在代表被移除。憑證到期日改由 Nginx 轉送(跨 Gateway repo,P5-1 已列後續)。
+- **仍待真機驗證**:MSI 安裝 / 升級 / 解除安裝時兩個服務不互相拉起(Installer 判斷在每輪檢查當下生效,停止與啟動剛好跨過檢查之間的機率很低);開發用 `rustit-agent uninstall` 前要先停用 Watchdog。
+
 ## 9. 要你決定的事
 
 1. **分批與順序**:P5-1(健康 / 變更 / 告警後端)→ P5-2(Watchdog + MSI)→ P5-3(GigaItApp)。是否同意?(建議:同意)

@@ -21,7 +21,11 @@
 0. **下一個工作階段從這裡開始:P5 監測(甘特圖 W6-18)**
    - **範圍**:PLATFORM-PLAN §4.3(三層資料：健康摘要附在心跳、事件、Server 比對軟硬體變更、固定告警規則)、§4.10 A5(Agent 被停用 / 移除偵測)、§8 P5 完成標準;Watchdog 規格見 Gateway `ENDPOINT-AGENT-GUIDE.md` §7。
    - **完成標準**:結束 Agent 行程 → Watchdog 重啟並上報;以管理員手動停止 Agent 服務 → 產生事件與告警;插 USB 隨身碟 → 事件出現(P2 已有);移除一個軟體 → 下次蒐集產生變更事件。
-   - **現況(2026-10-19)**:`RustAgent/crates/` 只有 agent、collector、common、demo,**還沒有 `watchdog` crate**;心跳還沒附 `health`;Server 還沒比對前後兩份資產(沒有 software / hardware 變更事件);GigaItApp 沒有「告警」頁。USB 插拔、`offline_period`、`clock_skew`、`agent_started` 事件 P2 已完成。
+   - **進度(2026-10-19,設計 [P5-MONITOR-DESIGN.md](P5-MONITOR-DESIGN.md),需求方確認 §9 全部照建議)**:
+     - **P5-1 ✅ 已合併 develop(MR !31,`91ee86c`)並部署測試區**:migration 0006 已套用 `giganexus_It_Agent_test`;健康摘要、資產變更事件、告警 API(`/v1/alerts`、`/v1/devices/{id}/health`);Agent 0.5.0。**待辦**:Gateway OpenAPI 草稿批次發佈(新 API 才會出現在 `/api/endpoint/*`)。
+     - **P5-2(分支 `feature/p5-2-watchdog`)**:`watchdog` crate(Watchdog 0.1.0)、Agent 0.6.0(本機管道、看守 Watchdog、服務 ACL)、監控 MSI 含兩個服務、`POST /agent/v1/watchdog/report`、`agent_tampered`。本機測試與端到端(前景 Watchdog → 本機 Server)通過;**管道、SCM 看守、MSI 安裝要在 VM 驗證**(本機非系統管理員無法測)。
+     - **P5-3(GigaItApp 告警 Tab、健康與 Agent Tab、清單欄位)**:未開始,改 GigaItApp 前要先問需求方。
+     - VM 驗收:完成標準 4 項(設計 §0 表)。VM 先建檢查點「P5 前(0.4.2)」,再裝 0.6.0 MSI(同時驗 P5-1 與 P5-2)。
    - **建議做法**:比照 P3 / P4,先寫設計 `docs/P5-MONITOR-DESIGN.md`(分批、資料表 / migration、契約擴充、告警規則、Watchdog 與 Agent 互相看守、MSI 加第二個服務、GigaItApp 畫面),經需求方確認後再實作;牽涉服務、安全與契約,由 Claude 主寫。
    - **要先同意**:migration 套用測試庫、契約變更、MSI 加 Watchdog 服務、GigaItApp 告警頁與 `gateway-rbac.yaml`、指南回寫(§5、§7)、合併 develop(測試區共用)。
    - **測試環境**:主機 2 Hyper-V VM(名稱 `RUSTIT-P34`、憑證 `CN=DESKTOP-1TB2UMP`、deviceId `de87bce2`、Agent 0.4.2;檢查點「匯入憑證」「P3-4 改名前(0.4.1)」;Claude 可經 `ssh host2` 操作 Hyper-V,VM 內指令由需求方執行)。E6 測試帳號 V112001(碩禾、禾迅)、V114007(禾迅),個人權限「電腦清單」。對外 API 是 `/api/endpoint/*`(沒有 `/v1`)。

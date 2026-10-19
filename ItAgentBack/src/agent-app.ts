@@ -5,6 +5,7 @@
  *   - POST /agent/v1/inventory(資料契約 inventory.schema.json)、WS GET /agent/v1/ws(信封 ws-envelope.schema.json)
  *   - POST /agent/v1/sync(離線補傳比對,sync.schema.json)、POST /agent/v1/events(端點事件,event.schema.json)(PLATFORM-PLAN P2)
  *   - WS command / command_update / command_update_ack / prepare_shutdown(指令通道,P4;邏輯在 CommandDispatcher)
+ *   - POST /agent/v1/watchdog/report(Watchdog 上報,watchdog.schema.json,P5-2):同一張裝置憑證,只更新 Watchdog 欄位與寫 Watchdog 事件
  *   - POST /agent/v1/commands/{commandId}/files(指令附檔,logs.collect 日誌 zip,上限 20 MB;command-file.schema.json,P4-2)
  *   - HTTPS 回報同時處理中的請求超過 AGENT_MAX_INFLIGHT 時回 429 ITA_BUSY + Retry-After,在驗證身分前就擋下(A3)
  *   - 與 :51240 是不同的 Fastify 實例,不共用 hook(§5.2);日誌帶 x-request-id、DN、指紋(§5.7)
@@ -28,6 +29,7 @@ import {
   type HelloBody,
   type InventoryRequest,
   type SyncRequest,
+  type WatchdogReportRequest,
   type WsEnvelope,
 } from './contracts.js';
 import { AppError } from './errors.js';
@@ -139,6 +141,7 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
   app.addSchema(loadContract('inventory', dir));
   app.addSchema(loadContract('sync', dir));
   app.addSchema(loadContract('event', dir));
+  app.addSchema(loadContract('watchdog', dir));
   await app.register(websocket, { options: { maxPayload: WS_MAX_PAYLOAD } });
   // 監控需在路由之前註冊;本通道不註冊 OpenAPI(Agent 經 :9443 直達,不經 BFF 路由表)
   await app.register(setupGateway, {
@@ -227,6 +230,10 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
 
   app.post<{ Body: EventsRequest }>('/agent/v1/events', { schema: { body: { $ref: `${CONTRACT_IDS.event}#` } } }, async (req) =>
     service.ingestEvents(ctxOf(req), req.device!, req.body),
+  );
+
+  app.post<{ Body: WatchdogReportRequest }>('/agent/v1/watchdog/report', { schema: { body: { $ref: `${CONTRACT_IDS.watchdog}#` } } }, async (req) =>
+    service.watchdogReport(ctxOf(req), req.device!, req.body),
   );
 
   // 指令附檔:本體為 zip 原始位元組,串流交給 CommandFileService(大小與 SHA-256 在寫檔時檢查);只在這個範圍接受 application/zip

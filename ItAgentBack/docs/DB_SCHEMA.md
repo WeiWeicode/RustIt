@@ -74,13 +74,13 @@ Agent 回報(0002,`POST /agent/v1/events`;`event.schema.json`):`offline_period`�
 
 ### `ita.device_health` — 最近健康與 Watchdog 狀態(0006,P5,1:1)
 
-`device_ref` 為主鍵。心跳的健康摘要(`cpu_pct`、`mem_used_pct`、`disk_min_free_pct`、`disk_min_free_drive`、`uptime_s`、`agent_rss_mb`,`health_at`)每台每 5 分鐘落盤一次(連線後第一則帶健康的心跳就落盤;0–100 以外的值夾到範圍內);`cert_not_after` 由 hello 寫入。Watchdog 欄位(`watchdog_version`、`watchdog_report_at`、`agent_service_state`、`agent_start_type`、`agent_status_ok`、`agent_last_error`、`agent_restarts_24h`)在 P5-2 由 `POST /agent/v1/watchdog/report` 寫入。在線電腦的清單顯示 Redis 在線資訊裡最近一則心跳的健康,離線電腦顯示這裡的值。
+`device_ref` 為主鍵。心跳的健康摘要(`cpu_pct`、`mem_used_pct`、`disk_min_free_pct`、`disk_min_free_drive`、`uptime_s`、`agent_rss_mb`,`health_at`)每台每 5 分鐘落盤一次(連線後第一則帶健康的心跳就落盤;0–100 以外的值夾到範圍內);`cert_not_after` 由 hello 寫入。Watchdog 欄位(`watchdog_version`、`watchdog_report_at`(主機收到時間)、`agent_service_state`、`agent_start_type`、`agent_status_ok`、`agent_last_error`、`agent_restarts_24h`)由 `POST /agent/v1/watchdog/report` 寫入(P5-2,`DeviceService.watchdogReport`;Watchdog 的事件照端點事件寫 `device_event`,`cert_not_after` 也一併更新)。在線電腦的清單顯示 Redis 在線資訊裡最近一則心跳的健康,離線電腦顯示這裡的值。
 
 ### `ita.device_alert` — 告警(0006,P5)
 
 `alert_id`(對外)、`device_ref`、`rule`(`offline_long` / `disk_low` / `hardware_changed` / `agent_restarts` / `cert_expiring` / `clock_skew` / `agent_tampered` / `agent_silent`)、`severity`(`warn` / `critical`)、`state`(`open` / `resolved`)、`opened_at`、`last_seen_at`(條件仍成立的最近一次評估)、`resolved_at`、`resolved_by`(`auto` / `manual`)、手動關閉的 `resolved_by_emp` / `resolved_by_name` / `resolve_note` / `request_id`、`detail`(JSON)、`event_ref`(觸發的事件)。**篩選唯一** `ux_device_alert_open (device_ref, rule) WHERE state = 'open'`:同一台同一規則只有一筆未結束,條件持續成立只更新 `last_seen_at` / `detail` / `severity`。
 
-- 自動類規則每 5 分鐘由 `AlertService.sweep` 評估(active、未合併的裝置);條件消失 `resolved_by = auto`。事件類(`hardware_changed`;P5-2 加 `agent_tampered`)寫事件時開,不自動關閉。
+- 自動類規則每 5 分鐘由 `AlertService.sweep` 評估(active、未合併的裝置);條件消失 `resolved_by = auto`。事件類(`hardware_changed`;P5-2 的 `agent_tampered`:端點事件 `agent_service_stopped`、`agent_start_type_changed`、`agent_binary_missing`、`agent_binary_changed`、`agent_pipe_impersonation`、`watchdog_stopped`、`watchdog_missing`、`watchdog_binary_changed`)只在事件**第一次寫入**時開(重送不重開),不自動關閉。Watchdog 事件只收 `POST /agent/v1/watchdog/report`,`/agent/v1/events` 不收(反之亦然)。
 - 停用 / 退役 / 已合併的裝置,掃描時把未結束的告警一律自動關閉。
 - 非正常重啟次數:24 小時內 `event_type = 'agent_started'` 且 `data LIKE '%"previous_exit":"unexpected"%'` 的筆數(`ix_device_event_device`)。
 - 門檻見 `ita.env` 的 `ALERT_*`(`src/config.ts`);保存期限 1 年,清除工作在上線前與其他保存期限一起做(B5)。

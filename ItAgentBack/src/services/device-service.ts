@@ -25,6 +25,8 @@ import {
   type ComputerInfo,
   type EventsRequest,
   type EventsResponse,
+  type WatchdogReportRequest,
+  type WatchdogReportResponse,
   type HeartbeatHealth,
   type HelloAckBody,
   type HelloBody,
@@ -202,6 +204,8 @@ export interface DeviceServiceOptions {
   monitor?: MonitorStore;
   /** 資產比對產生主機事件後(P5;告警服務的 onHostEvents) */
   onHostEvents?: (ctx: Ctx, deviceRef: number, events: SavedHostEvent[]) => Promise<void>;
+  /** 端點事件寫入後(Agent /events、Watchdog report;P5-2 告警服務的 onAgentEvents) */
+  onAgentEvents?: (ctx: Ctx, deviceRef: number, events: { type: string; data?: Record<string, unknown> }[]) => Promise<void>;
   now?: () => Date;
 }
 
@@ -235,6 +239,18 @@ const HIDDEN_DETAIL: Record<string, string> = {
   merged: '已併入另一台裝置的資料',
   default: '內容涉及其他裝置,已隱藏',
 };
+/** 只能經 Watchdog 上報的事件類型(event.schema.json;/agent/v1/events 不收,反之亦然) */
+export const WATCHDOG_EVENT_TYPES: readonly string[] = [
+  'agent_restarted',
+  'agent_service_stopped',
+  'agent_start_type_changed',
+  'agent_binary_missing',
+  'agent_binary_changed',
+  'agent_start_failed',
+  'agent_pipe_impersonation',
+];
+/** Watchdog 定期上報間隔(秒;指南 §7.3 每 5 分鐘) */
+export const WATCHDOG_REPORT_SEC = 300;
 /** 健康走勢分桶(毫秒) */
 const HEALTH_BUCKET_MS = 5 * 60_000;
 /** 健康走勢每小時最多讀幾筆心跳(30 秒一則 = 120 筆,留一倍餘裕;異常端點大量送心跳時不拖垮查詢) */
@@ -308,6 +324,7 @@ export class DeviceService implements CommandChannel {
   private readonly companyDomains: CompanyDomains;
   private readonly monitor: MonitorStore | undefined;
   private readonly onHostEvents: DeviceServiceOptions['onHostEvents'];
+  private readonly onAgentEvents: DeviceServiceOptions['onAgentEvents'];
 
   /** 目前在線的 WebSocket 連線數(本行程;監控心跳回報) */
   get onlineCount(): number {
@@ -327,6 +344,7 @@ export class DeviceService implements CommandChannel {
     this.companyDomains = opts.companyDomains ?? new Map();
     this.monitor = opts.monitor;
     this.onHostEvents = opts.onHostEvents;
+    this.onAgentEvents = opts.onAgentEvents;
     this.now = opts.now ?? (() => new Date());
   }
 
@@ -596,17 +614,58 @@ export class DeviceService implements CommandChannel {
   }
 
   async ingestEvents(ctx: Ctx, device: DeviceRecord, req: EventsRequest): Promise<EventsResponse> {
+    return this.storeEndpointEvents(ctx, device, req, 'agent');
+  }
+
+  /**
+   * 端點事件寫入(Agent /events 與 Watchdog report 共用):兩條路徑各自只收自己的事件類型(指南 §7.3「只讓 watchdog/* 做 Watchdog 的事」;
+   * 資安稽核 L1),另一邊的類型照樣回 accepted(Agent 據此刪除)但不寫入、記 warn。只對這次真正新增的事件觸發告警(重送不重開已關閉的告警)
+   */
+  private async storeEndpointEvents(ctx: Ctx, device: DeviceRecord, req: EventsRequest, source: 'agent' | 'watchdog'): Promise<EventsResponse> {
     const receivedAt = this.now();
-    const events: AgentEvent[] = req.events.map((e) => {
+    const allowed = req.events.filter((e) => WATCHDOG_EVENT_TYPES.includes(e.type) === (source === 'watchdog'));
+    if (allowed.length !== req.events.length)
+      ctx.log.warn({ deviceId: device.deviceId, source, rejected: req.events.filter((e) => !allowed.includes(e)).map((e) => e.type) }, '端點事件類型不屬於此路徑,略過');
+    const events: AgentEvent[] = allowed.map((e) => {
       let data = JSON.stringify(e.data ?? {});
       if (data.length > EVENT_DATA_MAX) data = JSON.stringify({ truncated: true, size: data.length });
       return { eventUid: e.event_id.toLowerCase(), type: e.type, occurredAt: new Date(e.occurred_at), data };
     });
-    await this.sqlDo(ctx, 'event.add', () => this.sql.addAgentEvents(device, events, receivedAt, ctx.requestId));
+    const added = new Set(await this.sqlDo(ctx, 'event.add', () => this.sql.addAgentEvents(device, events, receivedAt, ctx.requestId)));
     const types: Record<string, number> = {};
     for (const e of events) types[e.type] = (types[e.type] ?? 0) + 1;
-    ctx.log.info({ deviceId: device.deviceId, types }, '端點事件已寫入');
+    if (events.length) ctx.log.info({ deviceId: device.deviceId, source, types, added: added.size }, '端點事件已寫入');
+    const fresh = allowed.filter((e) => added.has(e.event_id.toLowerCase()));
+    if (fresh.length) await this.onAgentEvents?.(ctx, device.id, fresh);
     return { accepted: req.events.map((e) => e.event_id), server_time: receivedAt.toISOString() };
+  }
+
+  /**
+   * Watchdog 上報(P5-2,指南 §7.3):只更新 device_health 的 Watchdog 欄位、憑證到期日與寫 Watchdog 事件(不碰資產、不算 Agent 心跳)。
+   * SQL 失敗回 503(Watchdog 留在本機稍後重送)
+   */
+  async watchdogReport(ctx: Ctx, device: DeviceRecord, req: WatchdogReportRequest): Promise<WatchdogReportResponse> {
+    const at = this.now();
+    const m = this.monitor;
+    if (m) {
+      const a = req.agent;
+      await this.sqlDo(ctx, 'monitor.saveWatchdog', () =>
+        m.saveWatchdog(device.id, {
+          version: req.watchdog_version,
+          reportAt: at,
+          agentServiceState: a.service_state,
+          agentStartType: a.start_type,
+          agentStatusOk: a.status_ok ?? null,
+          agentLastError: a.last_error ?? null,
+          agentRestarts24h: req.agent_restarts_24h ?? null,
+        }),
+      );
+      const notAfter = req.cert_not_after ? new Date(req.cert_not_after) : null;
+      if (notAfter && Number.isFinite(notAfter.getTime())) await this.soft(ctx, 'sql.saveCertNotAfter', () => m.saveCertNotAfter(device.id, notAfter));
+    }
+    const accepted = req.events?.length ? (await this.storeEndpointEvents(ctx, device, { events: req.events }, 'watchdog')).accepted : [];
+    ctx.log.info({ deviceId: device.deviceId, watchdog: req.watchdog_version, agent: req.agent.service_state, events: accepted.length }, 'Watchdog 上報');
+    return { server_time: at.toISOString(), accepted, report_interval_sec: WATCHDOG_REPORT_SEC, target: null };
   }
 
   async heartbeat(ctx: Ctx, device: DeviceRecord, body: Record<string, unknown>): Promise<{ server_time: string }> {

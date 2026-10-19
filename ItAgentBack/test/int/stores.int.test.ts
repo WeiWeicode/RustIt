@@ -418,6 +418,10 @@ describe('SQL Server + Mongo + Redis', () => {
     assert.deepEqual([h.cpuPct, h.memUsedPct, h.diskMinFreePct, h.diskMinFreeDrive, h.uptimeS, h.agentRssMb], [12, 63, 4, 'C:', 100, 14]);
     assert.equal(h.certNotAfter?.toISOString(), '2026-11-01T00:00:00.000Z');
     await monitor.saveHealth(d.id, new Date(), { cpuPct: 250, memUsedPct: -3, diskMinFreePct: 4 });
+    // P5-2:Watchdog 回報欄位(長字串截斷,不影響健康欄位)
+    await monitor.saveWatchdog(d.id, { version: '0.1.0', reportAt: new Date(), agentServiceState: 'running', agentStartType: 'auto', agentStatusOk: true, agentLastError: 'x'.repeat(400), agentRestarts24h: 2 });
+    const w = (await monitor.healthOf([d.id])).get(d.id)!;
+    assert.deepEqual([w.watchdogVersion, w.agentServiceState, w.agentStartType, w.agentStatusOk, w.agentLastError?.length, w.agentRestarts24h, w.diskMinFreePct], ['0.1.0', 'running', 'auto', true, 300, 2, 4]);
     assert.equal((await monitor.healthOf([d.id])).get(d.id)!.cpuPct, 100);
 
     // 資產變更:第二份移除一個軟體、換 BIOS 序號 → 兩筆主機事件 + 硬體告警

@@ -64,6 +64,15 @@ async fn sample_health(sampler: &Sampler) -> Option<Health> {
     }
 }
 
+/// 連線結束(任何原因)時清除 ws_connected
+struct ConnectedFlag<'a>(&'a Shared);
+
+impl Drop for ConnectedFlag<'_> {
+    fn drop(&mut self) {
+        self.0.ws_connected.store(false, Ordering::Relaxed);
+    }
+}
+
 /// 裝置憑證到期日(RFC 3339);開發模式(http)或讀不到時為空字串
 fn cert_not_after(shared: &Shared) -> String {
     let Some(tls) = shared.tls.as_ref() else {
@@ -229,6 +238,11 @@ async fn session(
     info!("WebSocket 已連線");
     let mut body = hello.borrow().clone().unwrap_or_default().stamped();
     body.cert_not_after = cert_not_after(shared);
+    if let Ok(mut c) = shared.cert_not_after.lock() {
+        c.clone_from(&body.cert_not_after);
+    }
+    // 本機管道 get_status 的連線狀態:收到 hello_ack 才算連上,這條連線結束就清除
+    let _connected = ConnectedFlag(shared);
     send(&mut ws, &Envelope::new("hello", json!(body))).await?;
 
     let mut period = DEFAULT_HEARTBEAT;
@@ -279,6 +293,8 @@ async fn session(
                                         warn!("本機時鐘與主機相差 {} 秒,請檢查時間同步", skew / 1000);
                                     }
                                     shared.clock_skew_ms.store(ack.clock_skew_ms.unwrap_or(0), Ordering::Relaxed);
+                                    shared.ws_connected.store(true, Ordering::Relaxed);
+                                    shared.last_ack_ms.store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
                                     shared.clock_known.store(true, Ordering::Relaxed);
                                     apply_settings(shared, &ack, settings);
                                     let p = Duration::from_secs(ack.heartbeat_interval_sec.clamp(5, 300));
@@ -321,7 +337,10 @@ async fn session(
                                 };
                                 return Ok(End::Prepared(wait));
                             }
-                            "heartbeat_ack" => debug!("heartbeat_ack {}", env.id),
+                            "heartbeat_ack" => {
+                                shared.last_ack_ms.store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
+                                debug!("heartbeat_ack {}", env.id)
+                            }
                             "unsupported" => warn!("Server 不支援 Agent 送出的訊息:{:?}", env.body),
                             // 不認得的類型回 unsupported(指南 §5.6)
                             other => {

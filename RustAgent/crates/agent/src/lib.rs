@@ -17,8 +17,12 @@ mod conn;
 mod crypto;
 mod diagnose;
 mod events;
+#[cfg(windows)]
+mod guard;
 mod inventory;
 mod logs;
+#[cfg(windows)]
+mod pipe;
 pub mod protocol;
 #[cfg(windows)]
 pub mod service;
@@ -84,12 +88,26 @@ pub(crate) struct Shared {
     pub exclusive: tokio::sync::Mutex<()>,
     /// 讓所有工作結束(外部停止訊號或 agent.restart)
     stop: watch::Sender<bool>,
+    /// 本機管道 get_status(P5-2,指南 §6.4):啟動時間(RFC 3339)、上次結束原因
+    pub started_at: String,
+    pub previous_exit: String,
+    /// WebSocket 已連線且收到 hello_ack
+    pub ws_connected: AtomicBool,
+    /// 最近一次收到 hello_ack / heartbeat_ack(Unix 毫秒;0 = 沒有)
+    pub last_ack_ms: AtomicI64,
+    /// 最近一次回報 / 連線錯誤(恢復後清除)
+    pub last_error: std::sync::Mutex<Option<String>>,
+    /// 裝置憑證到期日(RFC 3339;每次連線前讀)
+    pub cert_not_after: std::sync::Mutex<String>,
 }
 
 impl Shared {
     /// 連線或回報失敗:記入連線紀錄(429、400、停用時主機有回應,不算離線);被停用時切換狀態
     pub fn failed(&self, e: &SendError) {
         self.conn.observe_failure(e);
+        if let Ok(mut last) = self.last_error.lock() {
+            *last = Some(e.to_string().chars().take(300).collect());
+        }
         if e.is_device_disabled() {
             self.set_disabled(true);
         }
@@ -98,6 +116,9 @@ impl Shared {
     /// 回報成功或收到 hello_ack:結束離線期間;能成功表示裝置未被停用(WebSocket 只連上不算,停用的裝置會連上後被 4403 關閉)
     pub fn reached(&self) {
         self.conn.succeeded();
+        if let Ok(mut last) = self.last_error.lock() {
+            *last = None;
+        }
         self.set_disabled(false);
     }
 
@@ -230,6 +251,12 @@ pub async fn run(settings: Settings, mut shutdown: watch::Receiver<bool>) -> Res
         command_notify: Notify::new(),
         exclusive: tokio::sync::Mutex::new(()),
         stop: stop_tx,
+        started_at: now_rfc3339(),
+        previous_exit: previous_exit.clone(),
+        ws_connected: AtomicBool::new(false),
+        last_ack_ms: AtomicI64::new(0),
+        last_error: std::sync::Mutex::new(None),
+        cert_not_after: std::sync::Mutex::new(String::new()),
     });
     // 上次的 agent.restart 回報成功、中途停止的指令回報失敗(重連後送出);未到期的暫時日誌等級重新套用
     command::recover(&shared);
@@ -295,13 +322,29 @@ pub async fn run(settings: Settings, mut shutdown: watch::Receiver<bool>) -> Res
         settings_rx,
         stop_rx.clone(),
     ));
-    let level = tokio::spawn(log_level_task(shared.clone(), stop_rx));
-    let (a, b, c, d, e) = tokio::join!(inv, ws, ev, usb, level);
+    let level = tokio::spawn(log_level_task(shared.clone(), stop_rx.clone()));
+    // 服務模式才有本機管道(Watchdog 查狀態)與看守 Watchdog(P5-2);前景開發模式沒有對方服務
+    let watch = tokio::spawn(service_tasks(shared.clone(), stop_rx));
+    let (a, b, c, d, e, f) = tokio::join!(inv, ws, ev, usb, level, watch);
     a.and(b)
         .and(c)
         .and(d)
         .and(e)
+        .and(f)
         .map_err(|e| format!("背景工作異常結束:{e}"))
+}
+
+/// 服務模式:本機管道伺服端與看守 Watchdog(P5-2,指南 §7.1、§7.2)
+async fn service_tasks(shared: Arc<Shared>, stop: watch::Receiver<bool>) {
+    #[cfg(windows)]
+    if SERVICE_MODE.load(Ordering::Relaxed) {
+        tokio::join!(
+            pipe::run(shared.clone(), stop.clone()),
+            guard::run(shared.events.clone(), stop)
+        );
+    }
+    #[cfg(not(windows))]
+    let _ = (shared, stop);
 }
 
 /// 每分鐘檢查 agent.log_level 的暫時等級是否到期

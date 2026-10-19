@@ -7,13 +7,14 @@ import assert from 'node:assert/strict';
 import { beforeEach, describe, it } from 'node:test';
 import { loadGatewayEnv, loadMonitorEnv } from '@giganexus/backend-sdk';
 import type { FastifyInstance } from 'fastify';
-import type { ComputerInfo } from '../src/contracts.js';
+import { buildAgentApp } from '../src/agent-app.js';
+import type { ComputerInfo, WatchdogReportRequest } from '../src/contracts.js';
 import { buildMgmtApp } from '../src/mgmt-app.js';
 import { DEFAULT_THRESHOLDS, evaluate } from '../src/services/alert-service.js';
 import { BULK_LIMIT, detectChanges } from '../src/services/change-detector.js';
 import { healthFrom } from '../src/services/device-service.js';
 import type { MonitorTarget } from '../src/stores/types.js';
-import { ALL, DN, FP, FakeConnection, inventoryRequest, only, setup } from './helpers.js';
+import { ALL, CONTRACTS_DIR, DN, FP, FakeConnection, certHeaders, example, inventoryRequest, only, setup } from './helpers.js';
 
 const base = (): ComputerInfo => structuredClone(inventoryRequest().inventory);
 
@@ -332,6 +333,95 @@ describe('監測流程(DeviceService + AlertService + 管理 API)', () => {
     assert.deepEqual((await env.alerts.list(other, { deviceId: d.deviceId, limit: 50 })).items, []);
     await assert.rejects(env.alerts.resolve(other, { emp: 'x', name: null }, env.monitor.alerts[0]!.alertId, 'n'), { code: 'ITA_ALERT_NOT_FOUND' });
     assert.equal((await env.alerts.list({ ...other, scope: only('GSMC') }, { limit: 50 })).items.length, 1);
+  });
+
+  it('Watchdog 上報(P5-2):寫 Watchdog 欄位與事件、詳情回 watchdog;服務被停止 → agent_tampered(不自動關閉);Watchdog 有回報但 Agent 無心跳 → agent_silent', async () => {
+    const d = await env.service.identify(ctx(), DN, FP);
+    const report = example<WatchdogReportRequest>('watchdog-report.sample.json');
+    const r = await env.service.watchdogReport(ctx(), d, report);
+    assert.deepEqual(
+      r.accepted,
+      report.events!.map((e) => e.event_id),
+    );
+    assert.equal(r.report_interval_sec, 300);
+    assert.equal(r.target, null);
+    const h = env.monitor.health.get(d.id)!;
+    assert.deepEqual([h.watchdogVersion, h.agentServiceState, h.agentStartType, h.agentRestarts24h], ['0.1.0', 'running', 'auto', 1]);
+    assert.equal(h.certNotAfter?.toISOString(), '2027-10-14T08:00:00.000Z');
+    const detail = (await app.inject(`/v1/devices/${d.deviceId}`)).json();
+    assert.equal(detail.watchdog.version, '0.1.0');
+    assert.ok(env.sql.agentEvents.some((e) => e.type === 'agent_restarted'));
+    // 重送同一份不重複
+    await env.service.watchdogReport(ctx(), d, report);
+    assert.equal(env.sql.agentEvents.filter((e) => e.type === 'agent_restarted').length, 1);
+    let alerts = env.monitor.alerts.filter((a) => a.rule === 'agent_tampered');
+    assert.equal(alerts.length, 1);
+    assert.equal(alerts[0]!.severity, 'critical');
+    assert.equal(JSON.parse(alerts[0]!.detail).type, 'agent_service_stopped');
+    // Agent 端回報 watchdog_stopped:同一筆告警,detail 保留第一次
+    await env.service.ingestEvents(ctx(), d, {
+      events: [
+        { event_id: '00000000-0000-4000-8000-0000000000aa', type: 'watchdog_stopped', occurred_at: env.clock.now().toISOString(), data: { restarted: true } },
+      ],
+    });
+    alerts = env.monitor.alerts.filter((a) => a.rule === 'agent_tampered');
+    assert.equal(alerts.length, 1);
+    assert.equal(JSON.parse(alerts[0]!.detail).type, 'agent_service_stopped');
+    // agent_silent:最後回報 20 分鐘前,Watchdog 剛回報
+    env.clock.advance(20 * 60);
+    await env.service.watchdogReport(ctx(), d, { ...report, events: [] });
+    await env.alerts.sweep(ctx());
+    assert.ok(env.monitor.alerts.some((a) => a.rule === 'agent_silent' && a.state === 'open'));
+    assert.ok(
+      env.monitor.alerts.some((a) => a.rule === 'agent_tampered' && a.state === 'open'),
+      '掃描不關閉事件類告警',
+    );
+  });
+
+  it('事件類型依路徑白名單(Watchdog 事件不能經 /events、Agent 事件不能經 Watchdog 上報);重送不重開已關閉的告警', async () => {
+    const d = await env.service.identify(ctx(), DN, FP);
+    const at = env.clock.now().toISOString();
+    const stopped = { event_id: '00000000-0000-4000-8000-0000000000b1', type: 'agent_service_stopped', occurred_at: at, data: { restarted: true } };
+    // 經 /events 送 Watchdog 類型:回 accepted 但不寫入、不開告警
+    const r = await env.service.ingestEvents(ctx(), d, { events: [stopped] });
+    assert.deepEqual(r.accepted, [stopped.event_id]);
+    assert.equal(env.sql.agentEvents.length, 0);
+    assert.equal(env.monitor.alerts.length, 0);
+    // 經 Watchdog 上報送 Agent 類型(usb_inserted)同樣略過
+    const report = example<WatchdogReportRequest>('watchdog-report.sample.json');
+    const usb = { event_id: '00000000-0000-4000-8000-0000000000b2', type: 'usb_inserted', occurred_at: at, data: { drive: 'E:' } };
+    await env.service.watchdogReport(ctx(), d, { ...report, events: [usb, stopped] });
+    assert.deepEqual(
+      env.sql.agentEvents.map((e) => e.type),
+      ['agent_service_stopped'],
+    );
+    const alert = env.monitor.alerts.find((a) => a.rule === 'agent_tampered')!;
+    await env.alerts.resolve(ctx(), { emp: 'S000001', name: null }, alert.alertId, '已確認');
+    // 回應遺失、Watchdog 重送同一筆:不重開
+    await env.service.watchdogReport(ctx(), d, { ...report, events: [stopped] });
+    assert.equal(env.monitor.alerts.filter((a) => a.rule === 'agent_tampered' && a.state === 'open').length, 0);
+  });
+
+  it('Watchdog 上報經 Agent 通道:契約驗證、停用裝置 403', async () => {
+    const agent = await buildAgentApp({
+      config: { logLevel: 'silent', agentTls: null, trustedProxies: null },
+      service: env.service,
+      contractsDir: CONTRACTS_DIR,
+    });
+    const report = example<WatchdogReportRequest>('watchdog-report.sample.json');
+    const ok = await agent.inject({ method: 'POST', url: '/agent/v1/watchdog/report', headers: certHeaders(), payload: report as object });
+    assert.equal(ok.statusCode, 200);
+    const bad = await agent.inject({
+      method: 'POST',
+      url: '/agent/v1/watchdog/report',
+      headers: certHeaders(),
+      payload: { ...report, agent: { service_state: 'boom' } },
+    });
+    assert.equal(bad.statusCode, 400);
+    env.sql.devices[0]!.status = 'disabled';
+    const denied = await agent.inject({ method: 'POST', url: '/agent/v1/watchdog/report', headers: certHeaders(), payload: report as object });
+    assert.equal(denied.statusCode, 403);
+    await agent.close();
   });
 
   it('健康走勢:5 分鐘分桶(CPU 平均、磁碟取最小)、依時間排序;Mongo 無法使用回 503', async () => {

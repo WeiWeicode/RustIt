@@ -1,0 +1,57 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://giganexus.local/rustit/contracts/watchdog.schema.json",
+  "title": "POST /agent/v1/watchdog/report 請求",
+  "description": "Watchdog 上報(ENDPOINT-AGENT-GUIDE §7.3;PLATFORM-PLAN P5 §4.10 A5;P5-MONITOR-DESIGN §2.3)。與 Agent 同一個位址 :9443、同一張裝置憑證;每 report_interval_sec(預設 300)秒一次,狀態改變或有新事件時立即送。events 先寫 Watchdog 本機紀錄,主機回 accepted 才刪。主機只讓這條路徑更新 Watchdog 欄位與寫 Watchdog 事件。停用 / 退役裝置回 403(與 Agent 相同)。",
+  "type": "object",
+  "required": ["watchdog_version", "reported_at", "agent"],
+  "properties": {
+    "watchdog_version": { "type": "string", "minLength": 1, "maxLength": 32 },
+    "reported_at": { "type": "string", "format": "date-time", "description": "端點時間" },
+    "agent": { "$ref": "#/definitions/AgentState" },
+    "agent_restarts_24h": { "type": "integer", "minimum": 0, "description": "24 小時內 Agent 非正常重啟次數(crashed + hung)" },
+    "cert_not_after": { "type": "string", "format": "date-time", "description": "裝置憑證到期日;讀不到時省略" },
+    "events": {
+      "type": "array",
+      "maxItems": 50,
+      "items": { "$ref": "https://giganexus.local/rustit/contracts/event.schema.json#/definitions/Event" }
+    }
+  },
+  "definitions": {
+    "AgentState": {
+      "description": "Watchdog 從 SCM 與本機管道 get_status 看到的 Agent",
+      "type": "object",
+      "required": ["service_state", "start_type"],
+      "properties": {
+        "service_state": {
+          "type": "string",
+          "enum": ["running", "stopped", "start_pending", "stop_pending", "paused", "missing", "unknown"],
+          "description": "missing = 服務不存在"
+        },
+        "start_type": { "type": "string", "enum": ["auto", "manual", "disabled", "missing", "unknown"] },
+        "pid": { "type": "integer", "minimum": 0 },
+        "exe_present": { "type": "boolean", "description": "服務設定指向的 exe 是否存在" },
+        "status_ok": { "type": "boolean", "description": "最近一次本機管道 get_status 是否成功(Agent 未執行時省略)" },
+        "status_at": { "type": "string", "format": "date-time" },
+        "version": { "type": "string", "maxLength": 32, "description": "get_status 回報的 Agent 版本" },
+        "ws_connected": { "type": "boolean" },
+        "last_heartbeat_ack": { "type": "string", "format": "date-time" },
+        "last_error": { "type": "string", "maxLength": 300, "description": "Agent 最近一次錯誤摘要,或 get_status 失敗原因" }
+      }
+    },
+    "WatchdogReportResponse": {
+      "title": "POST /agent/v1/watchdog/report 回應(200)",
+      "type": "object",
+      "required": ["server_time", "accepted"],
+      "properties": {
+        "server_time": { "type": "string", "format": "date-time" },
+        "accepted": { "type": "array", "items": { "type": "string", "format": "uuid" }, "description": "已保存(含先前已收過)的 event_id" },
+        "report_interval_sec": { "type": "integer", "minimum": 60, "maximum": 3600, "description": "下次定期上報間隔(預設 300)" },
+        "target": {
+          "type": ["object", "null"],
+          "description": "目標版本與下載資訊(P6 升級);P5 一律 null,Watchdog 0.1.0 忽略"
+        }
+      }
+    }
+  }
+}

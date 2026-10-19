@@ -53,6 +53,7 @@ import type {
   SnapshotStore,
   StateStore,
   TouchPatch,
+  WatchdogState,
 } from '../src/stores/types.js';
 
 export const CONTRACTS_DIR = path.resolve(import.meta.dirname, '../../docs/contracts');
@@ -139,8 +140,13 @@ export class MemoryDeviceStore extends Failable implements DeviceStore {
   }
   async addAgentEvents(device: DeviceRecord, events: AgentEvent[], receivedAt: Date) {
     this.hit('addAgentEvents');
+    const added: string[] = [];
     for (const e of events)
-      if (!this.agentEvents.some((x) => x.deviceRef === device.id && x.eventUid === e.eventUid)) this.agentEvents.push({ ...e, id: ++this.eventSeq, deviceRef: device.id, receivedAt });
+      if (!this.agentEvents.some((x) => x.deviceRef === device.id && x.eventUid === e.eventUid)) {
+        this.agentEvents.push({ ...e, id: ++this.eventSeq, deviceRef: device.id, receivedAt });
+        added.push(e.eventUid);
+      }
+    return added;
   }
   async touch(deviceRef: number, at: Date, patch: TouchPatch = {}) {
     this.hit('touch');
@@ -430,6 +436,7 @@ export function setup(opts: { companyDomains?: Map<string, string> } = {}) {
     companyDomains: opts.companyDomains,
     monitor,
     onHostEvents: (ctx, ref, events) => alerts!.onHostEvents(ctx, ref, events),
+    onAgentEvents: (ctx, ref, events) => alerts!.onAgentEvents(ctx, ref, events),
   });
   alerts = new AlertService(monitor, (id) => service.lookup(id), DEFAULT_THRESHOLDS, clock.now);
   return { sql, mongo, redis, clock, service, monitor, alerts };
@@ -479,6 +486,18 @@ export class MemoryMonitorStore extends Failable implements MonitorStore {
     const h = this.row(ref);
     // 與 SQL 相同:這一則沒有的欄位保留上一次的值
     Object.assign(h, s, { healthAt: at });
+  }
+  async saveWatchdog(ref: number, w: WatchdogState) {
+    this.hit('saveWatchdog');
+    Object.assign(this.row(ref), {
+      watchdogVersion: w.version,
+      watchdogReportAt: w.reportAt,
+      agentServiceState: w.agentServiceState,
+      agentStartType: w.agentStartType,
+      agentStatusOk: w.agentStatusOk,
+      agentLastError: w.agentLastError,
+      agentRestarts24h: w.agentRestarts24h,
+    });
   }
   async saveCertNotAfter(ref: number, notAfter: Date) {
     this.hit('saveCertNotAfter');
