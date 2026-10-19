@@ -201,7 +201,7 @@ Demo(Tauri)改造為使用者端程式 `desktop`:使用者會用的頁面保留(
 - 健康指標只做摘要,**不做**程序清單、螢幕、鍵盤等(PRD §7 隱私)。
 - 軟硬體變更由 **Server 比對**(同一裝置前後兩份 payload 的 `software`、`memory_modules`、`physical_disks`、`gpus` 序號),Agent 不需要記住上一份,也不會因 Agent 重裝而漏判。
 - USB 插拔由 Agent 監聽裝置變更(`CM_Register_Notification`,ADR 0003 使用者模式),只記錄、不封鎖。
-- **告警規則**(初版固定,不做規則引擎):離線超過 N 天、磁碟剩餘 < 10%、硬體序號變更、Agent 24 小時內重啟 ≥ 3 次、憑證 30 天內到期、Watchdog 回報版本不符。先只在 GigaItApp「告警」頁顯示;之後經 BFF 通知逐人寄給 IT 值班人員。
+- **告警規則**(初版固定,不做規則引擎):離線超過 N 天、磁碟剩餘 < 10%、硬體序號變更、Agent 24 小時內重啟 ≥ 3 次、憑證 30 天內到期、Watchdog 回報版本不符(**P6**:P5 尚無目標版本可比)。完整規則與門檻見 `P5-MONITOR-DESIGN.md` §4。先只在 GigaItApp「告警」頁顯示;之後經 BFF 通知逐人寄給 IT 值班人員。
 
 ### 4.4 指令通道 — P4
 
@@ -351,7 +351,7 @@ Demo(Tauri)改造為使用者端程式 `desktop`:使用者會用的頁面保留(
 | `agent-app.ts`(續) | WS `command` / `command_update`(P4)、`POST /agent/v1/watchdog/report`(P5)、`GET /agent/v1/releases/...`(P6)、`GET /agent/v1/packages/{id}`(P7);`hello_ack` 帶設定版本號(P2) | P4–P7 |
 | `services/sync-service.ts` | `/sync` 冪等比對(INTEGRATION-PLAN §4.2)、`offline_period` 等事件寫入 | P2 |
 | `services/command-dispatcher.ts` | 指令狀態機、在線推送、重連補送、逾期、批次限流 | P4 |
-| `services/event-service.ts` | 資產前後比對、告警規則 | P5 |
+| `services/change-detector.ts`、`alert-service.ts`、`health-service.ts` | 資產前後比對(純函式)、告警規則、健康與 Watchdog 回報(`P5-MONITOR-DESIGN.md` §3) | P5 |
 | `services/release-service.ts`、`software-service.ts` | 版本選擇、檔案雜湊、下載稽核 | P6、P7 |
 
 ### 5.2 資料表(手寫 migration,SQL Server 2012 語法)
@@ -360,7 +360,7 @@ Demo(Tauri)改造為使用者端程式 `desktop`:使用者會用的頁面保留(
 | --- | --- | --- |
 | `0002_sync_event.sql` | `ita.device_event` 加 `occurred_at`(端點發生時間)、`received_at`、索引與新 `event_type`(含 `offline_period`、`usb_*`、`local_overflow`、`merged`);`ita.device_setting`(主機下發設定與版本號);`ita.device` 加 `hw_fingerprint`、`clock_skew_ms`、`merged_into`、`retired_at`(A1、A2) | P2 |
 | `0003_command.sql` | `ita.command`、`ita.command_batch`(含第二人核可欄位,B1);診斷檔案索引(`logs.collect`,A4) | P4 |
-| `0004_health.sql` | `ita.device_health`(Watchdog 最近回報、憑證到期、重啟次數;1:1) | P5 |
+| `0006_monitor.sql` | `ita.device_health`(最近健康、Watchdog 最近回報、憑證到期、重啟次數;1:1)、`ita.device_alert`(告警);原訂 0004,0004 / 0005 已用於 P3 軟體清單與 E6 公司 | P5 |
 | `0005_release.sql` | `ita.agent_release`、`ita.release_ring`、`ita.device` 加 `ring`、`watchdog_version`、`desktop_version` | P6 |
 | `0006_software.sql` | `ita.software_package` | P7 |
 
@@ -413,6 +413,8 @@ Demo(Tauri)改造為使用者端程式 `desktop`:使用者會用的頁面保留(
 
 ## 8. 階段與完成標準
 
+> 進度(細節以甘特圖為準):P0–P4 已在測試區完成(P3 於 2026-10-19 完成合併驗證;P4 含 GigaItApp 指令畫面，見 `HANDOFF.md`);**P5 進行中**(設計 `P5-MONITOR-DESIGN.md`:P5-1 健康 / 變更事件 / 告警已上測試區;P5-2 Watchdog 待合併與 VM 驗收;P5-3 GigaItApp 畫面暫停);P6–P8 未開始。
+
 | 階段 | 內容 | 主要 repo | 完成標準 | 依賴 |
 | --- | --- | --- | --- | --- |
 | **P0** 框架定案 | 本計畫;README / HANDOFF / PROJECT-MAP 對齊;定案後更新根目錄文件、甘特圖、指南(§10) | RustIt(後續:根目錄、Gateway) | 需求方確認本計畫 | — |
@@ -439,7 +441,7 @@ Demo(Tauri)改造為使用者端程式 `desktop`:使用者會用的頁面保留(
 | B6 | **大量異常偵測** | giga-observe 加入「端點在線率驟降(例如 10 分鐘內下降 20%)」「同一錯誤碼暴增(憑證被拒、503)」告警,通知**維運人員**;CRL / 憑證過期會造成全公司同時掉線,這是最可能的大規模事故 | 高 |
 | B7 | **壓測工具** | `RustIt/tools/agent-sim`(Node.js 或 Rust):模擬 500–1,000 台 Agent 的 WebSocket、心跳、補傳、事件、指令回應;驗證主機與 Gateway(指南 G3) | 中 |
 | B8 | **CI 安全掃描** | CI 加 `cargo audit`、`npm audit`(高風險即失敗)、產出 SBOM;發版檢查清單(版本號、變更說明、簽章、雜湊、`pilot` 環觀察) | 中 |
-| B9 | **公司間的資料範圍** | 依指南 E6:管理 API 依內部 Token 的 `cos` 過濾;另設「全部公司」角色給 IT 主管 | 中 |
+| B9 | **公司間的資料範圍** | 依指南 E6:管理 API 依內部 Token 的 `cos` 過濾;另設「全部公司」角色給 IT 主管。✅ 後端 2026-10-16 上測試區(`E6-COMPANY-SCOPE-DESIGN.md`,`ENDPOINT_SCOPE_ALL_ROLES`),2026-10-19 以兩家公司的測試帳號驗證通過;尚待 GigaItApp 公司欄與指定按鈕(E6-2)、正式區裝置憑證 CN 必須是 FQDN | 中 |
 | B10 | **維運手冊與使用者文件** | `docs/RUNBOOK.md`:大量離線、憑證過期、版本回滾、手動解除安裝、NAS 無法掛載的處理步驟;IT 安裝指南(GPO 派送、非網域電腦);使用者 FAQ(托盤是什麼、蒐集哪些資料、如何回報電腦資訊) | 中 |
 
 ---
@@ -476,6 +478,7 @@ Demo(Tauri)改造為使用者端程式 `desktop`:使用者會用的頁面保留(
 | 7 | §8.3 指令類型 | 新增 `agent.diagnose`、`logs.collect`、`agent.log_level`(basic,A4) | 修訂 §8.3 |
 | 8 | §4.2 / §5 未定義主機忙碌與最低版本 | `429` + `Retry-After`(A3)、`min_agent_version` / `AGENT_TOO_OLD`(B2) | 修訂 §4.2、§5.6 |
 | 9 | §3.3 以 DN 為裝置鍵 | 不變;另加硬體指紋供 IT 確認合併(A1) | 修訂 §3.3 補一點 |
+| 10 | §8.3 / §8.4 指令 API 與訊息為草案 | P4 實作:指令紀錄 / 批次 / 日誌下載 API、Agent 指令附檔上傳、`command_update_ack`、`prepare_shutdown.reconnect_after_sec`;正式格式在 `docs/contracts/` | 指南 v0.6 已修訂(2026-10-15) |
 
 PRD(2026-09-27)中的 Rust Axum 後端、PostgreSQL、React 前端已由後續決定取代(ADR 0004、GigaItApp);托盤程式保留,改為使用者端程式(§4.8),公告後端用 BFF 通知中心;PRD 保留為需求來源,架構以本計畫與指南為準。
 

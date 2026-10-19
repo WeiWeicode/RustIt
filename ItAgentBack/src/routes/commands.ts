@@ -3,13 +3,17 @@
  *   - 依風險拆路徑:basic-commands 只接受 basic 類型(否則 400 ENDPOINT_COMMAND_LEVEL_MISMATCH);admin-commands 在 P6 有第一個 admin 類型時才加
  *   - POST 支援 Idempotency-Key(同一工號 + 同一 key 回傳既有的那筆);建立指令設 x-audit-level: meta,不設 x-cache-ttl
  *   - 操作人(工號、姓名)取自內部 Token,寫入稽核(§8.5)
+ *   - 指令附檔(logs.collect 日誌,P4-2):GET /commands/{id} 回應帶 files;下載 GET /commands/{id}/files/{fileId}(x-audit-level: meta)
+ *   - 資料範圍(E6):指令跟著裝置目前的公司,只回傳、只接受登入者所屬公司的電腦;範圍外與不存在同樣回 404
  * 路由只驗參數與宣告權限,邏輯在 CommandDispatcher(AGENT.md §8.1)。
  */
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { COMMAND_KINDS, EXPIRES_MAX_SEC, EXPIRES_MIN_SEC } from '../commands/kinds.js';
 import { AppError } from '../errors.js';
 import { BATCH_MAX_DEVICES, type CommandDispatcher } from '../services/command-dispatcher.js';
+import type { CommandFileService } from '../services/command-files.js';
 import type { CommandState } from '../stores/types.js';
+import { mgmtCtx } from './mgmt-ctx.js';
 
 const STATES = ['queued', 'sent', 'acked', 'running', 'succeeded', 'failed', 'canceled', 'expired'] as const;
 const BASIC_KINDS = COMMAND_KINDS.filter((k) => k.level === 'basic').map((k) => k.kind);
@@ -41,6 +45,22 @@ const commandSchema = {
     ackedAt: dateOrNull,
     startedAt: dateOrNull,
     finishedAt: dateOrNull,
+    files: {
+      type: 'array',
+      description: '指令附檔(logs.collect 的日誌 zip);只在 GET /commands/{commandId} 回傳',
+      items: {
+        type: 'object',
+        properties: {
+          fileId: uuid,
+          fileName: { type: 'string' },
+          sizeBytes: { type: 'integer' },
+          sha256: { type: 'string' },
+          createdAt: { type: 'string', format: 'date-time' },
+          expiresAt: { type: 'string', format: 'date-time' },
+          expired: { type: 'boolean' },
+        },
+      },
+    },
   },
 } as const;
 
@@ -85,9 +105,9 @@ interface ListQuery {
   limit?: number;
 }
 
-export function commandRoutes(commands: CommandDispatcher): FastifyPluginAsync {
+export function commandRoutes(commands: CommandDispatcher, files?: CommandFileService): FastifyPluginAsync {
   return async (app) => {
-    const ctx = (req: FastifyRequest) => ({ log: req.log, requestId: req.id });
+    const ctx = mgmtCtx;
     const who = (req: FastifyRequest) => {
       if (!req.identity) throw new AppError(401, 'ITA_INTERNAL_TOKEN_INVALID', '缺少內部 Token');
       return req.identity;
@@ -202,7 +222,7 @@ export function commandRoutes(commands: CommandDispatcher): FastifyPluginAsync {
           operationId: 'endpoint.command.get',
           summary: '指令狀態與結果',
           description:
-            '指令的狀態(queued / sent / acked / running / succeeded / failed / canceled / expired)、結果摘要、錯誤代碼與稽核欄位;執行中由前端每 2 秒輪詢。',
+            '指令的狀態(queued / sent / acked / running / succeeded / failed / canceled / expired)、結果摘要、錯誤代碼與稽核欄位;執行中由前端每 2 秒輪詢。logs.collect 另回 files(日誌 zip,以 GET /commands/{commandId}/files/{fileId} 下載)。',
           tags: ['端點指令'],
           'x-permission': 'endpoint.device.read',
           'x-gherkin': [
@@ -216,14 +236,55 @@ export function commandRoutes(commands: CommandDispatcher): FastifyPluginAsync {
           response: { 200: commandSchema },
         },
       },
-      async (req) => commands.get(ctx(req), req.params.commandId.toLowerCase()),
+      async (req) => {
+        const id = req.params.commandId.toLowerCase();
+        const view = await commands.get(ctx(req), id);
+        return files ? { ...view, files: await files.forCommand(ctx(req), id) } : view;
+      },
     );
+
+    if (files)
+      app.get<{ Params: { commandId: string; fileId: string } }>(
+        '/v1/commands/:commandId/files/:fileId',
+        {
+          schema: {
+            operationId: 'endpoint.command.file.download',
+            summary: '下載指令附檔',
+            description:
+              '下載 logs.collect 上傳的 Agent 日誌(zip)。檔案保存 14 天,超過回 410 ITA_COMMAND_FILE_EXPIRED;fileId 不屬於此指令回 404 ITA_COMMAND_FILE_NOT_FOUND。日誌可能含電腦名稱、登入帳號與 IP,下載會記錄稽核。',
+            tags: ['端點指令'],
+            'x-permission': 'endpoint.device.read',
+            'x-audit-level': 'meta',
+            'x-gherkin': [
+              '場景: 下載已過期的日誌',
+              '  假如 logs.collect 指令的附檔已超過保存期限',
+              '  當 呼叫 GET /api/endpoint/commands/{commandId}/files/{fileId}',
+              '  那麼 回應 410',
+              '  而且 回應的 code 為 "ITA_COMMAND_FILE_EXPIRED"',
+            ].join('\n'),
+            params: { type: 'object', properties: { commandId: uuid, fileId: uuid }, required: ['commandId', 'fileId'] },
+            response: { 200: { description: '日誌 zip', content: { 'application/zip': { schema: { type: 'string', format: 'binary' } } } } },
+          },
+        },
+        async (req, reply) => {
+          const { file, stream } = await files.open(ctx(req), req.params.commandId.toLowerCase(), req.params.fileId.toLowerCase());
+          return reply
+            .header('content-type', 'application/zip')
+            .header('content-length', String(file.sizeBytes))
+            .header('content-disposition', `attachment; filename="${file.fileName}"`)
+            .header('x-content-type-options', 'nosniff')
+            .header('cache-control', 'no-store')
+            .header('x-file-sha256', file.sha256)
+            .send(stream);
+        },
+      );
 
     app.get<{ Params: { deviceId: string }; Querystring: ListQuery }>(
       '/v1/devices/:deviceId/commands',
       {
         schema: {
-          operationId: 'endpoint.command.listByDevice',
+          // operationId 只能小寫(Gateway 匯入格式 {system}.{resource}.{action})
+          operationId: 'endpoint.command.list-by-device',
           summary: '電腦的指令紀錄',
           description: '該電腦的指令,新到舊;每頁最多 100 筆,以 nextCursor 取下一頁。',
           tags: ['端點指令'],

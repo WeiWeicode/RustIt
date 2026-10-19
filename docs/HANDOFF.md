@@ -8,19 +8,53 @@
 | --- | --- |
 | 基本階段(INTEGRATION-PLAN M0–M4、M6) | ✅ 完成:Agent 經 Gateway `:9443` 回報 ItAgentBack,GigaItApp「電腦清單」看得到 |
 | `RustAgent/crates/collector` | ✅ 硬體、軟體、網路、防毒、USB 儲存、RustDesk 狀態 |
-| `RustAgent/crates/agent`(`rustit-agent`) | ✅ 前景執行(`run`)與 **Windows 服務**(`service`;開發用 `install` / `uninstall`,P1 第一批);HTTPS 回報、WebSocket hello / 心跳、退避重連、裝置憑證(PEM 檔或 Windows `LocalMachine\My`,P1 PoC 實測通過)、服務模式檔案日誌、監控 MSI(未簽章,P1 VM 驗證通過)。**P2**:本機加密暫存 `state\store.db`(資產 / 事件 outbox、連線紀錄)、離線照常蒐集與 `/sync` 補傳、`offline_period`、USB 插拔與 `agent_started` 事件、429 依 Retry-After、主機下發設定(2026-10-15 VM 驗證通過,見下方 P2-3)。**P4-1(0.3.0,分支 `feature/p4-command`)**:指令執行器 `inventory.collect` / `agent.restart` / `message.show`、本機 `command_log` 去重與待回報狀態 |
+| `RustAgent/crates/watchdog`(`rustit-watchdog`) | 🟡 **0.1.0**(P5-2,MR !32 待合併與 VM 驗收):`GigaNexusWatchdog` 服務看守 Agent、自己經 `:9443` 上報 |
+| `RustAgent/crates/agent`(`rustit-agent`) | ✅ **0.4.2**(測試區 VM);develop 已到 **0.5.0**(P5-1:心跳健康摘要、上次結束原因、hello 憑證到期日),MR !32 為 **0.6.0**(本機管道、看守 Watchdog、服務 ACL)。0.4.2:2026-10-19 停用改每 1 分鐘重試; 前景執行(`run`)與 **Windows 服務**(`service`;開發用 `install` / `uninstall`,P1 第一批);HTTPS 回報、WebSocket hello / 心跳、退避重連、裝置憑證(PEM 檔或 Windows `LocalMachine\My`,P1 PoC 實測通過)、服務模式檔案日誌、監控 MSI(未簽章,P1 VM 驗證通過)。**P2**:本機加密暫存 `state\store.db`(資產 / 事件 outbox、連線紀錄)、離線照常蒐集與 `/sync` 補傳、`offline_period`、USB 插拔與 `agent_started` 事件、429 依 Retry-After、主機下發設定(2026-10-15 VM 驗證通過,見下方 P2-3)。**P4-1(0.3.0,已合併 develop)**:指令執行器 `inventory.collect` / `agent.restart` / `message.show`、本機 `command_log` 去重與待回報狀態。**P4-2(0.4.0,已合併 develop,2026-10-15 測試區 VM 驗證通過)**:`agent.diagnose`、`logs.collect`(日誌 zip 上傳)、`agent.log_level` |
 | `RustAgent/crates/demo` | 示範介面;**將改造為使用者端程式 `desktop`**(P8),`src/deploy.rs` 是軟體派送的參考實作(P7 移植到 Agent) |
 | `RustAgent/crates/native` | ✅ 已移除(P1;最後版本 `3ba3827`) |
-| `ItAgentBack` | ✅ 測試區(主機 2,`endpoint-server` + `ita-mongo` / `ita-redis`,CI `develop` 部署);管理 API `GET /v1/devices[/{deviceId}]`;**P4-1(分支 `feature/p4-command`,未合併)**:指令派送器與 basic 指令 API(`/v1/devices/{id}/basic-commands`、`/v1/batches/basic-commands`、`/v1/commands[/{id}[/cancel]]`、`/v1/batches/{id}`),migration 0003 已套用 `giganexus_It_Agent_test`(2026-10-15,經需求方同意);giga-observe 監控已接。**P2 主機端已上測試區**(2026-10-14,MR !10):`/sync`、`/events`、429、時鐘偏差、硬體指紋、主機下發設定;migration 0002 已套用 `giganexus_It_Agent_test` |
+| `ItAgentBack` | ✅ 測試區(主機 2,`endpoint-server` + `ita-mongo` / `ita-redis`,CI `develop` 部署);管理 API `GET /v1/devices[/{deviceId}]`;**P4-2(已合併 develop,路由 Gateway v51 已發佈)**:指令附檔上傳 `POST /agent/v1/commands/{id}/files`、下載 `GET /v1/commands/{id}/files/{fileId}`、volume `ita_command_files`(保存 14 天);不需新 migration。**P4-1(已合併 develop)**:指令派送器與 basic 指令 API(`/v1/devices/{id}/basic-commands`、`/v1/batches/basic-commands`、`/v1/commands[/{id}[/cancel]]`、`/v1/batches/{id}`),migration 0003 已套用 `giganexus_It_Agent_test`(2026-10-15,經需求方同意);giga-observe 監控已接。**P2 主機端已上測試區**(2026-10-14,MR !10):`/sync`、`/events`、429、時鐘偏差、硬體指紋、主機下發設定;migration 0002 已套用 `giganexus_It_Agent_test` |
 | GigaItApp 電腦清單 | ✅ 清單 + 詳情(概要、磁碟、網卡) |
 | INTEGRATION-PLAN M5(離線暫存、`/sync`) | 併入 PLATFORM-PLAN P2(✅ 完成) |
 | 第二階段計畫 | ✅ `PLATFORM-PLAN.md` v0.4 **定案**(P0,2026-10-13):根目錄 `PROJECT-MAP.md` / `workspace.json`(cbf6db9)、Gateway `ENDPOINT-AGENT-GUIDE.md` v0.5(7319e87)已同步;甘特圖 W6-13 ~ W6-24(P0–P8、上線前準備),舊 W6-1 ~ W6-6、W6-12 已由新任務取代 |
 
 ## 2. 下一步
 
+0. **下一個工作階段從這裡開始:P5 監測(甘特圖 W6-18)**
+   - **範圍**:PLATFORM-PLAN §4.3(三層資料：健康摘要附在心跳、事件、Server 比對軟硬體變更、固定告警規則)、§4.10 A5(Agent 被停用 / 移除偵測)、§8 P5 完成標準;Watchdog 規格見 Gateway `ENDPOINT-AGENT-GUIDE.md` §7。
+   - **完成標準**:結束 Agent 行程 → Watchdog 重啟並上報;以管理員手動停止 Agent 服務 → 產生事件與告警;插 USB 隨身碟 → 事件出現(P2 已有);移除一個軟體 → 下次蒐集產生變更事件。
+   - **進度(2026-10-19,設計 [P5-MONITOR-DESIGN.md](P5-MONITOR-DESIGN.md),需求方確認 §9 全部照建議)**:
+     - **P5-1 ✅ 已合併 develop(MR !31,`91ee86c`)並部署測試區**:migration 0006 已套用 `giganexus_It_Agent_test`;健康摘要、資產變更事件、告警 API(`/v1/alerts`、`/v1/devices/{id}/health`);Agent 0.5.0。**待辦**:Gateway OpenAPI 草稿批次發佈(新 API 才會出現在 `/api/endpoint/*`)。
+     - **P5-2(MR !32,分支 `feature/p5-2-watchdog`,已同步 develop、無衝突)**:`watchdog` crate(Watchdog 0.1.0)、Agent 0.6.0(本機管道、看守 Watchdog、服務 ACL)、監控 MSI 含兩個服務、`POST /agent/v1/watchdog/report`、`agent_tampered`;子代理審查(含 1 High)已修正(設計 §8.3)。本機測試與端到端(前景 Watchdog → 本機 Server)通過;**管道、SCM 看守、服務 ACL、MSI 安裝 / 升級 / 解除安裝要在 VM 驗證**(本機非系統管理員無法測)。合併後 endpoint-server 只多 `watchdog/report` 路由與事件白名單,不需新 migration。測試區 MSI:`dist/msi/GigaNexusAgent-0.6.0-test.msi`(本機建置,SHA-256 `5fd145df…5c4471`;合併後以 develop 重建)。
+     - **P5-3(GigaItApp)暫停(需求方 2026-10-19 指示)**:已寫到一半的改動(電腦清單健康欄與告警數、詳情「健康與 Agent」Tab、事件新類型標籤、「告警」Tab、`gateway-rbac.yaml` 節點 `it.endpoint-alert.list` / `it.endpoint-alert.resolve`,依指示 includes 待 OpenAPI 發佈後再綁)存在 GigaItApp 分支 `feature/p5-monitor-ui` 的 `git stash`(`stash@{0}`,**只在這台開發機**),型別檢查已過、尚未瀏覽器驗證。恢復:`git -C GigaItApp switch feature/p5-monitor-ui && git -C GigaItApp stash pop`。
+     - **待辦**:Gateway OpenAPI 草稿批次發佈(P5-1 的 `/alerts`、`/devices/{id}/health`,P5-2 合併後再一批);指南回寫(§6.3 health、§7.2 管道、§7.3 watchdog report、§8.3 告警 API,Gateway repo 需同意);根目錄 `workspace.json`(watchdog `planned` → `active`)、`PROJECT-MAP.md`、甘特圖 W6-18 進度(需同意);後續項目見設計 §8.1、§8.3「未處理」。
+     - VM 驗收:完成標準 4 項(設計 §0 表)。VM 先建檢查點「P5 前(0.4.2)」,再裝 0.6.0 MSI(同時驗 P5-1 與 P5-2)。
+   - **建議做法**:比照 P3 / P4,先寫設計 `docs/P5-MONITOR-DESIGN.md`(分批、資料表 / migration、契約擴充、告警規則、Watchdog 與 Agent 互相看守、MSI 加第二個服務、GigaItApp 畫面),經需求方確認後再實作;牽涉服務、安全與契約,由 Claude 主寫。
+   - **要先同意**:migration 套用測試庫、契約變更、MSI 加 Watchdog 服務、GigaItApp 告警頁與 `gateway-rbac.yaml`、指南回寫(§5、§7)、合併 develop(測試區共用)。
+   - **測試環境**:主機 2 Hyper-V VM(名稱 `RUSTIT-P34`、憑證 `CN=DESKTOP-1TB2UMP`、deviceId `de87bce2`、Agent 0.4.2;檢查點「匯入憑證」「P3-4 改名前(0.4.1)」;Claude 可經 `ssh host2` 操作 Hyper-V,VM 內指令由需求方執行)。E6 測試帳號 V112001(碩禾、禾迅)、V114007(禾迅),個人權限「電腦清單」。對外 API 是 `/api/endpoint/*`(沒有 `/v1`)。
+   - **close code 規則**:4403 = 停用 / 退役(Agent 暫停;停用每 1 分鐘、退役 10 分鐘重試)、4409 = 被新連線取代、4410 = 合併(立即重連)。新的關閉原因要另訂代碼，不要沿用 4403。
+
+   **前一階段(2026-10-19 收尾)**:
+   - **P3 完成、E6 測試區驗證通過(2026-10-19)**:見 [test-reports/2026-10-19-p3-merge-e6-scope.md](test-reports/2026-10-19-p3-merge-e6-scope.md)。P3-4 合併驗證通過;修正兩個問題:合併改用 close 4410(MR !27,endpoint-server `8235dc10`)、Agent **0.4.2** 停用改每 1 分鐘重試(MR !28,`5d04604`;VM 已升級 0.4.2,MSI SHA-256 `88d9a774…dcbd0dac`)。E6:批次 112 已發佈，以 V112001(碩禾、禾迅)、V114007(禾迅)驗證資料範圍。VM 目前名稱 `RUSTIT-P34`、憑證 `CN=DESKTOP-1TB2UMP`(deviceId 仍為 `de87bce2`),檢查點多了「P3-4 改名前(0.4.1)」。
+   - **待辦**:指南 §5.4(close 4410)、§8.3(合併路由)回寫(Gateway,需同意);E6-2 GigaItApp 公司欄 / 篩選 / 指定按鈕、E6-3 指南回寫(需同意);甘特圖 W6-16 已改 100% done(根目錄 !5、甘特圖 API)。
+   - VM `DESKTOP-1TB2UMP` 已由需求方升級 Agent **0.4.1**(2026-10-16;MSI SHA-256 `880e46d9…da794c`,自 develop `8568f55` 建置);已確認收集日誌 zip 內檔案時間為日誌修改時間(正常,非 1980-01-01)。
+   - **P3 資料呈現已上測試區(2026-10-16)**:RustIt MR !23(endpoint-server `807c7a12`,OpenAPI 批次 110 已發佈,新增權限 `endpoint.command.admin`,啟動時回填 3 台軟體清單)、GigaItApp MR !4、!5(詳情固定 85vh 高度、篩選列換行);migration 0004 已套用;rbac-test 已重跑(`it.endpoint-device.admin` → `endpoint.command.admin`,it-admin)。瀏覽器實測(需求方登入):清單分頁 / 軟體篩選 / 清除、VM 詳情 7 個 Tab、事件 21 筆、下載 JSON、**停用 → 啟用(期間排隊指令於重連後送出)、退役 → 改回使用中皆正常**。P3-4(VM 改名後的疑似同一台與合併)已於 2026-10-19 驗證通過(見上)。合併路由寫入指南 §8.3(需 Gateway 同意)。
+   - **E6 資料範圍依公司已上測試區(2026-10-16)**:RustIt MR !25(endpoint-server `3081af75`),migration 0005 已套用,主機 2 `ita.env` 已加 `ENDPOINT_SCOPE_ALL_ROLES=it-admin`、`ENDPOINT_COMPANY_DOMAINS=碩禾=gsc.com.tw,gsmc.com.tw`;回填後開發機兩筆登錄為碩禾、VM 未指定(只有 it-admin 看得到),見 `E6-COMPANY-SCOPE-DESIGN.md` §6.1。批次 112 已發佈，非 it-admin 帳號驗證已於 2026-10-19 通過(見上)。注意:改 `ENDPOINT_COMPANY_DOMAINS` 後要重啟 endpoint-server,且 `domain` 來源的裝置等下次資產變動才重算。Gateway ENDPOINT-AGENT-GUIDE v0.8 已回寫 E6(Gateway 分支 `docs/endpoint-guide-v0.8`,待合併);甘特圖 W6-16 90%、W6-24 註記 B9 後端完成。E6-2(GigaItApp 公司欄 / 篩選 / 指定按鈕)、E6-3(指南 §8.2、§8.3、§10.2 E6、§11 回寫)待同意。上線檢查加入「正式區裝置憑證 CN 必須是 FQDN」。
+   - P4 後續(未排程,見 `P4-COMMAND-DESIGN.md` §6.1、§8.4):WebSocket 訊息速率上限、`result` 依類型以 schema 限制、慢速上傳佔用回報名額、`ita.command_file.command_ref` 唯一索引(多實例前)、附檔總量上限與磁碟告警、批次下指令畫面。
 1. **P1 已完成**(2026-10-14 Hyper-V VM 驗證 7 項通過,見下方「P1 收尾:VM 測試」)。Win11 VM 可之後補測;VM 保留作 P2 以後的測試機(檢查點「匯入憑證」)。
-2. **P3 資料呈現**、**P8-1 使用者端外殼與我的電腦** 可並行:P3(管理 API 回完整資產 + GigaItApp 詳情分 Tab)只動後端與前端,適合交給同仁。
-3. **P2 已完成**(主機端與 Agent 端已合併 `develop`;2026-10-15 P2-3 VM 驗證 7 項通過,見下方)。驗證時發現裝置被停用期間會記成 `offline_period`(rejected),已於 0.2.1 排除(BugFix.md 2026-10-15;測試區 VM 仍為 0.2.0,下次重建 MSI 時一併升級)。**P4 指令通道進行中**(設計 `P4-COMMAND-DESIGN.md`,需求方 2026-10-15 確認):P4-1(資料表、契約、派送器、basic API、Agent 三個指令)本機驗證通過,待 MR;下一批 P4-2 `agent.diagnose` / `logs.collect` / `agent.log_level`,P4-3 GigaItApp 指令按鈕與指令紀錄、`gateway-rbac.yaml` 綁 `endpoint.command.basic`(動手前需同意;OpenAPI 註冊後才綁)。P4-1 測試區 VM 驗證需重建 0.3.0 MSI(`agent.restart` 需服務模式)。
+2. **P3 資料呈現已完成**(2026-10-19);**P8-1 使用者端外殼與我的電腦**可交給同仁並行(甘特圖 W6-21)。
+3. **P2 已完成**(主機端與 Agent 端已合併 `develop`;2026-10-15 P2-3 VM 驗證 7 項通過,見下方)。驗證時發現裝置被停用期間會記成 `offline_period`(rejected),已於 0.2.1 排除(BugFix.md 2026-10-15;測試區 VM 已升級)。**P4 指令通道已完成**(測試區;設計 `P4-COMMAND-DESIGN.md`,需求方 2026-10-15 確認;甘特圖 W6-17;Gateway 指南 v0.6 已回寫):P4-1 已合併 develop;P4-2 已合併並於 2026-10-15 測試區 VM 驗證通過(見下方「P4 測試區 VM 驗證」;含 P4-1 的服務模式 `agent.restart`);`endpoint.command.basic` 已由 GigaItApp `gateway-rbac.yaml` 按鈕節點 `it.endpoint-device.command` 授予 it-admin(GigaItApp MR !1)。**P4-3(2026-10-15,GigaItApp MR !2)**:電腦詳情「指令」Tab(六個指令、結果、日誌下載、指令紀錄、取消)與「端點管理 › 指令紀錄」Tab,本機連測試區 Gateway 對 VM 實測通過(GigaItApp NewFeatures 2026-10-15);已合併(GigaItApp `02f12d2`),「指令紀錄」Tab 由 CI rbac-test 套用權限後可見。小項已修(BugFix.md 2026-10-15,Agent 0.4.1:zip 檔案時間、瞬間完成的指令補 started_at;VM 已於 2026-10-16 升級 0.4.1)。
+
+### P4 測試區 VM 驗證(2026-10-15)
+
+| 項目 | 結果 |
+| --- | --- |
+| 環境 | VM `DESKTOP-1TB2UMP` 由 0.2.0 升級 0.4.0 測試區 MSI(SHA-256 `f72cac1f…e44d64`),經 Gateway `:9443`;指令經 BFF `/api/endpoint/*`(Gateway 路由 v51),以 GigaItApp 登入工作階段在瀏覽器 Console 呼叫 |
+| `agent.diagnose` | succeeded(0.3 秒):gateway ok 40 ms、dns skipped(工作群組)、clock ok、**cert ok(讀 `LocalMachine\My`,2027-10-14 到期)**、disk warn(C:\ 2.5 GB / 8%)、wmi ok 174 ms、store ok;`service_mode: true` |
+| `logs.collect` | succeeded:2 天(VM 10/14 才安裝)、20,074 bytes、上傳 SHA-256 與主機相符、保存至 10/29;下載 zip 可開啟,含 `agent-2026-10-14.log`、`agent-2026-10-15.log`(原始 359 KB) |
+| `agent.log_level` | debug 10 分鐘:日誌只多 `rustit_agent` 的 DEBUG(無第三方套件);`Restart-Service` 後「沿用暫時日誌等級」;14:20:53 到期後 14:21:04 恢復 info。連下 3 次時後兩次 `previous` 為 debug、到期時間延後 |
+| `agent.restart`(P4-1) | succeeded:以結束代碼 3 停止 → 10 秒後失敗復原重啟 → 回報;`sendCount: 2`(重啟前未送出 acked,重連後重送),Agent 以 command_id 去重,未重複重啟 |
+| 離線補送 | VM 中斷網路時建立 `agent.diagnose` → queued;接回網路後 06:28:27 送出並 succeeded,`sendCount: 1` |
+| 發現並修正 | 自動註冊被 Gateway 拒絕(IMPORT_HAS_ERRORS,BugFix.md 2026-10-15,MR !17);瀏覽器 Console 測試的 CSRF Token 會因續期更換,輔助程式須每次重新讀 `gn_csrf` |
 
 ### P2-3:VM 驗證(完成標準 PLATFORM-PLAN §4.2)
 

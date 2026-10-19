@@ -1,11 +1,13 @@
 //! 重試等待(ENDPOINT-AGENT-GUIDE §4.2、§6.3;AGENT.md §7.1):
-//! 一般錯誤 1 秒起指數退避、上限 2 分鐘、±20% 隨機;憑證類錯誤(HTTP 400 / 403)每 10 分鐘重試,不快速重試。
+//! 一般錯誤 1 秒起指數退避、上限 2 分鐘、±20% 隨機;憑證類錯誤(HTTP 400 / 403)每 10 分鐘重試,不快速重試;
+//! 裝置被停用(403 ITA_DEVICE_DISABLED、close 4403)每 1 分鐘 ±20% 重試,IT 重新啟用後很快恢復(退役仍為 10 分鐘)。
 
 use std::time::Duration;
 
 pub const BASE: Duration = Duration::from_secs(1);
 pub const MAX: Duration = Duration::from_secs(120);
 pub const CERT_RETRY: Duration = Duration::from_secs(600);
+pub const DISABLED_RETRY: Duration = Duration::from_secs(60);
 const JITTER: f64 = 0.2;
 
 #[derive(Debug, Default)]

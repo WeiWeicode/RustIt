@@ -3,7 +3,7 @@
   建置 GigaNexus Agent 監控 MSI(PLATFORM-PLAN §4.1、§4.9)。依部署區各建一個 MSI,設定在建置時寫入。
 
 .DESCRIPTION
-  1. cargo build --release -p rustit-agent
+  1. cargo build --release -p rustit-agent -p rustit-watchdog(P5-2 起 MSI 含兩個服務;MSI 版本號跟 Agent)
   2. 產生 agent.toml(server_url、[tls] ca_file、store_issuer;裝置憑證一律讀 LocalMachine\My)
   3. wix build installer\agent.wxs → dist\msi\GigaNexusAgent-<版本>-<部署區>.msi,並印出 SHA-256
 
@@ -34,7 +34,7 @@ if (-not $wixVersion.StartsWith('5.')) { throw "需要 WiX v5(目前 $wixVersion
 
 $version = (Select-String -Path 'crates\agent\Cargo.toml' -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
 Write-Host "建置 rustit-agent $version(release)"
-cargo build --release -p rustit-agent
+cargo build --release -p rustit-agent -p rustit-watchdog
 if ($LASTEXITCODE -ne 0) { throw 'cargo build 失敗' }
 
 $stage = Join-Path $root "target\msi-stage\$Env"
@@ -56,6 +56,7 @@ $msi = Join-Path $out "GigaNexusAgent-$version-$Env.msi"
 & wix build installer\agent.wxs -arch x64 -o $msi `
     -d "Version=$version" -d "Env=$Env" `
     -d "AgentExe=$(Resolve-Path target\release\rustit-agent.exe)" `
+    -d "WatchdogExe=$(Resolve-Path target\release\rustit-watchdog.exe)" `
     -d "AgentToml=$tomlPath" -d "CaFile=$(Resolve-Path $CaFile)"
 if ($LASTEXITCODE -ne 0) { throw 'wix build 失敗' }
 

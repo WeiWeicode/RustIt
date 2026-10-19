@@ -4,9 +4,11 @@
 //! 任何單一來源失敗都不會中斷整體蒐集，錯誤會記錄在 [`ComputerInfo::warnings`]。
 
 mod background;
+mod health;
 mod registry;
 mod wmi_query;
 
+pub use health::{Health, HealthSampler, boot_time};
 pub use registry::find_installed;
 
 use serde::Serialize;
@@ -255,6 +257,37 @@ pub fn removable_volumes() -> Vec<Volume> {
             removable: true,
         })
         .collect()
+}
+
+/// 系統磁碟(`%SystemDrive%`,預設 `C:`)的容量與可用空間;只列舉磁碟區、不查 WMI(遠端診斷 agent.diagnose,PLATFORM-PLAN A4)。
+pub fn system_volume() -> Option<Volume> {
+    let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into()).to_uppercase();
+    Disks::new_with_refreshed_list()
+        .iter()
+        .find(|d| d.mount_point().to_string_lossy().to_uppercase().starts_with(&drive))
+        .map(|d| Volume {
+            mount_point: d.mount_point().to_string_lossy().into_owned(),
+            label: d.name().to_string_lossy().into_owned(),
+            file_system: d.file_system().to_string_lossy().into_owned(),
+            total: d.total_space(),
+            available: d.available_space(),
+            removable: d.is_removable(),
+        })
+}
+
+/// WMI 回應檢查結果(遠端診斷 agent.diagnose)
+#[derive(Debug, Clone, Default)]
+pub struct WmiProbe {
+    /// 網域(未加入網域時為工作群組名稱)
+    pub domain: String,
+    pub part_of_domain: bool,
+    /// 查詢耗時(毫秒)
+    pub elapsed_ms: u64,
+}
+
+/// 查詢一次 `Win32_ComputerSystem`,回傳網域與耗時;最多等 `timeout`(WMI 卡住時不拖住呼叫端)。
+pub fn wmi_probe(timeout: std::time::Duration) -> Result<WmiProbe, String> {
+    wmi_query::probe(timeout)
 }
 
 fn current_user() -> String {

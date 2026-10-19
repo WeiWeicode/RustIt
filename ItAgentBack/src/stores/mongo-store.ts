@@ -112,6 +112,31 @@ export class MongoSnapshotStore implements SnapshotStore {
     return new Set(docs.map((d) => `${d.agent_seq}:${d.content_hash}`));
   }
 
+  async reassign(fromDeviceId: string, toDeviceId: string): Promise<void> {
+    await this.run(() => this.heartbeats.updateMany({ device_id: fromDeviceId }, { $set: { device_id: toDeviceId } }));
+    // 逐份改:兩台剛好有相同 (agent_seq, content_hash) 的快照時,唯一索引擋下的那份留在來源(內容相同,不影響歷史),其餘照常搬
+    const docs = await this.run(() => this.snapshots.find({ device_id: fromDeviceId }, { projection: { _id: 1 } }).toArray());
+    for (const d of docs) {
+      try {
+        await this.run(() => this.snapshots.updateOne({ _id: d._id }, { $set: { device_id: toDeviceId } }));
+      } catch (err) {
+        if ((err as { code?: number }).code !== 11000) throw err;
+      }
+    }
+  }
+
+  async healthSince(deviceId: string, since: Date, limit: number): Promise<{ at: Date; health: Record<string, unknown> }[]> {
+    // 取最新的 limit 筆再依時間排序:異常端點大量送心跳時不會一次載入整天的資料(索引 ix_device_at)
+    const docs = await this.run(() =>
+      this.heartbeats
+        .find({ device_id: deviceId, at: { $gte: since }, 'body.health': { $exists: true } }, { projection: { _id: 0, at: 1, 'body.health': 1 } })
+        .sort({ at: -1 })
+        .limit(limit)
+        .toArray(),
+    );
+    return docs.reverse().map((d) => ({ at: d.at, health: (d.body?.health ?? {}) as Record<string, unknown> }));
+  }
+
   async close(): Promise<void> {
     await this.client.close();
   }

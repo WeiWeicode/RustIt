@@ -1,0 +1,14 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://giganexus.local/rustit/contracts/command-file.schema.json",
+  "title": "POST /agent/v1/commands/{commandId}/files 回應",
+  "description": "指令附檔上傳(logs.collect;PLATFORM-PLAN A4、P4-2)。請求本體為檔案原始位元組(Content-Type: application/zip,不用 multipart),標頭 x-file-sha256 為 64 位小寫 hex;上限 20 MB(超過 413 ITA_FILE_TOO_LARGE)。只接受屬於此裝置、kind 允許附檔、狀態 acked / running 的指令;每筆指令一個檔,重送相同內容回同一個 file_id(201),不同內容 409 ITA_COMMAND_FILE_EXISTS。檔名與存放路徑由主機產生。",
+  "type": "object",
+  "required": ["file_id", "sha256", "size_bytes", "expires_at"],
+  "properties": {
+    "file_id": { "type": "string", "format": "uuid", "description": "Agent 放進 command_update.result.file_id" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "size_bytes": { "type": "integer", "minimum": 1 },
+    "expires_at": { "type": "string", "format": "date-time", "description": "主機保存到期時間(預設 14 天,B5)" }
+  }
+}
