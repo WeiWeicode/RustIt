@@ -101,6 +101,7 @@ Tab 只在切換時載入(事件、軟體表格大),沿用 `DeviceCommands` 的�
 - `code-reviewer`、`security-auditor` 子代理審查後的修正:合併後先關閉 WebSocket 再清理;回填改游標並在交易內鎖住資產列重讀(與資產寫入不重複、不飢餓,無法解析的記 warn);合併不覆蓋目標狀態、目標退役或來源停用 / 退役拒絕;合併取消兩台未完成的指令(避免偽造指紋取得舊裝置的排隊指令);新登錄早於舊裝置最後回報需 force;並行重送回 `alreadyMerged`;`setStatus` 交易內確認未合併;LIKE 參數長度放寬為跳脫後上限;交易後也關閉目標連線。
 - **未處理(已知)**:資料範圍依 `cos` 過濾(指南 §10 E6)仍未做,目前有 `endpoint.device.read` 即可看全部公司的電腦、有 `endpoint.command.admin` 即可管理全部;上線前必須完成(列入指南 §11)。→ 2026-10-16 已完成並上測試區(`E6-COMPANY-SCOPE-DESIGN.md` §6.1)。合併路由尚未寫入指南 §8.3 表格(需 Gateway repo 同意)。
 - **部署與測試區驗證**(2026-10-16):1. migration 0004 套用到 `giganexus_It_Agent_test` → 2. RustIt 合併 develop(MR !23,OpenAPI 批次 110 已發佈,建立 `endpoint.command.admin`,啟動時回填 3 台軟體清單)→ 3. GigaItApp 合併 develop(MR !4、!5,rbac-test 套用 `it.endpoint-device.admin`)。測試區 VM(`DESKTOP-1TB2UMP`,Agent 0.4.1)實測:清單分頁 / 篩選、7 個 Tab、下載 JSON、**停用 → 啟用(期間排隊指令於重連後送出)、退役 → 改回使用中皆正常**;VM 改名重簽憑證驗證「疑似同一台」與合併尚未測。
+- **P3-4 測試區驗證(2026-10-19)**:VM 改名 `RUSTIT-P34` 並換新憑證 → 出現疑似同一台 → 合併後 deviceId、首次連線、事件都連續。第一次合併後 Agent 暫停 10 分鐘才重連(close 4403 被當成停用),MR !27 改用 close 4410 後重測，合併後 1 秒重連。另外 Agent 0.4.2(MR !28)停用改每 1 分鐘重試。見 `test-reports/2026-10-19-p3-merge-e6-scope.md`。**P3 完成標準全部達成。**
 
 ## 7. 決定事項(2026-10-16)
 

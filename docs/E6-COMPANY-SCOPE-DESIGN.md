@@ -197,6 +197,7 @@ export interface MgmtCtx extends Ctx { scope: Scope }
 - **與設計不同**:`ENDPOINT_COMPANY_DOMAINS` 由 JSON 改為 `公司=網域,網域;公司=網域`(§2 #4、§3.2 已改);`CommandFileService` 自行檢查範圍(不經 dispatcher,邏輯相同)。
 - migration 0005 已套用 `giganexus_It_Agent_test`(2026-10-16,經需求方同意;欄位、CHECK、索引確認,既有 3 台皆未指定,新版部署後啟動回填)。
 - **測試區(2026-10-16)**:MR !25 合併後第一次 deploy-test 因主機 2 `ita.env` 尚未設定 `ENDPOINT_SCOPE_ALL_ROLES` 在 compose 階段失敗(保護如預期,舊版 `bde3369a` 持續運作);需求方同意後於 `ita.env` 加 `ENDPOINT_SCOPE_ALL_ROLES=it-admin`、`ENDPOINT_COMPANY_DOMAINS=碩禾=gsc.com.tw,gsmc.com.tw`(公司名稱用 LOS 的「碩禾」,碩禾員工的 `cos`;鹽城碩禾尚未開放登入先不列;備份 `ita.env.bak-20261016`),重跑後 `3081af75` healthy。啟動回填 2 台:開發機兩筆登錄分別為 `cert`(CN 為 FQDN)與 `domain`(回報 `gsmc.com.tw`)→ 碩禾;VM `DESKTOP-1TB2UMP`(WORKGROUP)維持未指定。OpenAPI 批次 112(新增 `PUT /v1/devices/{id}/company`)待 IT 發佈。
+- **測試區驗證(2026-10-19)**:OpenAPI 批次 112 已發佈。V114007(禾迅)清單為空、VM 和開發機都回 404;V112001(碩禾、禾迅)只看到碩禾 2 筆，查 VM 回 404。範圍外的 404 與查不存在的裝置逐欄相同。it-admin 指定 VM 為碩禾後 V112001 看得到，改回自動判定後又回到未指定，兩次都有 `company_changed` 事件。非全部公司角色指定公司時 BFF 回 403。§5 測試區 1–4 點全部通過，見 `test-reports/2026-10-19-p3-merge-e6-scope.md`。
 - **未做**:E6-2(GigaItApp)、E6-3(指南回寫)待同意;`test.env.example` 的公司名稱(碩禾、鹽城碩禾)須與測試區 Gateway `gw.company.comp_name` 核對。
 
 ## 7. 風險
