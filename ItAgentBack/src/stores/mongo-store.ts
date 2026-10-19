@@ -125,6 +125,18 @@ export class MongoSnapshotStore implements SnapshotStore {
     }
   }
 
+  async healthSince(deviceId: string, since: Date, limit: number): Promise<{ at: Date; health: Record<string, unknown> }[]> {
+    // 取最新的 limit 筆再依時間排序:異常端點大量送心跳時不會一次載入整天的資料(索引 ix_device_at)
+    const docs = await this.run(() =>
+      this.heartbeats
+        .find({ device_id: deviceId, at: { $gte: since }, 'body.health': { $exists: true } }, { projection: { _id: 0, at: 1, 'body.health': 1 } })
+        .sort({ at: -1 })
+        .limit(limit)
+        .toArray(),
+    );
+    return docs.reverse().map((d) => ({ at: d.at, health: (d.body?.health ?? {}) as Record<string, unknown> }));
+  }
+
   async close(): Promise<void> {
     await this.client.close();
   }

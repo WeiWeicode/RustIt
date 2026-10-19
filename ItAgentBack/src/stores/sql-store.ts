@@ -18,12 +18,14 @@ import type {
   DeviceRow,
   DeviceStatus,
   DeviceStore,
+  HostEventInput,
   InventorySnapshot,
   BackfillResult,
   CompanyCandidate,
   CompanyChange,
   CompanySource,
   MergeResult,
+  SavedHostEvent,
   TouchPatch,
 } from './types.js';
 
@@ -105,6 +107,26 @@ async function insertSoftware(tx: sql.Transaction, deviceRef: number, list: Soft
     });
     await req.query(`INSERT INTO ita.device_software (device_ref, name, version, publisher, install_date) VALUES ${values.join(', ')}`);
   }
+}
+
+/** 主機比對產生的事件(event_uid NULL;occurred_at = 新資產的蒐集時間);data 上限 4,000 字元,過長只記長度 */
+async function insertHostEvents(tx: sql.Transaction, device: DeviceRecord, events: HostEventInput[], at: Date): Promise<SavedHostEvent[]> {
+  const saved: SavedHostEvent[] = [];
+  for (const e of events) {
+    let data = JSON.stringify(e.data);
+    if (data.length > 4000) data = JSON.stringify({ truncated: true, size: data.length });
+    const r = await new sql.Request(tx)
+      .input('id', sql.Int, device.id)
+      .input('type', sql.VarChar(32), e.type)
+      .input('dn', sql.NVarChar(450), device.certDn)
+      .input('fp', sql.Char(40), device.certFp)
+      .input('at', sql.DateTime2(3), at)
+      .input('data', sql.NVarChar(4000), data).query(`
+        INSERT INTO ita.device_event (device_ref, event_type, cert_dn, cert_fp, occurred_at, data)
+        OUTPUT INSERTED.id VALUES (@id, @type, @dn, @fp, @at, @data)`);
+    saved.push({ ...e, id: Number((r.recordset[0] as Row).id) });
+  }
+  return saved;
 }
 
 /** 公司名稱逐字比對(與 service 的 inScope 一致;資料庫預設定序不分大小寫與全半形) */
@@ -303,13 +325,21 @@ export class SqlDeviceStore implements DeviceStore {
     return row ? { agentSeq: Number(row.agent_seq), contentHash: String(row.content_hash), collectedAt: row.collected_at as Date } : null;
   }
 
-  async saveInventory(device: DeviceRecord, s: InventorySnapshot): Promise<void> {
+  async saveInventory(device: DeviceRecord, s: InventorySnapshot, diff?: (prevPayload: string | null) => HostEventInput[]): Promise<SavedHostEvent[]> {
     const inv = s.inventory;
     const sys = inv.system;
     const pool = await this.ready();
     const tx = new sql.Transaction(pool);
     await tx.begin();
     try {
+      // 變更比對(P5):先鎖住舊資產列再讀,同一台同時兩份回報時依序比對,不會漏也不會重複
+      let changes: HostEventInput[] = [];
+      if (diff) {
+        const prev = await new sql.Request(tx)
+          .input('id', sql.Int, device.id)
+          .query(`SELECT payload FROM ita.device_inventory WITH (UPDLOCK, HOLDLOCK) WHERE device_ref = @id`);
+        changes = diff(((prev.recordset[0] as Row | undefined)?.payload as string | null | undefined) ?? null);
+      }
       await new sql.Request(tx)
         .input('id', sql.Int, device.id)
         .input('seq', sql.BigInt, s.agentSeq)
@@ -379,7 +409,11 @@ export class SqlDeviceStore implements DeviceStore {
         await req.query(`INSERT INTO ita.device_nic (device_ref, nic_index, description, mac, ip_address, is_ipv6, has_gateway, dhcp_enabled) VALUES ${values.join(', ')}`);
       }
       await insertSoftware(tx, device.id, inv.software ?? []);
+      // 事件時間用端點的蒐集時間,但不晚於收到時間 + 5 分鐘(端點時鐘或偽造的未來時間不會讓事件永遠排在最前面)
+      const limit = new Date(s.receivedAt.getTime() + 5 * 60_000);
+      const saved = await insertHostEvents(tx, device, changes, s.collectedAt > limit ? s.receivedAt : s.collectedAt);
       await tx.commit();
+      return saved;
     } catch (err) {
       await tx.rollback().catch(() => undefined);
       throw err;

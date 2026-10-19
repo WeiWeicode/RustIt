@@ -86,6 +86,8 @@ fn run_service(config: &Path) -> Result<(), String> {
             ServiceControlHandlerResult::NoError
         }
         ServiceControl::Shutdown => {
+            // 結束原因記為 shutdown(agent_started.previous_exit,P5)
+            crate::SHUTDOWN_REQUESTED.store(true, std::sync::atomic::Ordering::Relaxed);
             signal.stop(SHUTDOWN_GRACE);
             ServiceControlHandlerResult::NoError
         }

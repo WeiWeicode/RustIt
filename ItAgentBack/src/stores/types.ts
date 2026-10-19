@@ -61,6 +61,17 @@ export interface AgentEvent {
   data: string;
 }
 
+/** 主機比對產生的事件(軟硬體變更;event_uid NULL,內容在 data) */
+export interface HostEventInput {
+  type: string;
+  data: Record<string, unknown>;
+}
+
+export interface SavedHostEvent extends HostEventInput {
+  /** device_event.id */
+  id: number;
+}
+
 export interface CurrentInventory {
   agentSeq: number;
   contentHash: string;
@@ -200,8 +211,11 @@ export interface DeviceStore {
   /** 硬體指紋相同的其他裝置(不含已合併者;A1) */
   findByHwFingerprint(hwFingerprint: string, excludeRef: number): Promise<DeviceRecord[]>;
   currentInventory(deviceRef: number): Promise<CurrentInventory | null>;
-  /** 一個交易:device_inventory upsert、device_nic 整批替換、device 的名稱 / 版本 / 時間 */
-  saveInventory(device: DeviceRecord, snapshot: InventorySnapshot): Promise<void>;
+  /**
+   * 一個交易:device_inventory upsert、device_nic 整批替換、device 的名稱 / 版本 / 時間。
+   * 有 diff 時在同一交易讀出舊 payload(鎖定)交給 diff 比對,回傳的主機事件一併寫入 device_event(P5,PLATFORM-PLAN §4.3);回傳已寫入的事件
+   */
+  saveInventory(device: DeviceRecord, snapshot: InventorySnapshot, diff?: (prevPayload: string | null) => HostEventInput[]): Promise<SavedHostEvent[]>;
   /** 內容沒變:只更新 last_seen_at、last_inventory_at */
   markInventoryUnchanged(deviceRef: number, at: Date): Promise<void>;
   /** 符合篩選的全部裝置,依電腦名稱排序(在線篩選與分頁在 service,在線狀態在 Redis) */
@@ -233,6 +247,8 @@ export interface SnapshotStore {
   seenSnapshots(deviceId: string, items: { seq: number; hash: string }[]): Promise<Set<string>>;
   /** 合併:來源裝置的快照與心跳改掛到目標(P3) */
   reassign(fromDeviceId: string, toDeviceId: string): Promise<void>;
+  /** 健康走勢:since 之後的心跳健康摘要,依時間排序(P5;心跳保留 1 天) */
+  healthSince(deviceId: string, since: Date, limit: number): Promise<{ at: Date; health: Record<string, unknown> }[]>;
   close(): Promise<void>;
 }
 
@@ -240,6 +256,8 @@ export interface OnlineInfo {
   connectedAt: string;
   lastHeartbeatAt: string;
   agentVersion: string | null;
+  /** 最近一則心跳的健康摘要(P5;舊版 Agent 沒有) */
+  health?: HealthSample;
 }
 
 export interface StateStore {
@@ -419,4 +437,113 @@ export interface CommandFileStore {
   /** 保存期限已到的附檔(清除用) */
   expiredFiles(now: Date, limit: number): Promise<CommandFileRecord[]>;
   deleteFile(id: number): Promise<void>;
+}
+
+// ---------- 監測(PLATFORM-PLAN P5 §4.3、A5;P5-MONITOR-DESIGN;migration 0006) ----------
+
+/** 心跳的健康摘要(ws-envelope HeartbeatBody.health;取不到的欄位省略) */
+export interface HealthSample {
+  cpuPct?: number;
+  memUsedPct?: number;
+  diskMinFreePct?: number;
+  diskMinFreeDrive?: string;
+  uptimeS?: number;
+  agentRssMb?: number;
+}
+
+/** ita.device_health 一列 */
+export interface DeviceHealthRecord extends HealthSample {
+  deviceRef: number;
+  healthAt: Date | null;
+  certNotAfter: Date | null;
+  watchdogVersion: string | null;
+  watchdogReportAt: Date | null;
+  agentServiceState: string | null;
+  agentStartType: string | null;
+  agentStatusOk: boolean | null;
+  agentLastError: string | null;
+  agentRestarts24h: number | null;
+}
+
+export type AlertRule = 'offline_long' | 'disk_low' | 'hardware_changed' | 'agent_restarts' | 'cert_expiring' | 'clock_skew' | 'agent_tampered' | 'agent_silent';
+export type AlertSeverity = 'warn' | 'critical';
+export type AlertState = 'open' | 'resolved';
+
+export interface AlertRecord {
+  id: number;
+  alertId: string;
+  deviceRef: number;
+  deviceId: string;
+  computerName: string;
+  /** 資料範圍檢查用(E6) */
+  deviceCompany: string | null;
+  rule: AlertRule;
+  severity: AlertSeverity;
+  state: AlertState;
+  openedAt: Date;
+  lastSeenAt: Date;
+  resolvedAt: Date | null;
+  resolvedBy: 'auto' | 'manual' | null;
+  resolvedByEmp: string | null;
+  resolvedByName: string | null;
+  resolveNote: string | null;
+  /** JSON 字串 */
+  detail: string | null;
+  eventRef: number | null;
+}
+
+/** 開告警;同一台同一規則已有未結束的就更新 last_seen_at / detail / severity */
+export interface AlertOpen {
+  deviceRef: number;
+  rule: AlertRule;
+  severity: AlertSeverity;
+  detail: string;
+  eventRef?: number | null;
+  /** 已有未結束的告警時保留原本的 detail(事件類:第一次的變更前後不被後來的覆蓋) */
+  keepDetail?: boolean;
+  at: Date;
+}
+
+export interface AlertFilter {
+  state?: AlertState;
+  rule?: AlertRule;
+  severity?: AlertSeverity;
+  deviceRef?: number;
+  beforeId?: number;
+  companies?: string[];
+  limit: number;
+}
+
+/** 規則評估用:一台 active、未合併的裝置目前的狀態 */
+export interface MonitorTarget {
+  deviceRef: number;
+  lastSeenAt: Date;
+  clockSkewMs: number | null;
+  health: DeviceHealthRecord | null;
+  /** 24 小時內 agent_started.previous_exit = unexpected 的筆數 */
+  unexpectedRestarts24h: number;
+  /** 目前未結束的告警規則 */
+  openRules: AlertRule[];
+}
+
+export interface MonitorStore {
+  /** 健康摘要落盤(upsert) */
+  saveHealth(deviceRef: number, at: Date, sample: HealthSample): Promise<void>;
+  /** 裝置憑證到期日(hello;upsert) */
+  saveCertNotAfter(deviceRef: number, notAfter: Date): Promise<void>;
+  healthOf(deviceRefs: number[]): Promise<Map<number, DeviceHealthRecord>>;
+  /** active、未合併的裝置與評估所需資料(since:重啟次數的起算時間) */
+  monitorTargets(since: Date): Promise<MonitorTarget[]>;
+  /** 回傳 alertId 與是否新開 */
+  openAlert(a: AlertOpen): Promise<{ alertId: string; created: boolean }>;
+  /** 條件消失:自動關閉;回傳是否有關閉 */
+  resolveAuto(deviceRef: number, rule: AlertRule, at: Date, note: string): Promise<boolean>;
+  /** 停用 / 退役 / 已合併裝置的未結束告警一律自動關閉,回傳筆數 */
+  resolveInactive(at: Date): Promise<number>;
+  /** 手動關閉:只關 open 的,回傳是否關閉 */
+  resolveManual(alertId: string, at: Date, actor: Actor, note: string, requestId: string): Promise<boolean>;
+  getAlert(alertId: string): Promise<AlertRecord | null>;
+  listAlerts(filter: AlertFilter): Promise<AlertRecord[]>;
+  /** 各裝置未結束告警數 */
+  openAlertCounts(deviceRefs: number[]): Promise<Map<number, number>>;
 }

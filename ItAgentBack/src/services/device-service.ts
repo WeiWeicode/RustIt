@@ -13,6 +13,8 @@
  *   hello:記錄時鐘偏差(超過 ±5 分鐘寫 clock_skew 事件,A2)、硬體指紋(與其他裝置相同時寫 suspected_duplicate,不自動合併,A1)。
  *   管理 API(P3,docs/P3-DATA-DESIGN.md):清單篩選在 SQL、在線篩選與分頁在這裡(在線狀態在 Redis);
  *     停用 / 退役立即關閉 WebSocket;合併(A1)由 SQL 交易搬資料,交易後改 Mongo 歷史、清 Redis 快取、關閉來源的 WebSocket(Agent 重連即對到目標)。
+ *   監測(P5,docs/P5-MONITOR-DESIGN.md):心跳的健康摘要放在線資訊(Redis)、每 5 分鐘落盤 ita.device_health;hello 的憑證到期日落盤;
+ *     資產內容變了時在寫入交易內比對前後兩份(change-detector),軟硬體變更事件與資產同一交易寫入,之後交給告警(硬體變更)。
  *   資料範圍(E6,docs/E6-COMPANY-SCOPE-DESIGN.md):管理方法收 MgmtCtx,裝置查找集中在 found(),範圍外回與不存在相同的 404;
  *     所屬公司在登錄(憑證 DN)與收到資產(回報網域)時自動判定,IT 指定(manual)後不再自動改;啟動時回填未判定的裝置。
  */
@@ -23,6 +25,7 @@ import {
   type ComputerInfo,
   type EventsRequest,
   type EventsResponse,
+  type HeartbeatHealth,
   type HelloAckBody,
   type HelloBody,
   type InventoryRequest,
@@ -31,6 +34,8 @@ import {
   type SyncResponse,
 } from '../contracts.js';
 import { AppError, storageUnavailable } from '../errors.js';
+import { alertView, type AlertView } from './alert-service.js';
+import { detectChanges } from './change-detector.js';
 import type { CommandChannel } from './command-dispatcher.js';
 import { resolveCompany, type CompanyDomains } from './company.js';
 import { inScope, scopeCompanies, type MgmtCtx } from './scope.js';
@@ -41,10 +46,14 @@ import type {
   DeviceFilter,
   DeviceRecord,
   DeviceRow,
+  DeviceHealthRecord,
   DeviceStatus,
   DeviceStore,
+  HealthSample,
   MergeResult,
+  MonitorStore,
   OnlineInfo,
+  SavedHostEvent,
   SnapshotStore,
   StateStore,
   TouchPatch,
@@ -69,6 +78,23 @@ interface LiveConnection {
   connectedAt: Date;
   lastHeartbeatAt: Date;
   agentVersion: string | null;
+  health?: HealthSample;
+}
+
+/** 健康摘要(在線取最近一則心跳,離線取最後落盤的值;at 為取樣時間) */
+export interface HealthView extends HealthSample {
+  at: string;
+}
+
+/** Watchdog 回報(P5-2;尚未回報為 null) */
+export interface WatchdogView {
+  version: string | null;
+  reportAt: string | null;
+  agentServiceState: string | null;
+  agentStartType: string | null;
+  agentStatusOk: boolean | null;
+  agentLastError: string | null;
+  agentRestarts24h: number | null;
 }
 
 export interface DeviceSummary {
@@ -99,6 +125,10 @@ export interface DeviceSummary {
   /** 所屬公司(E6);null = 未指定 */
   company: string | null;
   companySource: CompanySource | null;
+  /** 健康摘要(P5);舊版 Agent 或尚未回報為 null */
+  health: HealthView | null;
+  /** 未結束的告警數(P5) */
+  openAlerts: number;
 }
 
 /** 疑似同一台的另一台裝置(詳情用) */
@@ -116,6 +146,19 @@ export interface DeviceDetail extends DeviceSummary {
   collectedAt: string | null;
   clockSkewMs: number | null;
   suspectedDuplicates: DuplicateCandidate[];
+  /** 裝置憑證到期日(P5) */
+  certNotAfter: string | null;
+  watchdog: WatchdogView | null;
+  /** 未結束的告警(P5) */
+  alerts: AlertView[];
+}
+
+/** 健康走勢一點(5 分鐘分桶:CPU / 記憶體取平均,磁碟剩餘取最小) */
+export interface HealthPoint {
+  at: string;
+  cpuPct: number | null;
+  memUsedPct: number | null;
+  diskMinFreePct: number | null;
 }
 
 export interface DeviceListQuery extends Omit<DeviceFilter, 'companies'> {
@@ -155,6 +198,10 @@ export interface DeviceServiceOptions {
   touchIntervalMs?: number;
   /** 網域 → 公司(ENDPOINT_COMPANY_DOMAINS;E6);省略 = 不自動判定 */
   companyDomains?: CompanyDomains;
+  /** 監測儲存(P5;省略 = 不記健康、不比對資產、清單不帶健康與告警) */
+  monitor?: MonitorStore;
+  /** 資產比對產生主機事件後(P5;告警服務的 onHostEvents) */
+  onHostEvents?: (ctx: Ctx, deviceRef: number, events: SavedHostEvent[]) => Promise<void>;
   now?: () => Date;
 }
 
@@ -188,6 +235,40 @@ const HIDDEN_DETAIL: Record<string, string> = {
   merged: '已併入另一台裝置的資料',
   default: '內容涉及其他裝置,已隱藏',
 };
+/** 健康走勢分桶(毫秒) */
+const HEALTH_BUCKET_MS = 5 * 60_000;
+/** 健康走勢每小時最多讀幾筆心跳(30 秒一則 = 120 筆,留一倍餘裕;異常端點大量送心跳時不拖垮查詢) */
+const HEALTH_POINTS_PER_HOUR = 240;
+
+/** heartbeat.body.health → HealthSample;非數字或負數的欄位略過(契約已驗證型別) */
+export function healthFrom(raw: unknown): HealthSample | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const h = raw as HeartbeatHealth;
+  const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : undefined);
+  const pct = (v: unknown) => {
+    const x = n(v);
+    return x === undefined ? undefined : Math.min(100, x);
+  };
+  const out: HealthSample = {
+    cpuPct: pct(h.cpu_pct),
+    memUsedPct: pct(h.mem_used_pct),
+    diskMinFreePct: pct(h.disk_min_free_pct),
+    diskMinFreeDrive: typeof h.disk_min_free_drive === 'string' ? h.disk_min_free_drive.slice(0, 8) : undefined,
+    uptimeS: n(h.uptime_s),
+    agentRssMb: n(h.agent_rss_mb),
+  };
+  for (const k of Object.keys(out) as (keyof HealthSample)[]) if (out[k] === undefined) delete out[k];
+  return Object.keys(out).length ? out : undefined;
+}
+
+function healthOfRecord(r: DeviceHealthRecord | undefined): HealthView | null {
+  if (!r?.healthAt) return null;
+  const { cpuPct, memUsedPct, diskMinFreePct, diskMinFreeDrive, uptimeS, agentRssMb } = r;
+  const v: HealthView = { at: r.healthAt.toISOString(), cpuPct, memUsedPct, diskMinFreePct, diskMinFreeDrive, uptimeS, agentRssMb };
+  for (const k of Object.keys(v) as (keyof HealthView)[]) if (v[k] === undefined) delete v[k];
+  return v;
+}
+
 /** 合併的時間順序容許重疊(舊裝置最後回報在 SQL 每 5 分鐘落盤,再加時鐘誤差) */
 const MERGE_OVERLAP_MS = 15 * 60_000;
 
@@ -217,12 +298,16 @@ export function camelize(v: unknown): unknown {
 export class DeviceService implements CommandChannel {
   private readonly connections = new Map<string, LiveConnection>();
   private readonly lastTouch = new Map<number, number>();
+  /** 健康摘要最後落盤時間(與 last_seen_at 分開計:連線後第一則帶健康的心跳就落盤) */
+  private readonly lastHealthSave = new Map<number, number>();
   private readonly now: () => Date;
   private readonly touchIntervalMs: number;
   readonly heartbeatIntervalSec: number;
   private readonly settings: AgentSettings;
   private readonly settingsVersion: number;
   private readonly companyDomains: CompanyDomains;
+  private readonly monitor: MonitorStore | undefined;
+  private readonly onHostEvents: DeviceServiceOptions['onHostEvents'];
 
   /** 目前在線的 WebSocket 連線數(本行程;監控心跳回報) */
   get onlineCount(): number {
@@ -240,6 +325,8 @@ export class DeviceService implements CommandChannel {
     this.settingsVersion = settingsVersion(this.settings);
     this.touchIntervalMs = opts.touchIntervalMs ?? 5 * 60_000;
     this.companyDomains = opts.companyDomains ?? new Map();
+    this.monitor = opts.monitor;
+    this.onHostEvents = opts.onHostEvents;
     this.now = opts.now ?? (() => new Date());
   }
 
@@ -344,8 +431,24 @@ export class DeviceService implements CommandChannel {
       return reply('archived');
     }
 
-    await this.sqlDo(ctx, 'inventory.save', () => this.sql.saveInventory(device, snapshot));
+    // 前後兩份比對(P5):在寫入交易內讀舊 payload,變更事件與資產同一交易寫入(失敗整批 503,Agent 重送時重新比對)
+    const diff = this.monitor
+      ? (prev: string | null) => {
+          if (!prev) return [];
+          try {
+            return detectChanges(JSON.parse(prev) as ComputerInfo, req.inventory);
+          } catch (err) {
+            ctx.log.warn({ err, deviceId: device.deviceId }, '前一份資產無法解析,略過變更比對');
+            return [];
+          }
+        }
+      : undefined;
+    const changes = await this.sqlDo(ctx, 'inventory.save', () => this.sql.saveInventory(device, snapshot, diff));
     this.lastTouch.set(device.id, receivedAt.getTime());
+    if (changes.length) {
+      ctx.log.info({ deviceId: device.deviceId, changes: changes.map((c) => c.type) }, '資產變更事件已寫入');
+      await this.onHostEvents?.(ctx, device.id, changes);
+    }
     await this.soft(ctx, 'mongo.insertSnapshot', () => this.snapshots.insertSnapshot({ deviceId: device.deviceId, snapshot }));
     await this.soft(ctx, 'redis.setHash', () => this.state.setHash(device.deviceId, req.content_hash));
     ctx.log.info({ deviceId: device.deviceId, agentSeq: req.agent_seq, software: req.inventory.software.length }, '資產快照已寫入');
@@ -372,7 +475,12 @@ export class DeviceService implements CommandChannel {
   // ---------- WebSocket 與心跳 ----------
 
   private onlineInfo(live: LiveConnection): OnlineInfo {
-    return { connectedAt: live.connectedAt.toISOString(), lastHeartbeatAt: live.lastHeartbeatAt.toISOString(), agentVersion: live.agentVersion };
+    return {
+      connectedAt: live.connectedAt.toISOString(),
+      lastHeartbeatAt: live.lastHeartbeatAt.toISOString(),
+      agentVersion: live.agentVersion,
+      ...(live.health ? { health: live.health } : {}),
+    };
   }
 
   async connected(ctx: Ctx, device: DeviceRecord, conn: AgentConnection): Promise<void> {
@@ -415,6 +523,11 @@ export class DeviceService implements CommandChannel {
       await this.checkClock(ctx, device, prevSkew, patch.clockSkewMs);
       if (patch.hwFingerprint) await this.checkHwFingerprint(ctx, device, patch.hwFingerprint);
     }
+    // 憑證到期日(P5 告警 cert_expiring);失敗只記 warn,下次 hello 再寫
+    const notAfter = body.cert_not_after ? new Date(body.cert_not_after) : null;
+    const monitor = this.monitor;
+    if (monitor && notAfter && Number.isFinite(notAfter.getTime()))
+      await this.soft(ctx, 'sql.saveCertNotAfter', () => monitor.saveCertNotAfter(device.id, notAfter));
     ctx.log.info({ deviceId: device.deviceId, agentVersion: body.agent_version, clockSkewMs: patch.clockSkewMs }, 'Agent hello');
     return {
       device_id: device.deviceId,
@@ -498,15 +611,23 @@ export class DeviceService implements CommandChannel {
 
   async heartbeat(ctx: Ctx, device: DeviceRecord, body: Record<string, unknown>): Promise<{ server_time: string }> {
     const at = this.now();
+    const health = healthFrom(body.health);
     const live = this.connections.get(device.deviceId);
     if (live) {
       live.lastHeartbeatAt = at;
+      if (health) live.health = health;
       await this.soft(ctx, 'redis.setOnline', () => this.state.setOnline(device.deviceId, this.onlineInfo(live), this.offlineAfterSec));
     }
     await this.soft(ctx, 'mongo.recordHeartbeat', () => this.snapshots.recordHeartbeat({ deviceId: device.deviceId, at, body }));
     if (at.getTime() - (this.lastTouch.get(device.id) ?? 0) >= this.touchIntervalMs) {
       this.lastTouch.set(device.id, at.getTime());
       await this.soft(ctx, 'sql.touch(heartbeat)', () => this.sql.touch(device.id, at));
+    }
+    // 健康摘要每 5 分鐘落盤一次(離線時清單仍顯示最後一次;告警以 SQL 判斷)
+    const monitor = this.monitor;
+    if (health && monitor && at.getTime() - (this.lastHealthSave.get(device.id) ?? 0) >= this.touchIntervalMs) {
+      this.lastHealthSave.set(device.id, at.getTime());
+      await this.soft(ctx, 'sql.saveHealth', () => monitor.saveHealth(device.id, at, health));
     }
     return { server_time: at.toISOString() };
   }
@@ -593,7 +714,7 @@ export class DeviceService implements CommandChannel {
     return local;
   }
 
-  private summary(row: DeviceRow, online: OnlineInfo | undefined): DeviceSummary {
+  private summary(row: DeviceRow, online: OnlineInfo | undefined, health?: DeviceHealthRecord, openAlerts = 0): DeviceSummary {
     // 在線時以最後一次心跳為「最後回報」(SQL 的 last_seen_at 每 5 分鐘才落盤)
     const lastSeen = online && new Date(online.lastHeartbeatAt) > row.lastSeenAt ? new Date(online.lastHeartbeatAt) : row.lastSeenAt;
     return {
@@ -621,7 +742,18 @@ export class DeviceService implements CommandChannel {
       retiredAt: row.retiredAt?.toISOString() ?? null,
       company: row.company,
       companySource: row.companySource,
+      health: online?.health ? { at: online.lastHeartbeatAt, ...online.health } : healthOfRecord(health),
+      openAlerts,
     };
+  }
+
+  /** 清單 / 詳情用的健康與未結束告警數(SQL;沒有監測儲存時為空) */
+  private async monitorOf(ctx: Ctx, refs: number[]): Promise<{ health: Map<number, DeviceHealthRecord>; alerts: Map<number, number> }> {
+    const m = this.monitor;
+    if (!m || refs.length === 0) return { health: new Map(), alerts: new Map() };
+    const health = await this.sqlDo(ctx, 'monitor.healthOf', () => m.healthOf(refs));
+    const alerts = await this.sqlDo(ctx, 'monitor.openAlertCounts', () => m.openAlertCounts(refs));
+    return { health, alerts };
   }
 
   /** 篩選在 SQL;在線篩選與分頁在這裡(在線狀態在 Redis,無法在 SQL 篩選)。只列資料範圍內的公司(E6) */
@@ -638,9 +770,16 @@ export class DeviceService implements CommandChannel {
       ctx,
       rows.map((r) => r.deviceId),
     );
-    const all = rows.map((r) => this.summary(r, online.get(r.deviceId))).filter((d) => q.online === undefined || d.online === q.online);
+    const filtered = rows.filter((r) => q.online === undefined || online.has(r.deviceId) === q.online);
     const start = (q.page - 1) * q.pageSize;
-    return { items: all.slice(start, start + q.pageSize), total: all.length, page: q.page, pageSize: q.pageSize };
+    const pageRows = filtered.slice(start, start + q.pageSize);
+    // 健康與告警數只查這一頁
+    const m = await this.monitorOf(
+      ctx,
+      pageRows.map((r) => r.id),
+    );
+    const items = pageRows.map((r) => this.summary(r, online.get(r.deviceId), m.health.get(r.id), m.alerts.get(r.id) ?? 0));
+    return { items, total: filtered.length, page: q.page, pageSize: q.pageSize };
   }
 
   /** 併入的目標不在資料範圍內時不顯示(E6:不洩漏範圍外的 deviceId) */
@@ -689,8 +828,25 @@ export class DeviceService implements CommandChannel {
     const raw = found.row;
     const same =
       raw.hwFingerprint && !raw.mergedIntoId ? await this.sqlDo(ctx, 'device.sameHw', () => this.sql.findByHwFingerprint(raw.hwFingerprint!, raw.id)) : [];
+    const m = await this.monitorOf(ctx, [raw.id]);
+    const h = m.health.get(raw.id);
+    const monitor = this.monitor;
+    const alerts = monitor ? await this.sqlDo(ctx, 'monitor.listAlerts', () => monitor.listAlerts({ state: 'open', deviceRef: raw.id, limit: 100 })) : [];
     return {
-      ...this.summary(row, online.get(deviceId)),
+      ...this.summary(row, online.get(deviceId), h, m.alerts.get(raw.id) ?? 0),
+      certNotAfter: h?.certNotAfter?.toISOString() ?? null,
+      watchdog: h?.watchdogReportAt
+        ? {
+            version: h.watchdogVersion,
+            reportAt: h.watchdogReportAt.toISOString(),
+            agentServiceState: h.agentServiceState,
+            agentStartType: h.agentStartType,
+            agentStatusOk: h.agentStatusOk,
+            agentLastError: h.agentLastError,
+            agentRestarts24h: h.agentRestarts24h,
+          }
+        : null,
+      alerts: alerts.map(alertView),
       inventory,
       collectedAt: found.collectedAt?.toISOString() ?? null,
       clockSkewMs: row.clockSkewMs,
@@ -746,6 +902,41 @@ export class DeviceService implements CommandChannel {
       if (!d || !inScope(ctx.scope, d.row.company)) hidden.add(id);
     }
     return hidden;
+  }
+
+  /** 健康走勢(P5):Mongo 心跳(保留 1 天)依 5 分鐘分桶;Mongo 無法使用回 503 */
+  async healthSeries(ctx: MgmtCtx, deviceId: string, hours: number): Promise<{ deviceId: string; bucketSec: number; points: HealthPoint[] }> {
+    await this.found(ctx, deviceId);
+    const since = new Date(this.now().getTime() - hours * 3_600_000);
+    let rows: { at: Date; health: Record<string, unknown> }[];
+    try {
+      rows = await this.snapshots.healthSince(deviceId, since, hours * HEALTH_POINTS_PER_HOUR);
+    } catch (err) {
+      ctx.log.warn({ err }, '健康走勢查詢失敗(MongoDB)');
+      throw new AppError(503, 'ITA_HISTORY_UNAVAILABLE', '健康走勢暫時無法查詢,請稍後重試');
+    }
+    const buckets = new Map<number, { cpu: number[]; mem: number[]; disk: number[] }>();
+    for (const r of rows) {
+      const h = healthFrom(r.health);
+      if (!h) continue;
+      const key = Math.floor(r.at.getTime() / HEALTH_BUCKET_MS) * HEALTH_BUCKET_MS;
+      const b = buckets.get(key) ?? { cpu: [], mem: [], disk: [] };
+      if (h.cpuPct !== undefined) b.cpu.push(h.cpuPct);
+      if (h.memUsedPct !== undefined) b.mem.push(h.memUsedPct);
+      if (h.diskMinFreePct !== undefined) b.disk.push(h.diskMinFreePct);
+      buckets.set(key, b);
+    }
+    const avg = (xs: number[]) => (xs.length ? Math.round(xs.reduce((a, b) => a + b, 0) / xs.length) : null);
+    const points = [...buckets.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([t, b]) => ({ at: new Date(t).toISOString(), cpuPct: avg(b.cpu), memUsedPct: avg(b.mem), diskMinFreePct: b.disk.length ? b.disk.reduce((a, x) => Math.min(a, x)) : null }));
+    return { deviceId, bucketSec: HEALTH_BUCKET_MS / 1000, points };
+  }
+
+  /** 告警服務用:deviceId → 內部 id 與公司(資料範圍檢查) */
+  async lookup(deviceId: string): Promise<{ id: number; company: string | null } | null> {
+    const d = await this.sql.getDevice(deviceId);
+    return d ? { id: d.row.id, company: d.row.company } : null;
   }
 
   /** 最新資產原樣(資料契約 snake_case) */

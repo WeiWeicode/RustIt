@@ -294,3 +294,54 @@ fn diagnose_messages_match_contract() {
         "/agent/v1/commands/5b2e8c1d-4f3a-4e6b-9d7c-1a2b3c4d5e02/files"
     );
 }
+
+/// P5:心跳健康摘要、hello 憑證到期日、agent_started 上次結束原因、主機設定 health_enabled(P5-MONITOR-DESIGN §2)
+#[test]
+fn p5_monitor_messages() {
+    // 取樣兩次(第二次才有 CPU),送出的 health 必須符合契約;數值只在記憶體中,不寫入 repo
+    let mut sampler = rustit_collector::HealthSampler::new();
+    let _ = sampler.sample();
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let health = sampler.sample();
+    let hb = Envelope::new(
+        "heartbeat",
+        json!({ "outbox_pending": 0, "events_pending": 0, "last_inventory_seq": 1, "health": health }),
+    );
+    assert_valid(
+        "ws-envelope.schema.json",
+        &serde_json::to_value(&hb).unwrap(),
+    );
+
+    let mut hello = HelloBody::from_info(&sample_info());
+    hello.cert_not_after = "2027-10-14T08:00:00Z".into();
+    let v = serde_json::to_value(Envelope::new("hello", json!(hello))).unwrap();
+    assert_valid("ws-envelope.schema.json", &v);
+    assert_eq!(v["body"]["cert_not_after"], "2027-10-14T08:00:00Z");
+    // 讀不到時不送
+    let v = serde_json::to_value(HelloBody::from_info(&sample_info())).unwrap();
+    assert!(v.get("cert_not_after").is_none());
+
+    for exit in [
+        "stop",
+        "shutdown",
+        "restart_command",
+        "unexpected",
+        "first_run",
+    ] {
+        assert_valid(
+            "event.schema.json",
+            &json!({ "events": [{ "event_id": "5f1e2d3c-4b5a-4968-8776-655443322114", "type": "agent_started",
+                "occurred_at": "2026-10-19T00:00:00.000Z",
+                "data": { "agent_version": "0.5.0", "previous_exit": exit, "boot_time": rustit_collector::boot_time() } }] }),
+        );
+    }
+
+    let ack: Envelope = serde_json::from_value(read("examples/ws-hello-ack.sample.json")).unwrap();
+    let body: HelloAck = serde_json::from_value(ack.body.unwrap()).unwrap();
+    let s = body.settings.unwrap();
+    assert_eq!(s.health_enabled, Some(true));
+    assert!(
+        rustit_agent::protocol::AgentSettings::default().health_enabled(),
+        "沒收過主機設定時預設開"
+    );
+}

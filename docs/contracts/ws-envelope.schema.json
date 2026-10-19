@@ -57,7 +57,8 @@
           "type": "string",
           "pattern": "^([0-9a-f]{64})?$",
           "description": "硬體指紋:SHA-256(\"rustit-hw-v1|\" + BIOS 序號 + \"|\" + 系統 UUID,兩者先去除前後空白、轉大寫;UTF-8),兩者皆為空白或廠商預設值時為空字串。與既有裝置相同時 Server 標記「疑似同一台」,由 IT 確認合併,不自動合併(A1)"
-        }
+        },
+        "cert_not_after": { "type": "string", "format": "date-time", "description": "裝置憑證到期日(UTC);讀不到時省略。Server 據此判斷憑證即將到期告警(P5)" }
       }
     },
     "HelloAckBody": {
@@ -78,7 +79,8 @@
       "type": "object",
       "properties": {
         "inventory_interval_sec": { "type": "integer", "minimum": 300, "maximum": 86400, "description": "資產蒐集間隔(秒)" },
-        "usb_events": { "type": "boolean", "description": "是否回報 USB 儲存裝置插拔事件" }
+        "usb_events": { "type": "boolean", "description": "是否回報 USB 儲存裝置插拔事件" },
+        "health_enabled": { "type": "boolean", "description": "心跳是否附健康摘要 heartbeat.body.health(P5,預設 true)" }
       }
     },
     "HeartbeatBody": {
@@ -87,7 +89,20 @@
       "properties": {
         "outbox_pending": { "type": "integer", "minimum": 0, "description": "本機暫存中尚未被確認的快照數(P2 起有值)" },
         "events_pending": { "type": "integer", "minimum": 0, "description": "本機暫存中尚未送出的事件數(P2)" },
-        "last_inventory_seq": { "type": "integer", "minimum": 0, "description": "最後一次被確認的 agent_seq" }
+        "last_inventory_seq": { "type": "integer", "minimum": 0, "description": "最後一次被確認的 agent_seq" },
+        "health": { "$ref": "#/definitions/Health" }
+      }
+    },
+    "Health": {
+      "description": "健康摘要(P5,PLATFORM-PLAN §4.3):只做摘要,不含程序清單、螢幕、鍵盤等(PRD §7 隱私)。取不到的欄位省略(不送 0);CPU 使用率需要兩次取樣,啟動後第一則沒有 cpu_pct",
+      "type": "object",
+      "properties": {
+        "cpu_pct": { "type": "integer", "minimum": 0, "maximum": 100, "description": "整機 CPU 使用率" },
+        "mem_used_pct": { "type": "integer", "minimum": 0, "maximum": 100, "description": "實體記憶體使用率" },
+        "disk_min_free_pct": { "type": "integer", "minimum": 0, "maximum": 100, "description": "最滿的固定磁碟(不含可移除磁碟)剩餘百分比" },
+        "disk_min_free_drive": { "type": "string", "pattern": "^[A-Z]:$", "description": "最滿的固定磁碟代號,例 C:(只有磁碟代號;以資料夾掛載的磁碟與 1 GB 以下的分割區不列入)" },
+        "uptime_s": { "type": "integer", "minimum": 0, "description": "Windows 開機至今秒數" },
+        "agent_rss_mb": { "type": "integer", "minimum": 0, "description": "Agent 行程的實體記憶體(MB)" }
       }
     },
     "HeartbeatAckBody": {

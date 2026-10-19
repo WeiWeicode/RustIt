@@ -55,12 +55,26 @@ export interface HelloBody {
   agent_time?: string;
   /** 硬體指紋,空字串 = 無法取得(A1) */
   hw_fingerprint?: string;
+  /** 裝置憑證到期日(P5 告警 cert_expiring) */
+  cert_not_after?: string;
+}
+
+/** heartbeat.body.health(P5,PLATFORM-PLAN §4.3);取不到的欄位省略 */
+export interface HeartbeatHealth {
+  cpu_pct?: number;
+  mem_used_pct?: number;
+  disk_min_free_pct?: number;
+  disk_min_free_drive?: string;
+  uptime_s?: number;
+  agent_rss_mb?: number;
 }
 
 /** 主機下發設定(ws-envelope AgentSettings;PLATFORM-PLAN §4.2) */
 export interface AgentSettings {
   inventory_interval_sec: number;
   usb_events: boolean;
+  /** 心跳是否附健康摘要(P5;舊版 Agent 忽略) */
+  health_enabled?: boolean;
 }
 
 export interface HelloAckBody {

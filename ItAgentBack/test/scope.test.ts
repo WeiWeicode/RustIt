@@ -102,6 +102,7 @@ describe('管理 API 的資料範圍(:51240)', () => {
       service: env.service,
       commands: env.commands,
       files: env.files,
+      alerts: env.alerts,
     });
 
     // 甲:憑證 FQDN;乙:憑證判不出、回報網域 b.example;未指定:工作群組
@@ -182,6 +183,7 @@ describe('管理 API 的資料範圍(:51240)', () => {
       ['GET', '', undefined],
       ['GET', '/events', undefined],
       ['GET', '/inventory.json', undefined],
+      ['GET', '/health', undefined],
       ['PUT', '/status', { status: 'disabled' }],
       ['GET', '/commands', undefined],
       ['POST', '/basic-commands', { kind: 'inventory.collect' }],
@@ -317,6 +319,33 @@ describe('管理 API 的資料範圍(:51240)', () => {
     assert.deepEqual([env.sql.byId(devA.id).company, env.sql.byId(devA.id).companySource], ['甲公司', 'cert']);
   });
 
+  it('告警(P5):清單只列範圍內;依 deviceId 篩選範圍外為空;關閉範圍外與不存在相同', async () => {
+    const at = env.clock.now();
+    const b = await env.monitor.openAlert({ deviceRef: devB.id, rule: 'disk_low', severity: 'warn', detail: '{}', at });
+    await env.monitor.openAlert({ deviceRef: devU.id, rule: 'disk_low', severity: 'warn', detail: '{}', at });
+    // 前面的測試改過公司:這裡固定為乙公司 / 未指定,結束後還原;甲可能已有別的告警,只看這兩台
+    const saved = [env.sql.byId(devB.id), env.sql.byId(devU.id)].map((d) => [d.company, d.companySource] as const);
+    env.sql.setCompanyRaw(devB.id, '乙公司', 'manual');
+    env.sql.setCompanyRaw(devU.id, null);
+    const mine = new Set([devB.deviceId, devU.deviceId]);
+    const alertIds = (res: { json(): unknown }) =>
+      (res.json() as { items: { deviceId: string }[] }).items
+        .map((x) => x.deviceId)
+        .filter((id) => mine.has(id))
+        .sort();
+    assert.deepEqual(alertIds(await call(tokens.a!, 'GET', '/v1/alerts')), []);
+    assert.deepEqual(alertIds(await call(tokens.b!, 'GET', '/v1/alerts')), [devB.deviceId]);
+    assert.deepEqual(alertIds(await call(tokens.all!, 'GET', '/v1/alerts')), [devB.deviceId, devU.deviceId].sort());
+    assert.deepEqual(alertIds(await call(tokens.none!, 'GET', '/v1/alerts')), []);
+    assert.deepEqual(alertIds(await call(tokens.a!, 'GET', `/v1/alerts?deviceId=${devB.deviceId}`)), []);
+    const body = await sameAsMissing(tokens.a!, 'POST', `/v1/alerts/${b.alertId}/resolve`, `/v1/alerts/${NONE}/resolve`, { note: '確認' });
+    assert.equal(body.code, 'ITA_ALERT_NOT_FOUND');
+    assert.equal(env.monitor.alerts.find((x) => x.alertId === b.alertId)!.state, 'open', '範圍外的關閉不可生效');
+    assert.equal((await call(tokens.b!, 'POST', `/v1/alerts/${b.alertId}/resolve`, { note: '確認' })).statusCode, 200);
+    env.sql.setCompanyRaw(devB.id, ...saved[0]!);
+    env.sql.setCompanyRaw(devU.id, ...saved[1]!);
+  });
+
   it('路由清單:OpenAPI 的每個 operation 都已在本檔驗證資料範圍', async () => {
     const doc = (await app.inject('/openapi.json')).json() as { paths: Record<string, Record<string, { operationId: string }>> };
     const ops = Object.values(doc.paths)
@@ -324,6 +353,8 @@ describe('管理 API 的資料範圍(:51240)', () => {
       .sort();
     // 新增管理路由時,先在上面補上範圍測試,再把 operationId 加進這份清單
     const VERIFIED = [
+      'endpoint.alert.list',
+      'endpoint.alert.resolve',
       'endpoint.command.basic.batch',
       'endpoint.command.basic.create',
       'endpoint.command.batch.get',
@@ -335,6 +366,7 @@ describe('管理 API 的資料範圍(:51240)', () => {
       'endpoint.device.company',
       'endpoint.device.events',
       'endpoint.device.get',
+      'endpoint.device.health',
       'endpoint.device.inventory-download',
       'endpoint.device.list',
       'endpoint.device.merge',

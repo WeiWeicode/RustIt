@@ -94,6 +94,17 @@ describe('部署區設定', () => {
     assert.throws(() => loadConfig(clean({ ...testEnv, COMMAND_FILE_KEEP_DAYS: '31' })), /COMMAND_FILE_KEEP_DAYS/);
   });
 
+  it('監測(P5):健康摘要預設開、告警門檻預設值;磁碟關閉門檻不可低於開啟門檻', () => {
+    const c = loadConfig(clean(testEnv));
+    assert.equal(c.agentSettings.health_enabled, true);
+    assert.deepEqual(c.alertThresholds, { offlineDays: 7, diskFreePct: 10, diskClearPct: 15, restarts24h: 3, certDays: 30, silentMin: 15 });
+    assert.equal(loadConfig(clean({ ...testEnv, AGENT_HEALTH_ENABLED: '0' })).agentSettings.health_enabled, false);
+    // 只調高開啟門檻時,關閉門檻至少等於開啟門檻
+    assert.equal(loadConfig(clean({ ...testEnv, ALERT_DISK_FREE_PCT: '20' })).alertThresholds.diskClearPct, 20);
+    assert.throws(() => loadConfig(clean({ ...testEnv, ALERT_DISK_FREE_PCT: '20', ALERT_DISK_CLEAR_PCT: '10' })), /ALERT_DISK_CLEAR_PCT/);
+    assert.throws(() => loadConfig(clean({ ...testEnv, ALERT_OFFLINE_DAYS: '0' })), /ALERT_OFFLINE_DAYS/);
+  });
+
   it('資料範圍(E6):test / prod 必須設定全部公司角色(可為空字串),dev 預設空', () => {
     assert.throws(() => loadConfig(clean({ ...testEnv, ENDPOINT_SCOPE_ALL_ROLES: undefined })), /ENDPOINT_SCOPE_ALL_ROLES 未設定/);
     assert.deepEqual(loadConfig(clean({ ...testEnv, ENDPOINT_SCOPE_ALL_ROLES: '' })).scopeAllRoles, []);

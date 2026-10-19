@@ -1,7 +1,7 @@
 /**
  * 電腦清單 / 詳情(INTEGRATION-PLAN §5、ENDPOINT-AGENT-GUIDE §8.3;P3 擴充見 docs/P3-DATA-DESIGN.md §3):對外 /api/endpoint/devices[/{deviceId}]。
  * 回傳 camelCase,與 GigaItApp 的 EndpointDevice 相容(只新增欄位)。清單不帶軟體清單,只在詳情的 inventory。
- *   - 查詢(endpoint.device.read):清單分頁與篩選、詳情、事件、下載資產 JSON
+ *   - 查詢(endpoint.device.read):清單分頁與篩選、詳情、事件、下載資產 JSON、健康走勢(P5;清單與詳情另帶健康摘要與告警)
  *   - 裝置狀態與合併(endpoint.command.admin,指南 §8.2「停用 / 啟用裝置」屬管理等級):x-audit-level: meta,操作人取自內部 Token
  * 資料範圍依 Token 的 cos(所屬公司)過濾(指南 §8.2、§10 E6;docs/E6-COMPANY-SCOPE-DESIGN.md):只回傳、只接受該公司的電腦,範圍外回與不存在相同的 404;
  *   指定所屬公司(PUT /company)只有全部公司角色可用。
@@ -11,6 +11,7 @@ import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { AppError } from '../errors.js';
 import { COMPANY_NAME_MAX } from '../services/company.js';
 import type { DeviceService } from '../services/device-service.js';
+import { alertSchema } from './alerts.js';
 import type { Actor, DeviceStatus } from '../stores/types.js';
 import { mgmtCtx } from './mgmt-ctx.js';
 
@@ -46,6 +47,20 @@ const summaryProps = {
   retiredAt: dateOrNull,
   company: { type: ['string', 'null'], description: '所屬公司(Gateway 公司名稱);null = 未指定,只有可管理所有公司的角色看得到' },
   companySource: { type: ['string', 'null'], enum: ['cert', 'domain', 'manual', null], description: '公司的判定來源:憑證 DN / Agent 回報的網域 / IT 指定' },
+  health: {
+    type: ['object', 'null'],
+    description: '健康摘要:在線取最近一則心跳,離線取最後一次落盤(每 5 分鐘);舊版 Agent 為 null',
+    properties: {
+      at: { type: 'string', format: 'date-time' },
+      cpuPct: { type: 'integer' },
+      memUsedPct: { type: 'integer' },
+      diskMinFreePct: { type: 'integer', description: '最滿的固定磁碟剩餘百分比' },
+      diskMinFreeDrive: { type: 'string' },
+      uptimeS: { type: 'integer' },
+      agentRssMb: { type: 'integer' },
+    },
+  },
+  openAlerts: { type: 'integer', description: '未結束的告警數' },
 } as const;
 
 const summarySchema = { type: 'object', properties: summaryProps } as const;
@@ -187,6 +202,21 @@ export function deviceRoutes(service: DeviceService): FastifyPluginAsync {
                     },
                   },
                 },
+                certNotAfter: { ...dateOrNull, description: '裝置憑證到期日' },
+                watchdog: {
+                  type: ['object', 'null'],
+                  description: 'Watchdog 最近一次回報(P5-2);尚未回報為 null',
+                  properties: {
+                    version: strOrNull,
+                    reportAt: dateOrNull,
+                    agentServiceState: strOrNull,
+                    agentStartType: strOrNull,
+                    agentStatusOk: { type: ['boolean', 'null'] },
+                    agentLastError: strOrNull,
+                    agentRestarts24h: { type: ['integer', 'null'] },
+                  },
+                },
+                alerts: { type: 'array', items: alertSchema, description: '未結束的告警' },
                 inventory: {
                   type: ['object', 'null'],
                   additionalProperties: true,
@@ -251,6 +281,52 @@ export function deviceRoutes(service: DeviceService): FastifyPluginAsync {
         },
       },
       async (req) => service.listEvents(ctx(req), id(req), req.query.cursor ? Number(req.query.cursor) : undefined, req.query.limit),
+    );
+
+    app.get<{ Params: { deviceId: string }; Querystring: { hours: number } }>(
+      '/v1/devices/:deviceId/health',
+      {
+        schema: {
+          operationId: 'endpoint.device.health',
+          summary: '電腦健康走勢',
+          description:
+            '這台電腦最近 hours 小時(1–24)的 CPU、記憶體使用率(5 分鐘平均)與磁碟最低剩餘(5 分鐘內最小值),來源為 Agent 每 30 秒的心跳(保留 1 天);舊版 Agent 沒有健康資料時 points 為空。歷史資料庫暫時無法使用回 503 ITA_HISTORY_UNAVAILABLE。',
+          tags: ['端點電腦'],
+          'x-permission': 'endpoint.device.read',
+          'x-gherkin': [
+            '場景: 查詢健康走勢',
+            '  假如 電腦 PC-EXAMPLE-01 的 Agent 心跳帶健康摘要',
+            '  而且 使用者擁有 endpoint.device.read',
+            '  當 呼叫 GET /api/endpoint/devices/{deviceId}/health?hours=24',
+            '  那麼 回應 200',
+            '  而且 points 依時間排序,每點間隔 5 分鐘',
+          ].join('\n'),
+          params: deviceParams,
+          querystring: { type: 'object', properties: { hours: { type: 'integer', minimum: 1, maximum: 24, default: 24 } } },
+          response: {
+            200: {
+              type: 'object',
+              properties: {
+                deviceId: uuid,
+                bucketSec: { type: 'integer' },
+                points: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      at: { type: 'string', format: 'date-time' },
+                      cpuPct: { type: ['integer', 'null'] },
+                      memUsedPct: { type: ['integer', 'null'] },
+                      diskMinFreePct: { type: ['integer', 'null'] },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      async (req) => service.healthSeries(ctx(req), id(req), req.query.hours),
     );
 
     app.get<{ Params: { deviceId: string } }>(

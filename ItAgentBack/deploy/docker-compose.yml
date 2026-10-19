@@ -44,6 +44,14 @@ services:
       AGENT_USB_EVENTS: ${AGENT_USB_EVENTS:-1}
       AGENT_MAX_INFLIGHT: ${AGENT_MAX_INFLIGHT:-32}
       AGENT_BUSY_RETRY_AFTER_SEC: ${AGENT_BUSY_RETRY_AFTER_SEC:-30}
+      # 監測(P5,docs/P5-MONITOR-DESIGN.md §4):心跳附健康摘要開關與告警門檻
+      AGENT_HEALTH_ENABLED: ${AGENT_HEALTH_ENABLED:-1}
+      ALERT_OFFLINE_DAYS: ${ALERT_OFFLINE_DAYS:-7}
+      ALERT_DISK_FREE_PCT: ${ALERT_DISK_FREE_PCT:-10}
+      ALERT_DISK_CLEAR_PCT: ${ALERT_DISK_CLEAR_PCT:-15}
+      ALERT_RESTARTS_24H: ${ALERT_RESTARTS_24H:-3}
+      ALERT_CERT_DAYS: ${ALERT_CERT_DAYS:-30}
+      ALERT_SILENT_MIN: ${ALERT_SILENT_MIN:-15}
       # 監控(giga-observe,同一 Gateway 網路的 observe-api):管理 API 與 Agent 通道各一把 Key,架構圖上是兩個服務
       MONITOR_URL: ${MONITOR_URL:-http://observe-api:51202}
       MONITOR_API_KEY_FILE: /run/secrets/monitor_api_key

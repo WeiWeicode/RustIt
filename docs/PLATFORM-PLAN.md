@@ -201,7 +201,7 @@ Demo(Tauri)改造為使用者端程式 `desktop`:使用者會用的頁面保留(
 - 健康指標只做摘要,**不做**程序清單、螢幕、鍵盤等(PRD §7 隱私)。
 - 軟硬體變更由 **Server 比對**(同一裝置前後兩份 payload 的 `software`、`memory_modules`、`physical_disks`、`gpus` 序號),Agent 不需要記住上一份,也不會因 Agent 重裝而漏判。
 - USB 插拔由 Agent 監聽裝置變更(`CM_Register_Notification`,ADR 0003 使用者模式),只記錄、不封鎖。
-- **告警規則**(初版固定,不做規則引擎):離線超過 N 天、磁碟剩餘 < 10%、硬體序號變更、Agent 24 小時內重啟 ≥ 3 次、憑證 30 天內到期、Watchdog 回報版本不符。先只在 GigaItApp「告警」頁顯示;之後經 BFF 通知逐人寄給 IT 值班人員。
+- **告警規則**(初版固定,不做規則引擎):離線超過 N 天、磁碟剩餘 < 10%、硬體序號變更、Agent 24 小時內重啟 ≥ 3 次、憑證 30 天內到期、Watchdog 回報版本不符(**P6**:P5 尚無目標版本可比)。完整規則與門檻見 `P5-MONITOR-DESIGN.md` §4。先只在 GigaItApp「告警」頁顯示;之後經 BFF 通知逐人寄給 IT 值班人員。
 
 ### 4.4 指令通道 — P4
 
@@ -351,7 +351,7 @@ Demo(Tauri)改造為使用者端程式 `desktop`:使用者會用的頁面保留(
 | `agent-app.ts`(續) | WS `command` / `command_update`(P4)、`POST /agent/v1/watchdog/report`(P5)、`GET /agent/v1/releases/...`(P6)、`GET /agent/v1/packages/{id}`(P7);`hello_ack` 帶設定版本號(P2) | P4–P7 |
 | `services/sync-service.ts` | `/sync` 冪等比對(INTEGRATION-PLAN §4.2)、`offline_period` 等事件寫入 | P2 |
 | `services/command-dispatcher.ts` | 指令狀態機、在線推送、重連補送、逾期、批次限流 | P4 |
-| `services/event-service.ts` | 資產前後比對、告警規則 | P5 |
+| `services/change-detector.ts`、`alert-service.ts`、`health-service.ts` | 資產前後比對(純函式)、告警規則、健康與 Watchdog 回報(`P5-MONITOR-DESIGN.md` §3) | P5 |
 | `services/release-service.ts`、`software-service.ts` | 版本選擇、檔案雜湊、下載稽核 | P6、P7 |
 
 ### 5.2 資料表(手寫 migration,SQL Server 2012 語法)
@@ -360,7 +360,7 @@ Demo(Tauri)改造為使用者端程式 `desktop`:使用者會用的頁面保留(
 | --- | --- | --- |
 | `0002_sync_event.sql` | `ita.device_event` 加 `occurred_at`(端點發生時間)、`received_at`、索引與新 `event_type`(含 `offline_period`、`usb_*`、`local_overflow`、`merged`);`ita.device_setting`(主機下發設定與版本號);`ita.device` 加 `hw_fingerprint`、`clock_skew_ms`、`merged_into`、`retired_at`(A1、A2) | P2 |
 | `0003_command.sql` | `ita.command`、`ita.command_batch`(含第二人核可欄位,B1);診斷檔案索引(`logs.collect`,A4) | P4 |
-| `0004_health.sql` | `ita.device_health`(Watchdog 最近回報、憑證到期、重啟次數;1:1) | P5 |
+| `0006_monitor.sql` | `ita.device_health`(最近健康、Watchdog 最近回報、憑證到期、重啟次數;1:1)、`ita.device_alert`(告警);原訂 0004,0004 / 0005 已用於 P3 軟體清單與 E6 公司 | P5 |
 | `0005_release.sql` | `ita.agent_release`、`ita.release_ring`、`ita.device` 加 `ring`、`watchdog_version`、`desktop_version` | P6 |
 | `0006_software.sql` | `ita.software_package` | P7 |
 
