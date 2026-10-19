@@ -170,8 +170,10 @@ export const CLOCK_SKEW_ALERT_MS = 5 * 60_000;
 export const SYNC_NEED_LIMIT = 20;
 /** device_event.data 上限 */
 const EVENT_DATA_MAX = 4000;
-/** 主機停用 / 退役 / 合併時關閉 WebSocket 的代碼(Agent 照一般斷線重連,重連時由 identify 回 403 或對到合併後的裝置) */
+/** 主機停用 / 退役時關閉 WebSocket 的代碼(Agent 視為停用,暫停並每 10 分鐘重試;重連時由 identify 回 403) */
 export const WS_CLOSE_DEVICE_CHANGED = 4403;
+/** 合併時關閉 WebSocket 的代碼:Agent 照一般斷線立即重連,以同一張憑證對到合併後的裝置(不可用 4403,否則 Agent 暫停 10 分鐘) */
+export const WS_CLOSE_DEVICE_MERGED = 4410;
 /** 啟動時判定公司:每批台數與上限批數 */
 const COMPANY_BATCH = 200;
 const COMPANY_MAX_ROUNDS = 50;
@@ -541,11 +543,11 @@ export class DeviceService implements CommandChannel {
   }
 
   /** 主機端變更裝置(停用、退役、合併):關閉該裝置的 WebSocket */
-  private kick(ctx: Ctx, deviceId: string, reason: string): void {
+  private kick(ctx: Ctx, deviceId: string, reason: string, code = WS_CLOSE_DEVICE_CHANGED): void {
     const live = this.connections.get(deviceId);
     if (!live) return;
-    ctx.log.info({ deviceId, reason }, '裝置狀態變更,關閉 WebSocket');
-    live.conn.close(WS_CLOSE_DEVICE_CHANGED, reason);
+    ctx.log.info({ deviceId, reason, code }, '裝置狀態變更,關閉 WebSocket');
+    live.conn.close(code, reason);
   }
 
   /** 指令推送通道(CommandChannel):只對本行程握有的連線(單一實例,指南 §8.4) */
@@ -802,9 +804,9 @@ export class DeviceService implements CommandChannel {
     }
     ctx.log.info({ target: targetId, source: sourceId, emp: actor.emp, ...result }, '裝置已合併');
     // 先關閉來源的 WebSocket:避免 Agent 在 Mongo / Redis 清理期間仍以來源身分寫入
-    this.kick(ctx, sourceId, 'device merged');
+    this.kick(ctx, sourceId, 'device merged', WS_CLOSE_DEVICE_MERGED);
     // 檢查之後目標才上線(競態):一併關閉,讓它以自己的憑證重新識別
-    this.kick(ctx, targetId, 'device merged');
+    this.kick(ctx, targetId, 'device merged', WS_CLOSE_DEVICE_MERGED);
     await this.soft(ctx, `mongo.reassign(${sourceId} → ${targetId})`, () => this.snapshots.reassign(sourceId, targetId));
     await this.soft(ctx, 'redis.clearHash', () => this.state.clearHash(targetId));
     await this.soft(ctx, 'redis.clearHash', () => this.state.clearHash(sourceId));

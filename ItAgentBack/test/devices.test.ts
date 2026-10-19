@@ -8,7 +8,7 @@ import { loadGatewayEnv, loadMonitorEnv } from '@giganexus/backend-sdk';
 import type { FastifyInstance } from 'fastify';
 import type { InventoryRequest } from '../src/contracts.js';
 import { buildMgmtApp } from '../src/mgmt-app.js';
-import { inventoryFileName, WS_CLOSE_DEVICE_CHANGED } from '../src/services/device-service.js';
+import { inventoryFileName, WS_CLOSE_DEVICE_CHANGED, WS_CLOSE_DEVICE_MERGED } from '../src/services/device-service.js';
 import { likeContains } from '../src/stores/sql-store.js';
 import { ALL, FakeConnection, inventoryRequest, setup } from './helpers.js';
 
@@ -194,7 +194,7 @@ describe('合併疑似同一台(A1)', () => {
     assert.equal(body.inventoryFrom, 'source');
     assert.ok(body.events >= 1);
 
-    assert.equal(conn.closed, WS_CLOSE_DEVICE_CHANGED);
+    assert.equal(conn.closed, WS_CLOSE_DEVICE_MERGED, '合併不可用 4403(Agent 會當成停用暫停 10 分鐘)');
     assert.ok(env.mongo.snapshots.every((s) => s.deviceId !== d2.deviceId));
     assert.ok(!env.redis.hashes.has(d1.deviceId));
     // Agent 以來源的憑證重連 → 對到舊裝置

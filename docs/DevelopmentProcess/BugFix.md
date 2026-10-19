@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-19 合併裝置後 Agent 暫停 10 分鐘才重連
+- 內容:P3-4 測試區驗證時(VM 改名為 `RUSTIT-P34` 並換新憑證,00:42:09 把新登錄併入舊裝置 `de87bce2`),合併後馬上下 `agent.restart`,指令一直排隊,直到 00:52:09 Agent 才重連,重連後才送出並執行。原因:合併時 `kick()` 沿用停用 / 退役的 close code 4403,Agent 收到 4403 會當成「裝置已被 IT 停用」,暫停蒐集並等 10 分鐘(憑證類錯誤的重試間隔)才重連;常數註解寫「Agent 照一般斷線重連」,與 Agent 的實作不符。修正:合併改用新的 close code 4410(`WS_CLOSE_DEVICE_MERGED`),Agent 收到不認得的代碼會照一般斷線處理,1 秒起退避重連,用同一張憑證對到合併後的裝置;停用 / 退役仍用 4403。Agent 不用改。契約 `ws-envelope.schema.json` 補上 4410 的說明;指南 §5.4 要回寫(Gateway repo,先取得同意)。
+- 檔案:`ItAgentBack/src/services/device-service.ts`、`test/devices.test.ts`、`docs/contracts/ws-envelope.schema.json`
+- 驗證:`npm run typecheck`;`npm test` 124 項通過(合併測試改成斷言 close code 為 4410)。測試區要等部署後,再做一次合併來實測(VM 還原「P3-4 改名前」檢查點後重做)。
+
 ## 2026-10-15 logs.collect 的 zip 檔案時間為 1980-01-01、瞬間完成的指令沒有 started_at
 - 內容:測試區 VM 驗證時發現兩個小問題。① zip 項目沒有設定修改時間,`zip` 套件未開 time / chrono 功能時預設 1980-01-01;改為日誌檔的修改時間(本機時間,zip 格式無時區),讀不到時用現在時間。② Agent 的 `command_log` 每筆指令只保留最後狀態,瞬間完成的指令(`agent.log_level`、`agent.restart` 重送)running 被 succeeded 覆蓋,主機沒收到 running 而沒有 `started_at`;主機收到終態時,若沒有 started_at 且不是「未開始執行」的失敗(UNSUPPORTED_COMMAND、EXPIRED、INVALID_PARAMS、NOT_RUNNING_AS_SERVICE),以 `acked_at`(沒有則本次時間)補上。
 - 版本:rustit-agent 0.4.1。
