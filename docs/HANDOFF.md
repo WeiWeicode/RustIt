@@ -18,15 +18,24 @@
 
 ## 2. 下一步
 
-0. **下一個工作階段從這裡開始(2026-10-19)**:
+0. **下一個工作階段從這裡開始:P5 監測(甘特圖 W6-18)**
+   - **範圍**:PLATFORM-PLAN §4.3(三層資料：健康摘要附在心跳、事件、Server 比對軟硬體變更、固定告警規則)、§4.10 A5(Agent 被停用 / 移除偵測)、§8 P5 完成標準;Watchdog 規格見 Gateway `ENDPOINT-AGENT-GUIDE.md` §7。
+   - **完成標準**:結束 Agent 行程 → Watchdog 重啟並上報;以管理員手動停止 Agent 服務 → 產生事件與告警;插 USB 隨身碟 → 事件出現(P2 已有);移除一個軟體 → 下次蒐集產生變更事件。
+   - **現況(2026-10-19)**:`RustAgent/crates/` 只有 agent、collector、common、demo,**還沒有 `watchdog` crate**;心跳還沒附 `health`;Server 還沒比對前後兩份資產(沒有 software / hardware 變更事件);GigaItApp 沒有「告警」頁。USB 插拔、`offline_period`、`clock_skew`、`agent_started` 事件 P2 已完成。
+   - **建議做法**:比照 P3 / P4,先寫設計 `docs/P5-MONITOR-DESIGN.md`(分批、資料表 / migration、契約擴充、告警規則、Watchdog 與 Agent 互相看守、MSI 加第二個服務、GigaItApp 畫面),經需求方確認後再實作;牽涉服務、安全與契約,由 Claude 主寫。
+   - **要先同意**:migration 套用測試庫、契約變更、MSI 加 Watchdog 服務、GigaItApp 告警頁與 `gateway-rbac.yaml`、指南回寫(§5、§7)、合併 develop(測試區共用)。
+   - **測試環境**:主機 2 Hyper-V VM(名稱 `RUSTIT-P34`、憑證 `CN=DESKTOP-1TB2UMP`、deviceId `de87bce2`、Agent 0.4.2;檢查點「匯入憑證」「P3-4 改名前(0.4.1)」;Claude 可經 `ssh host2` 操作 Hyper-V,VM 內指令由需求方執行)。E6 測試帳號 V112001(碩禾、禾迅)、V114007(禾迅),個人權限「電腦清單」。對外 API 是 `/api/endpoint/*`(沒有 `/v1`)。
+   - **close code 規則**:4403 = 停用 / 退役(Agent 暫停;停用每 1 分鐘、退役 10 分鐘重試)、4409 = 被新連線取代、4410 = 合併(立即重連)。新的關閉原因要另訂代碼，不要沿用 4403。
+
+   **前一階段(2026-10-19 收尾)**:
    - **P3 完成、E6 測試區驗證通過(2026-10-19)**:見 [test-reports/2026-10-19-p3-merge-e6-scope.md](test-reports/2026-10-19-p3-merge-e6-scope.md)。P3-4 合併驗證通過;修正兩個問題:合併改用 close 4410(MR !27,endpoint-server `8235dc10`)、Agent **0.4.2** 停用改每 1 分鐘重試(MR !28,`5d04604`;VM 已升級 0.4.2,MSI SHA-256 `88d9a774…dcbd0dac`)。E6:批次 112 已發佈，以 V112001(碩禾、禾迅)、V114007(禾迅)驗證資料範圍。VM 目前名稱 `RUSTIT-P34`、憑證 `CN=DESKTOP-1TB2UMP`(deviceId 仍為 `de87bce2`),檢查點多了「P3-4 改名前(0.4.1)」。
-   - **待辦**:指南 §5.4(close 4410)、§8.3(合併路由)回寫(Gateway,需同意);E6-2 GigaItApp 公司欄 / 篩選 / 指定按鈕、E6-3 指南回寫(需同意);甘特圖 W6-16 改 100% done(根目錄 repo,需同意)。下一個大階段 P5 監測(W6-18)。
+   - **待辦**:指南 §5.4(close 4410)、§8.3(合併路由)回寫(Gateway,需同意);E6-2 GigaItApp 公司欄 / 篩選 / 指定按鈕、E6-3 指南回寫(需同意);甘特圖 W6-16 已改 100% done(根目錄 !5、甘特圖 API)。
    - VM `DESKTOP-1TB2UMP` 已由需求方升級 Agent **0.4.1**(2026-10-16;MSI SHA-256 `880e46d9…da794c`,自 develop `8568f55` 建置);已確認收集日誌 zip 內檔案時間為日誌修改時間(正常,非 1980-01-01)。
    - **P3 資料呈現已上測試區(2026-10-16)**:RustIt MR !23(endpoint-server `807c7a12`,OpenAPI 批次 110 已發佈,新增權限 `endpoint.command.admin`,啟動時回填 3 台軟體清單)、GigaItApp MR !4、!5(詳情固定 85vh 高度、篩選列換行);migration 0004 已套用;rbac-test 已重跑(`it.endpoint-device.admin` → `endpoint.command.admin`,it-admin)。瀏覽器實測(需求方登入):清單分頁 / 軟體篩選 / 清除、VM 詳情 7 個 Tab、事件 21 筆、下載 JSON、**停用 → 啟用(期間排隊指令於重連後送出)、退役 → 改回使用中皆正常**。P3-4(VM 改名後的疑似同一台與合併)已於 2026-10-19 驗證通過(見上)。合併路由寫入指南 §8.3(需 Gateway 同意)。
    - **E6 資料範圍依公司已上測試區(2026-10-16)**:RustIt MR !25(endpoint-server `3081af75`),migration 0005 已套用,主機 2 `ita.env` 已加 `ENDPOINT_SCOPE_ALL_ROLES=it-admin`、`ENDPOINT_COMPANY_DOMAINS=碩禾=gsc.com.tw,gsmc.com.tw`;回填後開發機兩筆登錄為碩禾、VM 未指定(只有 it-admin 看得到),見 `E6-COMPANY-SCOPE-DESIGN.md` §6.1。批次 112 已發佈，非 it-admin 帳號驗證已於 2026-10-19 通過(見上)。注意:改 `ENDPOINT_COMPANY_DOMAINS` 後要重啟 endpoint-server,且 `domain` 來源的裝置等下次資產變動才重算。Gateway ENDPOINT-AGENT-GUIDE v0.8 已回寫 E6(Gateway 分支 `docs/endpoint-guide-v0.8`,待合併);甘特圖 W6-16 90%、W6-24 註記 B9 後端完成。E6-2(GigaItApp 公司欄 / 篩選 / 指定按鈕)、E6-3(指南 §8.2、§8.3、§10.2 E6、§11 回寫)待同意。上線檢查加入「正式區裝置憑證 CN 必須是 FQDN」。
    - P4 後續(未排程,見 `P4-COMMAND-DESIGN.md` §6.1、§8.4):WebSocket 訊息速率上限、`result` 依類型以 schema 限制、慢速上傳佔用回報名額、`ita.command_file.command_ref` 唯一索引(多實例前)、附檔總量上限與磁碟告警、批次下指令畫面。
 1. **P1 已完成**(2026-10-14 Hyper-V VM 驗證 7 項通過,見下方「P1 收尾:VM 測試」)。Win11 VM 可之後補測;VM 保留作 P2 以後的測試機(檢查點「匯入憑證」)。
-2. **P3 資料呈現**、**P8-1 使用者端外殼與我的電腦** 可並行:P3(管理 API 回完整資產 + GigaItApp 詳情分 Tab)只動後端與前端,適合交給同仁。
+2. **P3 資料呈現已完成**(2026-10-19);**P8-1 使用者端外殼與我的電腦**可交給同仁並行(甘特圖 W6-21)。
 3. **P2 已完成**(主機端與 Agent 端已合併 `develop`;2026-10-15 P2-3 VM 驗證 7 項通過,見下方)。驗證時發現裝置被停用期間會記成 `offline_period`(rejected),已於 0.2.1 排除(BugFix.md 2026-10-15;測試區 VM 已升級)。**P4 指令通道已完成**(測試區;設計 `P4-COMMAND-DESIGN.md`,需求方 2026-10-15 確認;甘特圖 W6-17;Gateway 指南 v0.6 已回寫):P4-1 已合併 develop;P4-2 已合併並於 2026-10-15 測試區 VM 驗證通過(見下方「P4 測試區 VM 驗證」;含 P4-1 的服務模式 `agent.restart`);`endpoint.command.basic` 已由 GigaItApp `gateway-rbac.yaml` 按鈕節點 `it.endpoint-device.command` 授予 it-admin(GigaItApp MR !1)。**P4-3(2026-10-15,GigaItApp MR !2)**:電腦詳情「指令」Tab(六個指令、結果、日誌下載、指令紀錄、取消)與「端點管理 › 指令紀錄」Tab,本機連測試區 Gateway 對 VM 實測通過(GigaItApp NewFeatures 2026-10-15);已合併(GigaItApp `02f12d2`),「指令紀錄」Tab 由 CI rbac-test 套用權限後可見。小項已修(BugFix.md 2026-10-15,Agent 0.4.1:zip 檔案時間、瞬間完成的指令補 started_at;VM 已於 2026-10-16 升級 0.4.1)。
 
 ### P4 測試區 VM 驗證(2026-10-15)
