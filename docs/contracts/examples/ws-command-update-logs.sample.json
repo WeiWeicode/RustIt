@@ -1,0 +1,19 @@
+{
+  "v": 1,
+  "type": "command_update",
+  "id": "7c3f9d2e-5a4b-4f7c-8e6d-2b3c4d5e6f03",
+  "body": {
+    "command_id": "5b2e8c1d-4f3a-4e6b-9d7c-1a2b3c4d5e02",
+    "state": "succeeded",
+    "progress": 100,
+    "result": {
+      "file_id": "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c61",
+      "file_name": "logs-20261006-080002.zip",
+      "size_bytes": 182344,
+      "sha256": "3f0c2b1a9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a291807f6e5d4c3b2a19087",
+      "days_included": 3,
+      "truncated": false
+    },
+    "occurred_at": "2026-10-06T08:00:02.800Z"
+  }
+}

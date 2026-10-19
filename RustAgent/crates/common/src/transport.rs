@@ -2,7 +2,7 @@
 //! 失敗分三類(指南 §4.2、PLATFORM-PLAN A3):被拒(憑證、身分、停用、契約不符)每 10 分鐘重試;
 //! 主機忙碌(429)照 Retry-After 等待再加 0–30% 隨機,不計入指數退避;其他(網路、5xx)指數退避。
 
-use crate::backoff::{Backoff, CERT_RETRY};
+use crate::backoff::{Backoff, CERT_RETRY, DISABLED_RETRY, jitter};
 use crate::config::Settings;
 use crate::tls;
 use rustls::ClientConfig;
@@ -38,6 +38,10 @@ impl SendError {
     /// 下一次重試前的等待
     pub fn wait(&self, backoff: &mut Backoff) -> Duration {
         match self {
+            // 停用可能隨時被 IT 恢復:1 分鐘 ±20%;close 4403 也可能是退役,下一次會收到 403 ITA_DEVICE_RETIRED 改回 10 分鐘
+            SendError::Rejected(_) if self.is_device_disabled() && !self.is_device_retired() => {
+                jitter(DISABLED_RETRY)
+            }
             SendError::Rejected(_) => CERT_RETRY,
             SendError::Retry(_) => backoff.next_delay(),
             SendError::Busy(after, _) => after.mul_f64(1.0 + fastrand::f64() * 0.3),
@@ -70,6 +74,11 @@ impl SendError {
     /// 裝置被主機停用(HTTP 403 ITA_DEVICE_DISABLED / ITA_DEVICE_RETIRED、WebSocket close 4403)
     pub fn is_device_disabled(&self) -> bool {
         matches!(self, SendError::Rejected(m) if m.contains("ITA_DEVICE_DISABLED") || m.contains("ITA_DEVICE_RETIRED") || m.contains("close 4403"))
+    }
+
+    /// 裝置已被主機退役(HTTP 403 ITA_DEVICE_RETIRED):不會恢復,維持 10 分鐘重試
+    pub fn is_device_retired(&self) -> bool {
+        matches!(self, SendError::Rejected(m) if m.contains("ITA_DEVICE_RETIRED"))
     }
 
     /// 主機收到但內容不符契約(HTTP 400):連線正常,問題在這筆資料
@@ -177,20 +186,58 @@ impl Transport {
             .send()
             .await
             .map_err(|e| SendError::Retry(format!("回報連線失敗:{}", error_chain(&e))))?;
-        let status = res.status();
-        if status.is_success() {
-            return res
-                .json::<Res>()
-                .await
-                .map_err(|e| SendError::Retry(format!("回應格式錯誤:{e}")));
+        read_json(res).await
+    }
+
+    /// `POST <server><path>`,本體為原始位元組(指令附檔,P4-2;`docs/contracts/command-file.schema.json`)
+    pub async fn post_bytes<Res: DeserializeOwned>(
+        &self,
+        path: &str,
+        content_type: &str,
+        headers: &[(&str, String)],
+        body: Vec<u8>,
+    ) -> Result<Res, SendError> {
+        let url = self
+            .server
+            .join(path)
+            .map_err(|e| SendError::Rejected(format!("路徑錯誤 {path}:{e}")))?;
+        let mut rb = self
+            .http
+            .post(url)
+            .header("content-type", content_type)
+            // 大檔在慢速網路(VPN、Wi-Fi)以每秒 100 KB 估算,至少 60 秒
+            .timeout(Duration::from_secs((body.len() as u64 / 100_000).max(60)))
+            .body(body);
+        for (k, v) in self
+            .extra_headers
+            .iter()
+            .map(|(k, v)| (*k, v))
+            .chain(headers.iter().map(|(k, v)| (*k, v)))
+        {
+            rb = rb.header(k, v);
         }
-        let retry_after = res
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string);
-        let body = res.text().await.unwrap_or_default();
-        Err(classify(status.as_u16(), &body, retry_after.as_deref()))
+        let res = rb
+            .send()
+            .await
+            .map_err(|e| SendError::Retry(format!("上傳連線失敗:{}", error_chain(&e))))?;
+        read_json(res).await
+    }
+
+    /// `GET <server><path>`,只回傳 HTTP 狀態(遠端診斷 agent.diagnose 的 Gateway 檢查)
+    pub async fn get_status(&self, path: &str) -> Result<u16, SendError> {
+        let url = self
+            .server
+            .join(path)
+            .map_err(|e| SendError::Rejected(format!("路徑錯誤 {path}:{e}")))?;
+        let mut rb = self.http.get(url);
+        for (k, v) in &self.extra_headers {
+            rb = rb.header(*k, v);
+        }
+        let res = rb
+            .send()
+            .await
+            .map_err(|e| SendError::Retry(format!("連線失敗:{}", error_chain(&e))))?;
+        Ok(res.status().as_u16())
     }
 
     /// WebSocket 位址:`<server><path>`,https → wss、http → ws
@@ -254,6 +301,24 @@ impl Transport {
     }
 }
 
+/// 成功回傳解析後的 JSON,失敗依 §4.2 分類
+async fn read_json<Res: DeserializeOwned>(res: reqwest::Response) -> Result<Res, SendError> {
+    let status = res.status();
+    if status.is_success() {
+        return res
+            .json::<Res>()
+            .await
+            .map_err(|e| SendError::Retry(format!("回應格式錯誤:{e}")));
+    }
+    let retry_after = res
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let body = res.text().await.unwrap_or_default();
+    Err(classify(status.as_u16(), &body, retry_after.as_deref()))
+}
+
 /// 錯誤連同底層原因(例 reqwest 的「error sending request」之下的 DNS / 連線 / TLS 錯誤),供日誌與離線原因分類
 fn error_chain(e: &dyn std::error::Error) -> String {
     let mut text = e.to_string();
@@ -277,8 +342,20 @@ mod tests {
     fn cert_errors_are_not_retried_quickly() {
         let mut b = Backoff::new();
         assert_eq!(classify(400, "", None).wait(&mut b), CERT_RETRY);
+        // 停用:1 分鐘 ±20%(含 close 4403);退役與其他 403 維持 10 分鐘
+        for e in [
+            classify(403, r#"{"code":"ITA_DEVICE_DISABLED"}"#, None),
+            SendError::Rejected("裝置已被 IT 停用(close 4403)".into()),
+        ] {
+            let d = e.wait(&mut b).as_secs_f64();
+            assert!((48.0..=72.0).contains(&d), "{d} 不在 60 秒 ±20% 內");
+        }
         assert_eq!(
-            classify(403, r#"{"code":"ITA_DEVICE_DISABLED"}"#, None).wait(&mut b),
+            classify(403, r#"{"code":"ITA_DEVICE_RETIRED"}"#, None).wait(&mut b),
+            CERT_RETRY
+        );
+        assert_eq!(
+            classify(403, r#"{"code":"DEVICE_UNAUTHORIZED"}"#, None).wait(&mut b),
             CERT_RETRY
         );
         assert!(classify(503, "", None).wait(&mut b) <= Duration::from_millis(1200));

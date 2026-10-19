@@ -19,6 +19,11 @@ pub const SYNC_PATH: &str = "/agent/v1/sync";
 pub const EVENTS_PATH: &str = "/agent/v1/events";
 pub const WS_PATH: &str = "/agent/v1/ws";
 
+/// 指令附檔上傳路徑(P4-2;command-file.schema.json)
+pub fn command_files_path(command_id: &str) -> String {
+    format!("/agent/v1/commands/{command_id}/files")
+}
+
 /// `POST /agent/v1/inventory` 請求(inventory.schema.json)
 #[derive(Debug, Serialize)]
 pub struct InventoryRequest {
@@ -78,6 +83,9 @@ pub struct HelloBody {
     pub agent_time: String,
     /// 硬體指紋(A1),見 [`hw_fingerprint`]
     pub hw_fingerprint: String,
+    /// 裝置憑證到期日(P5 告警);每次連線前讀,讀不到時不送
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub cert_not_after: String,
 }
 
 impl HelloBody {
@@ -94,6 +102,7 @@ impl HelloBody {
             boot_time: info.system.boot_time,
             agent_time: String::new(),
             hw_fingerprint: hw_fingerprint(&info.identity.bios_serial, &info.identity.system_uuid),
+            cert_not_after: String::new(),
         }
     }
 
@@ -143,6 +152,9 @@ pub struct AgentSettings {
     pub inventory_interval_sec: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usb_events: Option<bool>,
+    /// 心跳是否附健康摘要(P5)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_enabled: Option<bool>,
 }
 
 impl AgentSettings {
@@ -155,6 +167,10 @@ impl AgentSettings {
 
     pub fn usb_events(&self) -> bool {
         self.usb_events.unwrap_or(true)
+    }
+
+    pub fn health_enabled(&self) -> bool {
+        self.health_enabled.unwrap_or(true)
     }
 }
 
@@ -254,6 +270,15 @@ pub struct CommandUpdate {
 pub struct CommandUpdateAck {
     pub command_id: String,
     pub accepted: bool,
+}
+
+/// `POST /agent/v1/commands/{id}/files` 回應(command-file.schema.json)
+#[derive(Debug, Clone, Deserialize)]
+pub struct UploadResponse {
+    pub file_id: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub expires_at: String,
 }
 
 /// `prepare_shutdown`(ws-envelope PrepareShutdownBody)

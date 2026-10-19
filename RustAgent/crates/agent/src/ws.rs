@@ -4,6 +4,7 @@
 //! 心跳附上本機暫存數量;連線成功 / 失敗記入連線紀錄(PLATFORM-PLAN §4.2)。
 //! P4:`command` 交給執行器([`crate::command`]);本機尚未被確認的 `command_update` 在 hello_ack 後與有新狀態時送出,
 //! 收到 `command_update_ack` 才標記已回報;`prepare_shutdown`:送完待送狀態、以 1000 關閉、隨機 0–30 秒後重連。
+//! P5:心跳附健康摘要 `health`(主機設定 health_enabled,預設開;取樣在背景執行緒,逾時就省略);hello 帶裝置憑證到期日。
 
 use crate::Shared;
 use crate::command;
@@ -13,14 +14,15 @@ use crate::protocol::{
 };
 use futures_util::{SinkExt, StreamExt};
 use log::{debug, info, warn};
+use rustit_collector::{Health, HealthSampler};
 use rustit_common::backoff::Backoff;
 use rustit_common::backoff::random_up_to;
 use rustit_common::stop::wait;
 use rustit_common::transport::{SendError, WsStream};
 use serde_json::json;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::{Instant, Interval, interval_at};
@@ -35,6 +37,58 @@ const CLOSE_DEVICE_DISABLED: u16 = 4403;
 const CLOCK_SKEW_WARN_MS: i64 = 5 * 60_000;
 /// prepare_shutdown 沒有指定時,重連前隨機等待的上限(避免全部 Agent 同時湧入)
 const PREPARE_SHUTDOWN_JITTER: Duration = Duration::from_secs(30);
+/// 健康取樣最多等這麼久(磁碟列舉異常時不拖住心跳)
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 健康取樣器跨連線保留(CPU 使用率需要前一次取樣)
+type Sampler = Arc<Mutex<HealthSampler>>;
+
+/// 在背景執行緒取樣;逾時或失敗回 None(心跳照送,只是沒有 health)
+async fn sample_health(sampler: &Sampler) -> Option<Health> {
+    let s = sampler.clone();
+    // try_lock:上一次取樣卡住(逾時後背景執行緒仍在跑)時直接略過,不累積阻塞執行緒
+    let job = tokio::task::spawn_blocking(move || s.try_lock().ok().map(|mut x| x.sample()));
+    match tokio::time::timeout(HEALTH_TIMEOUT, job).await {
+        Ok(Ok(h)) => h,
+        Ok(Err(e)) => {
+            warn!("健康取樣失敗:{e}");
+            None
+        }
+        Err(_) => {
+            warn!(
+                "健康取樣超過 {} 秒,本次心跳不附健康摘要",
+                HEALTH_TIMEOUT.as_secs()
+            );
+            None
+        }
+    }
+}
+
+/// 連線結束(任何原因)時清除 ws_connected
+struct ConnectedFlag<'a>(&'a Shared);
+
+impl Drop for ConnectedFlag<'_> {
+    fn drop(&mut self) {
+        self.0.ws_connected.store(false, Ordering::Relaxed);
+    }
+}
+
+/// 裝置憑證到期日(RFC 3339);開發模式(http)或讀不到時為空字串
+fn cert_not_after(shared: &Shared) -> String {
+    let Some(tls) = shared.tls.as_ref() else {
+        return String::new();
+    };
+    match rustit_common::tls::device_cert_not_after(&tls.client) {
+        Ok(t) => chrono::DateTime::from_timestamp(t, 0)
+            .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+            .unwrap_or_default(),
+        Err(e) => {
+            // 讀不到時主機無法判斷憑證即將到期,要留紀錄
+            warn!("讀不到裝置憑證到期日,hello 不帶 cert_not_after:{e}");
+            String::new()
+        }
+    }
+}
 
 enum End {
     Shutdown,
@@ -55,8 +109,18 @@ pub async fn run(
         _ = shutdown.changed() => return,
     }
     let mut backoff = Backoff::new();
+    let sampler: Sampler = Arc::new(Mutex::new(HealthSampler::new()));
     loop {
-        let delay = match session(&shared, &hello, &settings, &mut shutdown, &mut backoff).await {
+        let delay = match session(
+            &shared,
+            &hello,
+            &settings,
+            &sampler,
+            &mut shutdown,
+            &mut backoff,
+        )
+        .await
+        {
             Ok(End::Shutdown) => return,
             Ok(End::Closed(reason)) => {
                 let d = backoff.next_delay();
@@ -165,13 +229,20 @@ async fn session(
     shared: &Arc<Shared>,
     hello: &watch::Receiver<Option<HelloBody>>,
     settings: &watch::Sender<AgentSettings>,
+    sampler: &Sampler,
     shutdown: &mut watch::Receiver<bool>,
     backoff: &mut Backoff,
 ) -> Result<End, SendError> {
     let mut ws = shared.transport.connect_ws(WS_PATH).await?;
     backoff.reset();
     info!("WebSocket 已連線");
-    let body = hello.borrow().clone().unwrap_or_default().stamped();
+    let mut body = hello.borrow().clone().unwrap_or_default().stamped();
+    body.cert_not_after = cert_not_after(shared);
+    if let Ok(mut c) = shared.cert_not_after.lock() {
+        c.clone_from(&body.cert_not_after);
+    }
+    // 本機管道 get_status 的連線狀態:收到 hello_ack 才算連上,這條連線結束就清除
+    let _connected = ConnectedFlag(shared);
     send(&mut ws, &Envelope::new("hello", json!(body))).await?;
 
     let mut period = DEFAULT_HEARTBEAT;
@@ -192,7 +263,11 @@ async fn session(
                     return Ok(End::Closed("超過 3 個心跳間隔沒有收到 Server 訊息".into()));
                 }
                 let (inv, ev) = shared.store.lock().counts().unwrap_or_default();
-                let body = json!({ "outbox_pending": inv, "events_pending": ev, "last_inventory_seq": shared.last_acked_seq.load(Ordering::Relaxed) });
+                let mut body = json!({ "outbox_pending": inv, "events_pending": ev, "last_inventory_seq": shared.last_acked_seq.load(Ordering::Relaxed) });
+                let health_on = settings.borrow().health_enabled();
+                if health_on && let Some(h) = sample_health(sampler).await {
+                    body["health"] = json!(h);
+                }
                 send(&mut ws, &Envelope::new("heartbeat", body)).await?;
                 if ready {
                     flush_updates(shared, &mut ws, &mut sent_updates).await?;
@@ -218,6 +293,9 @@ async fn session(
                                         warn!("本機時鐘與主機相差 {} 秒,請檢查時間同步", skew / 1000);
                                     }
                                     shared.clock_skew_ms.store(ack.clock_skew_ms.unwrap_or(0), Ordering::Relaxed);
+                                    shared.ws_connected.store(true, Ordering::Relaxed);
+                                    shared.last_ack_ms.store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
+                                    shared.clock_known.store(true, Ordering::Relaxed);
                                     apply_settings(shared, &ack, settings);
                                     let p = Duration::from_secs(ack.heartbeat_interval_sec.clamp(5, 300));
                                     if p != period {
@@ -259,7 +337,10 @@ async fn session(
                                 };
                                 return Ok(End::Prepared(wait));
                             }
-                            "heartbeat_ack" => debug!("heartbeat_ack {}", env.id),
+                            "heartbeat_ack" => {
+                                shared.last_ack_ms.store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
+                                debug!("heartbeat_ack {}", env.id)
+                            }
                             "unsupported" => warn!("Server 不支援 Agent 送出的訊息:{:?}", env.body),
                             // 不認得的類型回 unsupported(指南 §5.6)
                             other => {

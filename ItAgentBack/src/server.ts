@@ -8,20 +8,37 @@ import type { DepStatus } from '@giganexus/backend-sdk';
 import { loadConfig } from './config.js';
 import { buildAgentApp } from './agent-app.js';
 import { buildMgmtApp } from './mgmt-app.js';
+import { AlertService } from './services/alert-service.js';
 import { CommandDispatcher } from './services/command-dispatcher.js';
+import { CommandFileService } from './services/command-files.js';
 import { DeviceService } from './services/device-service.js';
 import { MongoSnapshotStore } from './stores/mongo-store.js';
 import { RedisStateStore } from './stores/redis-store.js';
 import { SqlCommandStore } from './stores/sql-command-store.js';
+import { SqlMonitorStore } from './stores/sql-monitor-store.js';
 import { SqlDeviceStore } from './stores/sql-store.js';
 
 const config = loadConfig();
 const sql = new SqlDeviceStore(config.sql);
 const mongo = new MongoSnapshotStore(config.mongoUrl, config.mongoDb, config.snapshotRetentionDays);
 const redis = new RedisStateStore(config.redisUrl, config.redisPrefix);
-const service = new DeviceService(sql, mongo, redis, { heartbeatIntervalSec: config.heartbeatIntervalSec, settings: config.agentSettings });
+// 監測(P5):健康、告警與裝置共用連線池;資產比對產生的硬體變更事件交給告警
+const monitorStore = new SqlMonitorStore(() => sql.connection());
+let alerts: AlertService | undefined;
+const service = new DeviceService(sql, mongo, redis, {
+  heartbeatIntervalSec: config.heartbeatIntervalSec,
+  settings: config.agentSettings,
+  companyDomains: config.companyDomains,
+  monitor: monitorStore,
+  onHostEvents: (ctx, deviceRef, events) => alerts?.onHostEvents(ctx, deviceRef, events) ?? Promise.resolve(),
+  onAgentEvents: (ctx, deviceRef, events) => alerts?.onAgentEvents(ctx, deviceRef, events) ?? Promise.resolve(),
+});
+alerts = new AlertService(monitorStore, (deviceId) => service.lookup(deviceId), config.alertThresholds);
 // 指令派送(P4):SQL 與裝置共用連線池,推送經 DeviceService 的 WebSocket 連線表
-const commands = new CommandDispatcher(new SqlCommandStore(() => sql.connection()), sql, service);
+const commandStore = new SqlCommandStore(() => sql.connection());
+const commands = new CommandDispatcher(commandStore, sql, service);
+// 指令附檔(logs.collect 日誌,P4-2):檔案在 COMMAND_FILES_DIR,索引在 ita.command_file
+const files = new CommandFileService(commandStore, config.commandFilesDir, { keepDays: config.commandFileKeepDays });
 
 const check = async (fn: () => Promise<void>) => {
   try {
@@ -50,8 +67,8 @@ const deps = (): Promise<DepStatus[]> =>
     }),
   );
 
-const mgmt = await buildMgmtApp({ config, service, commands, readiness, deps });
-const agent = await buildAgentApp({ config, service, commands, monitor: config.agentMonitor, deps });
+const mgmt = await buildMgmtApp({ config, service, commands, files, alerts, readiness, deps });
+const agent = await buildAgentApp({ config, service, commands, files, alerts, monitor: config.agentMonitor, deps });
 
 await mgmt.listen({ host: config.host, port: config.port });
 await agent.listen({ host: config.host, port: config.agentPort });
@@ -63,6 +80,8 @@ mgmt.log.info(
     agentTls: !!config.agentTls,
     devTrustClientHeaders: config.trustedProxies === null,
     devSkipToken: config.devSkipToken,
+    scopeAllRoles: config.scopeAllRoles,
+    companyDomains: config.companyDomains.size,
     monitor: config.monitor.enabled,
     agentMonitor: config.agentMonitor.enabled,
   },
@@ -73,6 +92,10 @@ mongo.ensureIndexes().catch((err: unknown) => mgmt.log.warn({ err }, 'MongoDB �
 const ready = await readiness();
 if (!ready.ok) mgmt.log.error({ checks: ready.checks }, 'SQL Server 無法連線:Agent 回報將回 503,請檢查 ITA_DB_* 設定');
 else if (Object.values(ready.checks).some((c) => c !== 'ok')) mgmt.log.warn({ checks: ready.checks }, 'Mongo / Redis 無法連線,以降級模式運作');
+// migration 0004 之前寫入的資產回填軟體清單(P3);失敗只記 warn,下次啟動再試
+if (ready.ok) void service.backfillSoftware({ log: mgmt.log, requestId: 'startup' });
+// migration 0005 之前登錄的裝置判定所屬公司(E6);失敗只記 warn,下次啟動再試
+if (ready.ok) void service.backfillCompany({ log: mgmt.log, requestId: 'startup' });
 
 for (const signal of ['SIGINT', 'SIGTERM'])
   process.once(signal, () => {

@@ -1,0 +1,26 @@
+{
+  "v": 1,
+  "type": "command_update",
+  "id": "7c3f9d2e-5a4b-4f7c-8e6d-2b3c4d5e6f04",
+  "body": {
+    "command_id": "5b2e8c1d-4f3a-4e6b-9d7c-1a2b3c4d5e03",
+    "state": "succeeded",
+    "progress": 100,
+    "result": {
+      "agent_version": "0.4.0",
+      "service_mode": true,
+      "log_level": "info",
+      "uptime_sec": 3600,
+      "checks": [
+        { "name": "gateway", "status": "ok", "ms": 42, "detail": "GET /healthz 200" },
+        { "name": "dns", "status": "skipped", "detail": "未加入網域" },
+        { "name": "clock", "status": "ok", "detail": "偏差 120 ms" },
+        { "name": "cert", "status": "warn", "detail": "到期 2026-10-30T00:00:00Z,剩 24 天" },
+        { "name": "disk", "status": "ok", "detail": "C: 可用 120.5 GB(51%)" },
+        { "name": "wmi", "status": "ok", "ms": 310, "detail": "Win32_OperatingSystem" },
+        { "name": "store", "status": "ok", "detail": "待補傳資產 0、事件 0、未回報指令 1" }
+      ]
+    },
+    "occurred_at": "2026-10-06T08:00:03.100Z"
+  }
+}

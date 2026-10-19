@@ -1,13 +1,16 @@
 <!--
   GigaNexus Agent 監控 MSI(PLATFORM-PLAN §4.1、指南 §6.1)。由 build-agent-msi.ps1 建置,不要直接 wix build。
 
-  - 服務 GigaNexusAgent:LocalSystem、自動啟動;失敗復原(10 / 30 / 60 秒、1 天重設、非當機失敗也套用)由服務啟動時自行套用
-  - 程式 %ProgramFiles%\GigaNexus\Agent\rustit-agent.exe
+  - 服務 GigaNexusAgent、GigaNexusWatchdog(P5-2,互相看守,指南 §7.1):LocalSystem、自動啟動;
+    失敗復原(10 / 30 / 60 秒、1 天重設、非當機失敗也套用)與服務 ACL 由服務啟動時自行套用
+  - 程式 %ProgramFiles%\GigaNexus\Agent\rustit-agent.exe、rustit-watchdog.exe(兩者共用 agent.toml)
   - 設定 %ProgramData%\GigaNexus\Agent\(agent.toml、pki\ca.crt、logs\);ACL 只允許 SYSTEM、Administrators(不繼承)
   - 依部署區建置(test / prod 各一個 MSI);設定內容由建置腳本產生,安裝時不需傳參數(GPO 派送不必做 transform)
   - 解除安裝:移除服務與程式;ProgramData 的日誌保留
 
-  預處理變數(由建置腳本傳入):Version、AgentExe、AgentToml、CaFile、Env
+  - 安裝 / 升級 / 解除安裝期間(Windows Installer 執行中)兩個服務不重啟對方,MSI 依序停止時不會被拉起來
+
+  預處理變數(由建置腳本傳入):Version、AgentExe、WatchdogExe、AgentToml、CaFile、Env
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package Name="GigaNexus Agent ($(var.Env))"
@@ -58,6 +61,20 @@
                MSI 的 MsiServiceConfig 表 SDK 標示不可靠(WIX1149),Util 的 ServiceConfig 無法設定不同延遲 -->
         </ServiceInstall>
         <ServiceControl Id="AgentServiceControl" Name="GigaNexusAgent" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
+      </Component>
+      <Component Id="WatchdogExe" Bitness="always64">
+        <File Id="WatchdogExe" Source="$(var.WatchdogExe)" Name="rustit-watchdog.exe" KeyPath="yes" />
+        <ServiceInstall Id="WatchdogService"
+                        Name="GigaNexusWatchdog"
+                        DisplayName="GigaNexus Watchdog"
+                        Description="GigaNexus 端點 Watchdog:看守 GigaNexus Agent 並經 Gateway 回報狀態(RustIt)"
+                        Type="ownProcess"
+                        Start="auto"
+                        ErrorControl="normal"
+                        Account="LocalSystem"
+                        Arguments="service --config &quot;[DATADIR]agent.toml&quot;"
+                        Vital="yes" />
+        <ServiceControl Id="WatchdogServiceControl" Name="GigaNexusWatchdog" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
       </Component>
     </ComponentGroup>
 

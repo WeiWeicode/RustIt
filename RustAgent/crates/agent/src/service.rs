@@ -4,23 +4,23 @@
 //! - `install` / `uninstall`:**只給開發測試**(需系統管理員);正式一律由 MSI 安裝,設定相同。
 //!   開發安裝建立的 `%ProgramData%\GigaNexus\Agent` 沿用 ProgramData 預設 ACL;只允許 SYSTEM、Administrators 的 ACL 由 MSI 設定。
 //!
-//! 失敗復原:第 1、2、後續失敗分別 10 / 30 / 60 秒後重新啟動,1 天後重設計數;設定錯誤等「非當機」的失敗也套用。
+//! 失敗復原:第 1、2、後續失敗分別 10 / 30 / 60 秒後重新啟動,1 天後重設計數;設定錯誤等「非當機」的失敗也套用(`rustit_common::scm`)。
+//! 服務 ACL(P5-2,A5):每次啟動時套用,一般使用者只能查詢,不能停止 / 啟動 / 改設定。
 //! 停止:一般停止收尾 [`crate::STOP_GRACE`],Windows 關機只給 [`crate::SHUTDOWN_GRACE`](系統給服務的時間很短)。
 //! 指令 `agent.restart`(P4):收尾後以 [`EXIT_RESTART`] 停止,由失敗復原重新啟動(1 天內第 2、3 次分別 30、60 秒後)。
 
 use log::{LevelFilter, error, info, warn};
 use rustit_common::config::{AgentConfig, Settings};
 use rustit_common::logging::FileLogger;
-use rustit_common::paths;
 use rustit_common::stop::{RUNTIME_SHUTDOWN, SHUTDOWN_GRACE, STOP_GRACE, StopSignal};
+use rustit_common::{paths, scm};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use windows_service::service::{
-    Service, ServiceAccess, ServiceAction, ServiceActionType, ServiceControl, ServiceControlAccept,
-    ServiceErrorControl, ServiceExitCode, ServiceFailureActions, ServiceFailureResetPeriod,
+    ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
     ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
 };
 use windows_service::service_control_handler::{
@@ -30,7 +30,7 @@ use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use windows_service::{define_windows_service, service_dispatcher};
 
 /// Windows 服務名稱(指南 §6.1)
-pub const SERVICE_NAME: &str = "GigaNexusAgent";
+pub const SERVICE_NAME: &str = scm::AGENT_SERVICE;
 const DISPLAY_NAME: &str = "GigaNexus Agent";
 /// 檔案日誌檔名前綴:`agent-YYYY-MM-DD.log`
 const LOG_PREFIX: &str = "agent";
@@ -39,8 +39,8 @@ const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 /// 設定檔錯誤(服務專屬結束代碼,SCM 依失敗復原設定重試)
 const EXIT_CONFIG: u32 = 2;
 const EXIT_RUNTIME: u32 = 1;
-/// 依指令 agent.restart 停止(非錯誤;SCM 依失敗復原重新啟動)
-const EXIT_RESTART: u32 = 3;
+/// 依指令 agent.restart 停止(非錯誤;SCM 依失敗復原重新啟動;Watchdog 據此判斷不是當掉)
+const EXIT_RESTART: u32 = scm::EXIT_RESTART;
 /// 回報「停止中」時給 SCM 的等待提示:收尾 + 關閉執行環境 + 餘裕
 const STOP_WAIT_HINT: Duration =
     Duration::from_secs(STOP_GRACE.as_secs() + RUNTIME_SHUTDOWN.as_secs() + 15);
@@ -86,6 +86,8 @@ fn run_service(config: &Path) -> Result<(), String> {
             ServiceControlHandlerResult::NoError
         }
         ServiceControl::Shutdown => {
+            // 結束原因記為 shutdown(agent_started.previous_exit,P5)
+            crate::SHUTDOWN_REQUESTED.store(true, std::sync::atomic::Ordering::Relaxed);
             signal.stop(SHUTDOWN_GRACE);
             ServiceControlHandlerResult::NoError
         }
@@ -103,8 +105,11 @@ fn run_service(config: &Path) -> Result<(), String> {
     )?;
     // 每次啟動都套用失敗復原:MSI 的 MsiServiceConfig 表 SDK 標示不可靠(WIX1149),由服務自己設定;
     // 被手動改掉的設定也會在下次啟動恢復(PLATFORM-PLAN §4.1、§4.10 A5)
-    if let Err(e) = ensure_recovery() {
+    if let Err(e) = scm::ensure_recovery(SERVICE_NAME) {
         warn!("無法套用失敗復原設定:{}", describe(&e));
+    }
+    if let Err(e) = scm::apply_service_acl(SERVICE_NAME) {
+        warn!("{e}");
     }
 
     let exit = match AgentConfig::load(config) {
@@ -250,7 +255,7 @@ pub fn install(config: Option<&Path>) -> Result<(), String> {
         eprintln!("警告:無法設定服務說明:{e}");
     }
     // 失敗復原是指南 §6.1 的要求:設定失敗就移除剛建立的服務,不留下半成品
-    if let Err(e) = configure_recovery(&service) {
+    if let Err(e) = scm::configure_recovery(&service) {
         let _ = service.delete();
         return Err(format!(
             "無法設定失敗復原,已移除剛建立的服務:{}",
@@ -264,31 +269,6 @@ pub fn install(config: Option<&Path>) -> Result<(), String> {
         )
     })?;
     Ok(())
-}
-
-fn configure_recovery(service: &Service) -> Result<(), windows_service::Error> {
-    let restart = |secs| ServiceAction {
-        action_type: ServiceActionType::Restart,
-        delay: Duration::from_secs(secs),
-    };
-    service.update_failure_actions(ServiceFailureActions {
-        reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(24 * 3600)),
-        reboot_msg: None,
-        command: None,
-        actions: Some(vec![restart(10), restart(30), restart(60)]),
-    })?;
-    service.set_failure_actions_on_non_crash_failures(true)
-}
-
-/// 服務啟動時對自己套用失敗復原(LocalSystem 可修改自己的服務設定)
-fn ensure_recovery() -> Result<(), windows_service::Error> {
-    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
-    // 失敗復原含「重新啟動」動作時,除了 CHANGE_CONFIG 還需要 START 權限(ChangeServiceConfig2 SERVICE_CONFIG_FAILURE_ACTIONS)
-    let service = manager.open_service(
-        SERVICE_NAME,
-        ServiceAccess::CHANGE_CONFIG | ServiceAccess::START,
-    )?;
-    configure_recovery(&service)
 }
 
 /// 開發測試用移除:先停止(等到停止為止,上限為停止等待提示 + 10 秒)再刪除

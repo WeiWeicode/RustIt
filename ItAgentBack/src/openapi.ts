@@ -21,9 +21,14 @@ declare module 'fastify' {
 /**
  * 本服務的 API 權限代碼(ENDPOINT-AGENT-GUIDE §8.2);Gateway 匯入時不存在者一併建立。
  * 畫面節點(GigaItApp 選單 it.endpoint-device.read、Tab it.endpoint-device.list)以 includes 綁定(INTEGRATION-PLAN M4、決策 D9)。
- * 指令類(endpoint.command.basic / admin)待指令 API 實作時再宣告。
+ * 指令類:endpoint.command.basic(P4,指南 §8.2);endpoint.command.admin(P3 起:裝置停用 / 啟用 / 退役、合併;admin 指令類型在 P6)。
+ * 路由用到的權限必須列在這裡,否則 Gateway 匯入整批拒絕(IMPORT_HAS_ERRORS)。
  */
-export const PERMISSIONS = [{ code: 'endpoint.device.read', name: '端點查詢' }];
+export const PERMISSIONS = [
+  { code: 'endpoint.device.read', name: '端點查詢' },
+  { code: 'endpoint.command.basic', name: '端點一般指令' },
+  { code: 'endpoint.command.admin', name: '端點管理指令' },
+];
 
 export function swaggerOptions(serviceCode: string, project: string): SwaggerOptions {
   const extensions = { 'x-gateway': { upstream: serviceCode, system: 'endpoint', project }, 'x-permissions': PERMISSIONS };

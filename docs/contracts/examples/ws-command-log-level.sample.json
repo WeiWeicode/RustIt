@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "type": "command",
+  "id": "5b2e8c1d-4f3a-4e6b-9d7c-1a2b3c4d5e04",
+  "body": {
+    "command_id": "5b2e8c1d-4f3a-4e6b-9d7c-1a2b3c4d5e04",
+    "kind": "agent.log_level",
+    "params": { "level": "debug", "duration_min": 60 },
+    "expires_at": "2026-10-06T09:00:00.000Z",
+    "issued_by": "S000001",
+    "issued_at": "2026-10-06T08:00:00.000Z"
+  }
+}

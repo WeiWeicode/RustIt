@@ -5,12 +5,16 @@
  *   - POST /agent/v1/inventory(資料契約 inventory.schema.json)、WS GET /agent/v1/ws(信封 ws-envelope.schema.json)
  *   - POST /agent/v1/sync(離線補傳比對,sync.schema.json)、POST /agent/v1/events(端點事件,event.schema.json)(PLATFORM-PLAN P2)
  *   - WS command / command_update / command_update_ack / prepare_shutdown(指令通道,P4;邏輯在 CommandDispatcher)
+ *   - POST /agent/v1/watchdog/report(Watchdog 上報,watchdog.schema.json,P5-2):同一張裝置憑證,只更新 Watchdog 欄位與寫 Watchdog 事件
+ *   - POST /agent/v1/commands/{commandId}/files(指令附檔,logs.collect 日誌 zip,上限 20 MB;command-file.schema.json,P4-2)
  *   - HTTPS 回報同時處理中的請求超過 AGENT_MAX_INFLIGHT 時回 429 ITA_BUSY + Retry-After,在驗證身分前就擋下(A3)
  *   - 與 :51240 是不同的 Fastify 實例,不共用 hook(§5.2);日誌帶 x-request-id、DN、指紋(§5.7)
+ *   - 告警評估(P5):每 5 分鐘由這裡的計時器呼叫 AlertService.sweep(與心跳逾時、指令逾期掃描同一處管理)
  *   - 監控(giga-observe 服務 endpoint-agent,與管理 API 分開的 Key):HTTPS 回報逐筆;WebSocket 每條連線關閉時記一筆
  *     (method WS、持續時間、關閉碼、訊息數;非正常關閉為 warn);心跳附上在線連線數。Agent 的 heartbeat 訊息不逐筆記錄(量大)
  */
 import { BlockList } from 'node:net';
+import type { Readable } from 'node:stream';
 import websocket from '@fastify/websocket';
 import { errorBody, type DepStatus, type MonitorEnv, type MonitorLog } from '@giganexus/backend-sdk';
 import { setupGateway } from '@giganexus/backend-sdk/fastify';
@@ -25,10 +29,13 @@ import {
   type HelloBody,
   type InventoryRequest,
   type SyncRequest,
+  type WatchdogReportRequest,
   type WsEnvelope,
 } from './contracts.js';
 import { AppError } from './errors.js';
+import type { AlertService } from './services/alert-service.js';
 import type { CommandDispatcher, CommandUpdateBody } from './services/command-dispatcher.js';
+import type { CommandFileService } from './services/command-files.js';
 import type { AgentConnection, Ctx, DeviceService } from './services/device-service.js';
 import type { DeviceRecord } from './stores/types.js';
 
@@ -54,6 +61,14 @@ export interface AgentAppOptions {
   commands?: CommandDispatcher;
   /** 指令逾期掃描間隔(毫秒) */
   commandSweepIntervalMs?: number;
+  /** 指令附檔(P4-2;省略 = 不開放上傳) */
+  files?: CommandFileService;
+  /** 到期附檔清除間隔(毫秒) */
+  fileSweepIntervalMs?: number;
+  /** 告警評估(P5;省略 = 不評估) */
+  alerts?: AlertService;
+  /** 告警評估間隔(毫秒) */
+  alertSweepIntervalMs?: number;
   /** giga-observe 監控(loadMonitorEnv;省略 = 不監控) */
   monitor?: MonitorEnv;
   /** 監控心跳附帶的相依服務狀態(SQL Server / Mongo / Redis) */
@@ -112,7 +127,7 @@ export function proxyChecker(list: string[] | null): (addr: string | undefined) 
 }
 
 export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInstance> {
-  const { config, service, commands } = opts;
+  const { config, service, commands, files } = opts;
   const dir = opts.contractsDir ?? contractsDir();
   const app = Fastify({
     logger: { level: config.logLevel },
@@ -126,6 +141,7 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
   app.addSchema(loadContract('inventory', dir));
   app.addSchema(loadContract('sync', dir));
   app.addSchema(loadContract('event', dir));
+  app.addSchema(loadContract('watchdog', dir));
   await app.register(websocket, { options: { maxPayload: WS_MAX_PAYLOAD } });
   // 監控需在路由之前註冊;本通道不註冊 OpenAPI(Agent 經 :9443 直達,不經 BFF 路由表)
   await app.register(setupGateway, {
@@ -215,6 +231,33 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
   app.post<{ Body: EventsRequest }>('/agent/v1/events', { schema: { body: { $ref: `${CONTRACT_IDS.event}#` } } }, async (req) =>
     service.ingestEvents(ctxOf(req), req.device!, req.body),
   );
+
+  app.post<{ Body: WatchdogReportRequest }>('/agent/v1/watchdog/report', { schema: { body: { $ref: `${CONTRACT_IDS.watchdog}#` } } }, async (req) =>
+    service.watchdogReport(ctxOf(req), req.device!, req.body),
+  );
+
+  // 指令附檔:本體為 zip 原始位元組,串流交給 CommandFileService(大小與 SHA-256 在寫檔時檢查);只在這個範圍接受 application/zip
+  if (files)
+    await app.register(async (scope) => {
+      scope.addContentTypeParser('application/zip', (_req, payload, done) => done(null, payload));
+      scope.post<{ Params: { commandId: string } }>(
+        '/agent/v1/commands/:commandId/files',
+        { schema: { params: { type: 'object', required: ['commandId'], properties: { commandId: { type: 'string', format: 'uuid' } } } } },
+        async (req, reply) => {
+          const length = req.headers['content-length'] === undefined ? undefined : Number(req.headers['content-length']);
+          const sha = req.headers['x-file-sha256'];
+          const body = req.body as Readable;
+          try {
+            const r = await files.upload(ctxOf(req), req.device!, req.params.commandId.toLowerCase(), typeof sha === 'string' ? sha : undefined, length, body);
+            return reply.status(201).send(r);
+          } catch (err) {
+            // 提早拒絕(格式、權限、狀態)時丟棄未讀的本體,不寫入任何地方
+            body.resume();
+            throw err;
+          }
+        },
+      );
+    });
 
   app.get('/agent/v1/ws', { websocket: true }, (socket, req) => {
     const device = req.device!;
@@ -311,6 +354,8 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
   // 心跳逾時檢查(半開的 TCP 不會觸發 close,指南 §5.3)
   let timer: NodeJS.Timeout | undefined;
   let commandTimer: NodeJS.Timeout | undefined;
+  let fileTimer: NodeJS.Timeout | undefined;
+  let alertTimer: NodeJS.Timeout | undefined;
   app.addHook('onReady', async () => {
     timer = setInterval(() => void service.sweep({ log: app.log, requestId: 'sweep' }), opts.sweepIntervalMs ?? 10_000);
     timer.unref();
@@ -319,10 +364,23 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
       commandTimer = setInterval(() => void commands.sweep({ log: app.log, requestId: 'command-sweep' }), opts.commandSweepIntervalMs ?? 60_000);
       commandTimer.unref();
     }
+    // 到期附檔清除,每小時(B5)
+    if (files) {
+      fileTimer = setInterval(() => void files.sweep({ log: app.log, requestId: 'file-sweep' }), opts.fileSweepIntervalMs ?? 3_600_000);
+      fileTimer.unref();
+    }
+    // 告警評估,每 5 分鐘(P5-MONITOR-DESIGN §4)
+    const alerts = opts.alerts;
+    if (alerts) {
+      alertTimer = setInterval(() => void alerts.sweep({ log: app.log, requestId: 'alert-sweep' }), opts.alertSweepIntervalMs ?? 300_000);
+      alertTimer.unref();
+    }
   });
   app.addHook('preClose', async () => {
     clearInterval(timer);
     clearInterval(commandTimer);
+    clearInterval(fileTimer);
+    clearInterval(alertTimer);
     await service.closeAll();
   });
   return app;

@@ -1,6 +1,6 @@
 # 專案地圖 — RustIt (企業端點資產管理與控管平台)
 
-> **最後更新**：2026-10-15(P4-1 指令通道:migration 0003、契約 command / command_update / command_update_ack / prepare_shutdown 與 `command-kinds.md`;ItAgentBack `command-dispatcher`、`routes/commands.ts`、`sql-command-store`;Agent `command.rs`(inventory.collect、agent.restart、message.show)、本機 `command_log`)。2026-10-14(P2 第二批 Agent:本機加密暫存 `store.rs` / `crypto.rs`、連線紀錄與 offline_period `conn.rs`、事件佇列 `events.rs`、USB 插拔 `usb.rs`、資產暫存與 `/sync` 補傳、429 依 Retry-After、主機下發設定;collector `removable_volumes`)。2026-10-14(P2 第一批主機端:契約 `event.schema.json`、hello / hello_ack 擴充、`/sync` 加 `skip`;ItAgentBack `/agent/v1/sync`、`/agent/v1/events`、429 ITA_BUSY、時鐘偏差與硬體指紋;migration 0002)。2026-10-14(P1 收尾:測試 VM 裝置憑證腳本 `installer/host2-issue-test-device-cert.sh`;`.cargo/config.toml` 靜態連結 C 執行階段)。2026-10-13(P1:監控 MSI(WiX v5,installer/);WMI 查詢逾時與蒐集背景優先權;Windows 憑證存放區 `store_issuer`(PoC 實測通過);抽出 `rustit-common`、移除 `native`;P1 第一批:Agent Windows 服務化 `service` / `install` / `uninstall`、檔案日誌;第二階段計畫 PLATFORM-PLAN v0.4:監控服務與使用者端程式分開、本機持久化;交接文件改寫;Demo 將改造為 desktop、native 將移除)。2026-10-07(M4 測試區接通:ItAgentBack 容器化與 CI 部署、Agent 經 Gateway :9443 回報)  
+> **最後更新**：2026-10-19(P5-2 Watchdog:新 crate `watchdog`(`rustit-watchdog` 0.1.0,看守狀態機 `monitor.rs`、上報 `report.rs`、本機紀錄 `outbox.rs`、服務 `service.rs`);common `scm.rs`(服務控制、失敗復原、服務 ACL)、`pipe.rs`(本機具名管道);Agent 0.6.0 `pipe.rs`(管道伺服端)、`guard.rs`(看守 Watchdog);監控 MSI 加 `GigaNexusWatchdog`;ItAgentBack `POST /agent/v1/watchdog/report`、`agent_tampered`;契約 `watchdog.schema.json`、`pipe.schema.json`)。2026-10-19(P5-1 監測:migration 0006 `ita.device_health`、`ita.device_alert`;ItAgentBack `change-detector.ts`(資產前後比對)、`alert-service.ts`(固定規則、每 5 分鐘掃描)、`sql-monitor-store.ts`、`routes/alerts.ts`、`GET /v1/devices/{id}/health`、清單 / 詳情加健康與告警;契約 `heartbeat.body.health`、`hello.cert_not_after`、`AgentSettings.health_enabled`、`agent_started.previous_exit`;Agent 0.5.0 心跳附健康摘要、上次結束原因;collector `health.rs`;設計 `P5-MONITOR-DESIGN.md`)。2026-10-16(E6 資料範圍依公司:migration 0005 `ita.device.company` / `company_source`;`services/scope.ts`(MgmtCtx)、`services/company.ts`、`routes/mgmt-ctx.ts`;管理 API 範圍外一律 404、`PUT /v1/devices/{id}/company`;設定 `ENDPOINT_SCOPE_ALL_ROLES`、`ENDPOINT_COMPANY_DOMAINS`;設計 `E6-COMPANY-SCOPE-DESIGN.md`)。2026-10-16(P3 資料呈現:migration 0004 `ita.device_software`;管理 API 清單分頁與篩選、`/events`、`/inventory.json`、`PUT /status`、`POST /merge`(`endpoint.command.admin`);設計 `P3-DATA-DESIGN.md`)。2026-10-15(P4-2 遠端診斷:Agent 0.4.0 `diagnose.rs`、`logs.rs`、`agent.log_level`;collector `system_volume`、`wmi_probe`;common `post_bytes`、`get_status`、`device_cert_not_after`;ItAgentBack `command-files.ts` 附檔上傳 / 下載 / 清除、volume `ita_command_files`;契約 `command-file.schema.json`)。2026-10-15(P4-1 指令通道:migration 0003、契約 command / command_update / command_update_ack / prepare_shutdown 與 `command-kinds.md`;ItAgentBack `command-dispatcher`、`routes/commands.ts`、`sql-command-store`;Agent `command.rs`(inventory.collect、agent.restart、message.show)、本機 `command_log`)。2026-10-14(P2 第二批 Agent:本機加密暫存 `store.rs` / `crypto.rs`、連線紀錄與 offline_period `conn.rs`、事件佇列 `events.rs`、USB 插拔 `usb.rs`、資產暫存與 `/sync` 補傳、429 依 Retry-After、主機下發設定;collector `removable_volumes`)。2026-10-14(P2 第一批主機端:契約 `event.schema.json`、hello / hello_ack 擴充、`/sync` 加 `skip`;ItAgentBack `/agent/v1/sync`、`/agent/v1/events`、429 ITA_BUSY、時鐘偏差與硬體指紋;migration 0002)。2026-10-14(P1 收尾:測試 VM 裝置憑證腳本 `installer/host2-issue-test-device-cert.sh`;`.cargo/config.toml` 靜態連結 C 執行階段)。2026-10-13(P1:監控 MSI(WiX v5,installer/);WMI 查詢逾時與蒐集背景優先權;Windows 憑證存放區 `store_issuer`(PoC 實測通過);抽出 `rustit-common`、移除 `native`;P1 第一批:Agent Windows 服務化 `service` / `install` / `uninstall`、檔案日誌;第二階段計畫 PLATFORM-PLAN v0.4:監控服務與使用者端程式分開、本機持久化;交接文件改寫;Demo 將改造為 desktop、native 將移除)。2026-10-07(M4 測試區接通:ItAgentBack 容器化與 CI 部署、Agent 經 Gateway :9443 回報)  
 > **目前階段**：基本階段完成(Agent 前景執行 → `:9443` → ItAgentBack → GigaItApp 電腦清單,測試區運作);第二階段 [PLATFORM-PLAN.md](PLATFORM-PLAN.md) P0 定案、**P1 常駐完成**(服務化、監控 MSI,測試 VM 驗證通過);下一步 P2 本機持久化,P3、P8-1 可並行。  
 > **上位規範**：全專案總圖 [PROJECT-MAP.md](../../PROJECT-MAP.md)、Gateway 規範 [giga-api-gateway-bff/docs/](../../giga-api-gateway-bff/docs/)。
 
@@ -37,7 +37,7 @@ RustIt/
 │  ├─ Cargo.lock
 │  ├─ .cargo/config.toml            靜態連結 C 執行階段(+crt-static;乾淨的 Windows 不需安裝 VC++ 可轉散發套件)
 │  ├─ dist/                         編譯成品存放目錄 (RustIt-Demo.exe, rustit-agent-test/ 等測試區 Agent 套件、msi/ 建置的 MSI,不進版控)
-│  ├─ installer/                    監控 MSI(WiX v5):agent.wxs(服務、程式與 ProgramData 目錄 ACL)、build-agent-msi.ps1(依部署區建置,設定在建置時寫入)、host2-issue-test-device-cert.sh(主機 2 以臨時 Agent CA 為測試 VM 簽 PFX,使用者執行)
+│  ├─ installer/                    監控 MSI(WiX v5):agent.wxs(GigaNexusAgent + GigaNexusWatchdog 兩個服務(P5-2)、程式與 ProgramData 目錄 ACL)、build-agent-msi.ps1(依部署區建置,設定在建置時寫入)、host2-issue-test-device-cert.sh(主機 2 以臨時 Agent CA 為測試 VM 簽 PFX,使用者執行)
 │  ├─ docs/
 │  │  ├─ ui-performance-comparison.md egui 原生 vs WebView2 效能實測比較(紀錄;native 已於 P1 移除)
 │  │  └─ images/                    介面截圖
@@ -47,6 +47,7 @@ RustIt/
 │     │  └─ src/
 │     │     ├─ lib.rs               對外統一介面 (ComputerInfo, collect() 進入點;蒐集期間進入背景模式)
 │     │     ├─ background.rs        蒐集時執行緒進入 Windows 背景模式(低 CPU / I/O 優先權),結束時恢復
+│     │     ├─ health.rs            健康摘要 HealthSampler(P5):CPU / 記憶體 / 最滿的固定磁碟 / 開機時間 / Agent RSS,只讀 sysinfo、不查 WMI;boot_time
 │     │     ├─ registry.rs          登錄檔掃描 (已安裝軟體 Uninstall 機碼、USBSTOR、RustDesk)
 │     │     └─ wmi_query.rs         WMI / CIM 查詢 (主機板 UUID、BIOS、CPU、磁碟、網卡、防毒);每項在獨立執行緒、逾時 15 秒,逾時後略過其餘 WMI 項目
 │     ├─ demo/                      WebView2 概念驗證版 (Tauri;P8 改名為 desktop 作為使用者端程式,PLATFORM-PLAN §3.3)
@@ -55,46 +56,66 @@ RustIt/
 │     ├─ agent/                     端點 Agent:rustit-agent run(前景,開發)/ service(Windows 服務 GigaNexusAgent)/ install、uninstall(開發測試,正式用 MSI)
 │     │  ├─ agent.dev.toml / agent.example.toml  本機直連 ItAgentBack / 測試區經 :9443 的設定範本
 │     │  ├─ src/main.rs             只組裝:子指令、日誌、Ctrl+C
-│     │  ├─ src/lib.rs              開啟本機暫存 → 延續 / 結束上次的離線期間、記 agent_started → 啟動隨機延遲 → 資產回報、WebSocket、事件、USB 四個工作;Shared(連線成功 / 失敗、停用狀態);run_blocking
-│     │  ├─ src/service.rs          Windows 服務:SCM 進入點、狀態回報(啟動中 / 執行中 / 停止中)、每次啟動自行套用失敗復原 10/30/60 秒、開發用 install / uninstall;agent.restart 以結束代碼 3 停止
-│     │  ├─ src/command.rs          指令執行器(P4):command_id 去重、過期不執行、結果先寫本機;inventory.collect / agent.restart / message.show(WTSSendMessage)
+│     │  ├─ src/lib.rs              開啟本機暫存 → 延續 / 結束上次的離線期間、記 agent_started(上次結束原因 previous_exit,本機 kv last_exit;P5)→ 啟動隨機延遲 → 資產回報、WebSocket、事件、USB 四個工作;Shared(連線成功 / 失敗、停用狀態);run_blocking
+│     │  ├─ src/service.rs          Windows 服務:SCM 進入點、狀態回報(啟動中 / 執行中 / 停止中)、每次啟動自行套用失敗復原 10/30/60 秒與服務 ACL(common::scm)、開發用 install / uninstall;agent.restart 以結束代碼 3 停止
+│     │  ├─ src/pipe.rs             本機管道伺服端(P5-2,服務模式):\\.\pipe\giganexus-agent-v1,只回 get_status 狀態摘要
+│     │  ├─ src/guard.rs            看守 Watchdog(P5-2,服務模式):每 60 秒;被停止 / 改啟動類型 → 恢復並記 watchdog_stopped,不存在 → watchdog_missing
+│     │  ├─ src/command.rs          指令執行器(P4):command_id 去重、過期不執行、結果先寫本機;inventory.collect / agent.restart / message.show(WTSSendMessage)/ agent.log_level(本機 kv,到期恢復)
+│     │  ├─ src/diagnose.rs         agent.diagnose(P4-2):gateway / dns / clock / cert / disk / wmi / store 檢查
+│     │  ├─ src/logs.rs             logs.collect(P4-2):挑最近 N 天日誌、遮罩私鑰與 Token、zip(20 MB)
 │     │  ├─ src/inventory.rs        蒐集 → 本機暫存 → 單份 POST /agent/v1/inventory、多份先 /sync(刪 skip、傳 need);停用時暫停蒐集;間隔依主機設定
 │     │  ├─ src/store.rs            本機持久化 state\store.db(SQLite):kv、outbox_inventory / outbox_event(加密、上限)、conn_log(30 天)、command_log(指令去重與待回報狀態,加密,7 天)
 │     │  ├─ src/crypto.rs           AES-256-GCM;金鑰以 DPAPI 執行帳號範圍(服務 = SYSTEM)+ 附加熵保護存 state\store.key(換電腦或一般使用者無法解開)
 │     │  ├─ src/conn.rs             連線紀錄:失敗記 conn_log,恢復時(≥ 60 秒)寫 offline_period;服務重啟(10 分鐘內)延續同一段
 │     │  ├─ src/events.rs           事件佇列(本機暫存)→ 批次 POST /agent/v1/events
 │     │  ├─ src/usb.rs              每 10 秒比對可移除磁碟區 → usb_inserted / usb_removed
-│     │  ├─ src/ws.rs               hello(端點時間、硬體指紋)/ 30 秒 heartbeat(暫存數)/ unsupported、hello_ack 主機設定寫入本機、斷線重連、停止時 close 1001;command 交給執行器、command_update 重送與 ack、prepare_shutdown
+│     │  ├─ src/ws.rs               hello(端點時間、硬體指紋、憑證到期日)/ 30 秒 heartbeat(暫存數、健康摘要 health,P5)/ unsupported、hello_ack 主機設定寫入本機、斷線重連、停止時 close 1001;command 交給執行器、command_update 重送與 ack、prepare_shutdown
 │     │  ├─ src/protocol.rs         Agent 契約型別(inventory、hello / hello_ack、sync、events、AgentSettings)、content_hash、hw_fingerprint、通道路徑與 User-Agent
 │     │  └─ tests/contract.rs       以 docs/contracts 的 JSON Schema 驗證送出的 JSON
 │     ├─ common/                    rustit-common:Agent 與 Watchdog 共用(PLATFORM-PLAN §3.1;P2 加入本機持久化、P5 加入具名管道)
 │     │  ├─ src/config.rs           agent.toml 解析與檢查(http 只允許本機、dev 模擬憑證標頭、選用 log_level;[tls] 裝置憑證 PEM 檔或 store_issuer 二選一)
-│     │  ├─ src/tls.rs              rustls ClientConfig(ring)、憑證來源 trait CertSource → 每次握手挑選:PemFiles、WindowsStore(LocalMachine\My + rustls-cng,私鑰留在 CNG);pick_device_cert 挑選規則
-│     │  ├─ src/transport.rs        post_json(path)/ connect_ws(path),User-Agent 由呼叫端提供;錯誤分類(被拒 10 分鐘 / 429 依 Retry-After / 其他指數退避)、離線原因分類 reason()、底層錯誤串接
+│     │  ├─ src/tls.rs              rustls ClientConfig(ring)、憑證來源 trait CertSource → 每次握手挑選:PemFiles、WindowsStore(LocalMachine\My + rustls-cng,私鑰留在 CNG);pick_device_cert 挑選規則;device_cert_not_after(診斷)
+│     │  ├─ src/transport.rs        post_json(path)/ post_bytes(指令附檔)/ get_status(診斷)/ connect_ws(path),User-Agent 由呼叫端提供;錯誤分類(被拒 10 分鐘 / 429 依 Retry-After / 其他指數退避)、離線原因分類 reason()、底層錯誤串接
 │     │  ├─ src/backoff.rs          1 秒起、上限 2 分鐘、±20%;啟動延遲
 │     │  ├─ src/envelope.rs         WebSocket 信封 {v, type, id, body}
 │     │  ├─ src/stop.rs             StopSignal / with_grace / wait(停止 30 秒、關機 5 秒收尾)
 │     │  ├─ src/logging.rs          服務模式檔案日誌 <前綴>-YYYY-MM-DD.log:每日一檔、保留 14 天、單日 10 MB;第三方套件只收 warn 以上
-│     │  └─ src/paths.rs            %ProgramData%\GigaNexus\Agent(agent.toml、logs\)
-│     ├─ watchdog/ (規劃,P5)        GigaNexusWatchdog 服務:看守 Agent、上報、升級與還原
+│     │  ├─ src/paths.rs            %ProgramData%\GigaNexus\Agent(agent.toml、logs\)
+│     │  ├─ src/scm.rs              服務控制(P5-2,Windows):查對方服務狀態 / PID / 結束代碼 / 啟動類型、啟動 / 停止 / 改回自動、結束行程、失敗復原、服務 ACL、關機與 MSI 執行中判斷
+│     │  └─ src/pipe.rs             本機具名管道(P5-2,Windows):建立(SDDL 只允許 SYSTEM、Administrators)、一行 JSON 讀寫、用戶端與伺服端 PID
+│     ├─ watchdog/                  rustit-watchdog(P5-2):GigaNexusWatchdog 服務,看守 Agent 並自己經 :9443 上報;升級與還原在 P6
+│     │  ├─ src/main.rs             只組裝:run(前景,開發)/ service(SCM)
+│     │  ├─ src/lib.rs              看守迴圈(每 30 秒 SCM + 管道 get_status,PID 比對防冒充)與上報工作
+│     │  ├─ src/monitor.rs          看守狀態機(純邏輯,AgentControl trait 注入):重啟原因、卡住、手動停止、當掉寬限、啟動類型、程式不見、啟動退避
+│     │  ├─ src/report.rs           POST /agent/v1/watchdog/report:每 5 分鐘 + 有變化立即、退避
+│     │  ├─ src/outbox.rs           state\watchdog.db(SQLite,不加密):待送事件,上限 1,000 筆
+│     │  ├─ src/service.rs          Windows 服務 GigaNexusWatchdog:失敗復原與服務 ACL(common::scm)
+│     │  └─ tests/contract.rs       上報請求符合 watchdog.schema.json(跨檔引用 event.schema.json)
 │     └─ desktop/ (規劃,P8)         使用者端程式(由 demo 改名):托盤 + 視窗,我的電腦(電腦名稱、IP、登入人員)、公告通知、嵌入 Gateway 網頁應用;登入者身分,與監控服務分開
 └─ ItAgentBack/                     Node.js(Fastify + TypeScript):Endpoint Server(ADR 0004);gateway.project = RustIt
    ├─ src/server.ts                 啟動兩個 listener:51240 管理 API、51241 Agent 通道
-   ├─ src/config.ts                 部署區設定;dev 旁路(非 dev 設定即失敗)、test / prod 機密只收 _FILE
-   ├─ src/mgmt-app.ts               :51240 X-Internal-Token、OpenAPI(x-permission)、setupGateway 監控與自動註冊
-   ├─ src/agent-app.ts              :51241 裝置身分 hook(x-client-cert-*、信任來源)、/agent/v1/inventory、/sync、/events、/agent/v1/ws;回報同時處理上限 429 ITA_BUSY(A3)
-   ├─ src/routes/devices.ts         GET /v1/devices、/v1/devices/{deviceId}(endpoint.device.read)
-   ├─ src/routes/commands.ts        指令 API(P4):POST basic-commands / batches/basic-commands / cancel(endpoint.command.basic)、GET commands / batches(endpoint.device.read)
+   ├─ src/config.ts                 部署區設定;dev 旁路(非 dev 設定即失敗)、test / prod 機密只收 _FILE;資料範圍 ENDPOINT_SCOPE_ALL_ROLES(test / prod 必填)、ENDPOINT_COMPANY_DOMAINS(E6)
+   ├─ src/mgmt-app.ts               :51240 X-Internal-Token(驗完算出 req.scope,E6)、OpenAPI(x-permission)、setupGateway 監控與自動註冊
+   ├─ src/routes/mgmt-ctx.ts        路由共用:由請求組 MgmtCtx(日誌、x-request-id、資料範圍)
+   ├─ src/agent-app.ts              :51241 裝置身分 hook(x-client-cert-*、信任來源)、/agent/v1/inventory、/sync、/events、/agent/v1/commands/{id}/files、/agent/v1/ws;回報同時處理上限 429 ITA_BUSY(A3)
+   ├─ src/routes/devices.ts         GET /v1/devices(分頁、篩選;P5 加 health、openAlerts)、/v1/devices/{deviceId}、/events、/inventory.json、/health(健康走勢,P5)(endpoint.device.read);PUT /status、POST /merge、PUT /company(endpoint.command.admin;/company 另需全部公司角色,E6)
+   ├─ src/routes/alerts.ts          告警 API(P5):GET /v1/alerts(endpoint.device.read)、POST /v1/alerts/{id}/resolve(endpoint.command.basic)
+   ├─ src/routes/commands.ts        指令 API(P4):POST basic-commands / batches/basic-commands / cancel(endpoint.command.basic)、GET commands / batches、附檔下載 commands/{id}/files/{fileId}(endpoint.device.read)
    ├─ src/commands/kinds.ts         指令類型表:等級、有效期限 / 逾時、params schema(docs/contracts/command-kinds.md)
+   ├─ src/services/command-files.ts 指令附檔(P4-2):Agent 上傳(SHA-256、20 MB、裝置與狀態檢查)→ COMMAND_FILES_DIR + ita.command_file;下載、每小時清除到期檔
    ├─ src/services/command-dispatcher.ts 指令狀態機:寫 SQL → 在線推送、重連補送、斷線退回、command_update / ack、逾期與逾時掃描、批次限流
-   ├─ src/services/device-service.ts 寫入順序、hash 比對、降級、在線狀態、離線補傳比對、端點事件、時鐘偏差與硬體指紋(唯一的業務邏輯層)
-   ├─ src/stores/                   types.ts 介面;sql-store(mssql)、sql-command-store(指令,共用連線池)、mongo-store、redis-store
+   ├─ src/services/device-service.ts 寫入順序、hash 比對、降級、在線狀態、離線補傳比對、端點事件、時鐘偏差與硬體指紋、清單分頁、停用 / 退役、合併、軟體清單回填、所屬公司判定與指定、資料範圍(found() 單點查找);P5:心跳健康(Redis 在線資訊 + 每 5 分鐘落盤)、憑證到期日、資產比對事件(同一交易)、健康走勢
+   ├─ src/services/change-detector.ts 資產前後比對(純函式,P5):軟體安裝 / 移除 / 更新、超過 50 項彙總、硬體元件變更
+   ├─ src/services/alert-service.ts 告警(P5):evaluate 固定規則(純函式)、每 5 分鐘 sweep(開 / 更新 / 自動關閉、非 active 裝置關閉)、硬體變更開告警、清單與手動關閉
+   ├─ src/services/scope.ts         資料範圍(E6):scopeOf(cos / 全部公司角色)、inScope、MgmtCtx(管理方法型別上必帶 scope)
+   ├─ src/services/company.ts       所屬公司自動判定:ENDPOINT_COMPANY_DOMAINS 解析、憑證 FQDN / 回報網域 → 公司(最長尾碼)
+   ├─ src/stores/                   types.ts 介面;sql-store(mssql)、sql-command-store(指令)、sql-monitor-store(健康與告警,P5;皆共用連線池)、mongo-store、redis-store
    ├─ src/contracts.ts              讀 ../docs/contracts(不複製)、型別
    ├─ src/db/migrator.ts、migrate.ts 手寫 SQL migration 與整合測試庫重建
    ├─ db/dba/                       建庫 T-SQL(DBA 以 sa 執行,AI 不執行)
-   ├─ db/migrations/                0001_init.sql:ita.device、device_inventory、device_nic、device_event;0002_sync_event.sql:硬體指紋、時鐘偏差、退役、端點事件欄位(P2);0003_command.sql:ita.command、command_batch、command_file(P4)
+   ├─ db/migrations/                0001_init.sql:ita.device、device_inventory、device_nic、device_event;0002_sync_event.sql:硬體指紋、時鐘偏差、退役、端點事件欄位(P2);0003_command.sql:ita.command、command_batch、command_file(P4);0004_device_software.sql:ita.device_software(P3);0005_device_company.sql:ita.device.company、company_source(E6);0006_monitor.sql:ita.device_health、device_alert(P5)
    ├─ deploy/docker-compose.dev.yml 本機 Mongo 7 / Redis 7(只綁 127.0.0.1)
-   ├─ deploy/docker-compose.yml     測試區:endpoint-server(Gateway 網路)+ ita-mongo / ita-redis(內部網路)
+   ├─ deploy/docker-compose.yml     測試區:endpoint-server(Gateway 網路,volume ita_command_files)+ ita-mongo / ita-redis(內部網路)
    ├─ deploy/host2-set-secrets.sh   主機 2 機密、臨時憑證、Gateway API Key、ita.env(需求方執行)
    ├─ Dockerfile                    建置 context 為 RustIt 根目錄(含 docs/contracts;根目錄 .dockerignore 白名單)
    ├─ test/                         單元與契約測試(記憶體儲存);test/int/ 整合測試(真實三種儲存)

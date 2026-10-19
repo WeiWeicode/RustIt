@@ -1,0 +1,39 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://giganexus.local/rustit/contracts/pipe.schema.json",
+  "title": "本機具名管道 \\\\.\\pipe\\giganexus-agent-v1 訊息",
+  "description": "Watchdog ↔ Agent 的本機通道(ENDPOINT-AGENT-GUIDE §7.2;P5-MONITOR-DESIGN §2.4)。伺服端為 Agent,ACL 只允許 SYSTEM、Administrators;每條連線一則請求、一則回應(各一行 JSON,UTF-8,以 \\n 結尾,單則上限 4 KB),之後由 Agent 關閉。信封同 WebSocket {v, type, id, body},回應沿用請求的 id。用戶端連線後以 GetNamedPipeServerProcessId 比對 SCM 的 GigaNexusAgent PID,不一致即中斷(防冒充)。不認得的 type 回 unsupported;prepare_shutdown 只定義,P6 升級時實作(P5 的 Agent 回 unsupported)。",
+  "type": "object",
+  "required": ["v", "type", "id"],
+  "properties": {
+    "v": { "type": "integer", "const": 1 },
+    "type": { "type": "string", "enum": ["get_status", "status", "prepare_shutdown", "prepare_shutdown_ack", "unsupported"] },
+    "id": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "body": { "type": "object" }
+  },
+  "allOf": [{ "if": { "properties": { "type": { "const": "status" } } }, "then": { "required": ["body"], "properties": { "body": { "$ref": "#/definitions/StatusBody" } } } }],
+  "definitions": {
+    "StatusBody": {
+      "description": "Agent 目前狀態(指南 §6.4、§7.2 草案欄位 + P5 補充)",
+      "type": "object",
+      "required": ["version", "pid", "started_at", "ws_connected"],
+      "properties": {
+        "version": { "type": "string", "maxLength": 32 },
+        "pid": { "type": "integer", "minimum": 0 },
+        "started_at": { "type": "string", "format": "date-time" },
+        "ws_connected": { "type": "boolean", "description": "WebSocket 已連線且收到 hello_ack" },
+        "last_heartbeat_ack": { "type": "string", "format": "date-time" },
+        "last_error": { "type": "string", "maxLength": 300 },
+        "cert_not_after": { "type": "string", "format": "date-time" },
+        "device_status": { "type": "string", "enum": ["active", "disabled"] },
+        "previous_exit": {
+          "type": "string",
+          "enum": ["stop", "shutdown", "restart_command", "unexpected", "first_run"],
+          "description": "這次啟動前,上一次的結束原因(同 agent_started.previous_exit);Watchdog 看到 PID 變更後據此判斷重啟原因"
+        },
+        "outbox_pending": { "type": "integer", "minimum": 0 },
+        "events_pending": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}
