@@ -2,7 +2,8 @@
 
 > 草案 2026-10-19,分支 `docs/p5-monitor-design`(從 `docs/handoff-p5` ab6ee85 開)。依據:PLATFORM-PLAN §4.3、§4.10 A5、§5、§6、§8 P5 列;指南 ENDPOINT-AGENT-GUIDE §5.3、§6.3–§6.5、§7。
 > **2026-10-19 需求方確認**:§9 全部照建議(關閉告警沿用 `endpoint.command.basic`、Watchdog 遇手動停止與改啟動類型會恢復、`watchdog.db` 不加密、告警存表與 §4 門檻、版本不符延到 P6、版本號 0.5.0 / 0.6.0 / Watchdog 0.1.0)。migration 0006 寫好後先給需求方看再套用。
-> 現況(HANDOFF §2 第 0 項):沒有 `watchdog` crate;心跳沒有 `health`;Server 不比對前後兩份資產;GigaItApp 沒有告警畫面。USB 插拔、`offline_period`、`clock_skew`、`agent_started` 事件 P2 已完成。
+> **進度(2026-10-19 收尾)**:P5-1 已合併 develop(MR !31)並部署測試區、migration 0006 已套用;P5-2 MR !32(分支已同步 develop,待 VM 驗收);P5-3 GigaItApp 畫面**暫停**(需求方指示,進行中的改動在 GigaItApp `feature/p5-monitor-ui` 的 `git stash`)。完成標準驗收見 §0。
+> 設計當時的現況(HANDOFF §2 第 0 項):沒有 `watchdog` crate;心跳沒有 `health`;Server 不比對前後兩份資產;GigaItApp 沒有告警畫面。USB 插拔、`offline_period`、`clock_skew`、`agent_started` 事件 P2 已完成。
 
 ## 0. 分批
 
