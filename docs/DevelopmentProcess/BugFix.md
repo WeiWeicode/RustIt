@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-19 裝置停用後重新啟用,Agent 最多要等 10 分鐘才恢復
+- 內容:測試區在 VM 上停用再啟用(01:07:13 停用、01:07:24 啟用)後,Agent 要等滿 10 分鐘才重連,期間下的指令只能排隊。原因是停用(403 `ITA_DEVICE_DISABLED`、close 4403)和憑證錯誤共用 `CERT_RETRY`(10 分鐘)。需求方決定(2026-10-19,方案 A):停用改成每 1 分鐘 ±20% 重試,退役(403 `ITA_DEVICE_RETIRED`)和其他憑證類錯誤維持 10 分鐘。主機停用和退役都用 close 4403 關閉,所以退役時 Agent 會先在 1 分鐘後重試一次,收到 403 `ITA_DEVICE_RETIRED` 後才改回 10 分鐘。停用的裝置每分鐘重連一次,只多一次 TLS 握手和一個 403,台數少,負載可忽略。主機端不用改。rustit-agent 升為 0.4.2。
+- 檔案:`RustAgent/crates/common/src/{backoff,transport}.rs`、`RustAgent/crates/agent/Cargo.toml`、`RustAgent/Cargo.lock`
+- 驗證:`cargo test -p rustit-agent -p rustit-common` 全數通過(停用和 close 4403 等 48–72 秒;退役和 `DEVICE_UNAUTHORIZED` 等 10 分鐘);`cargo clippy -D warnings` 無警告;`cargo fmt --check` 通過。VM 升級 0.4.2 MSI 後實測停用 → 啟用的恢復時間。
+
 ## 2026-10-19 合併裝置後 Agent 暫停 10 分鐘才重連
 - 內容:P3-4 測試區驗證時(VM 改名為 `RUSTIT-P34` 並換新憑證,00:42:09 把新登錄併入舊裝置 `de87bce2`),合併後馬上下 `agent.restart`,指令一直排隊,直到 00:52:09 Agent 才重連,重連後才送出並執行。原因:合併時 `kick()` 沿用停用 / 退役的 close code 4403,Agent 收到 4403 會當成「裝置已被 IT 停用」,暫停蒐集並等 10 分鐘(憑證類錯誤的重試間隔)才重連;常數註解寫「Agent 照一般斷線重連」,與 Agent 的實作不符。修正:合併改用新的 close code 4410(`WS_CLOSE_DEVICE_MERGED`),Agent 收到不認得的代碼會照一般斷線處理,1 秒起退避重連,用同一張憑證對到合併後的裝置;停用 / 退役仍用 4403。Agent 不用改。契約 `ws-envelope.schema.json` 補上 4410 的說明;指南 §5.4 要回寫(Gateway repo,先取得同意)。
 - 檔案:`ItAgentBack/src/services/device-service.ts`、`test/devices.test.ts`、`docs/contracts/ws-envelope.schema.json`
