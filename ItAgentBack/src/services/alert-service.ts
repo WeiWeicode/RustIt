@@ -34,6 +34,18 @@ const CLOCK_SKEW_MS = 5 * 60_000;
 const DISK_CRITICAL_PCT = 5;
 const DAY = 86_400_000;
 
+/** 端點回報、代表 Agent / Watchdog 服務被人變更的事件(A5;P5-MONITOR-DESIGN §4 agent_tampered) */
+export const TAMPER_EVENTS: readonly string[] = [
+  'agent_service_stopped',
+  'agent_start_type_changed',
+  'agent_binary_missing',
+  'agent_binary_changed',
+  'agent_pipe_impersonation',
+  'watchdog_stopped',
+  'watchdog_missing',
+  'watchdog_binary_changed',
+];
+
 /** 自動類規則:掃描時評估 */
 export const AUTO_RULES: readonly AlertRule[] = ['offline_long', 'disk_low', 'agent_restarts', 'cert_expiring', 'clock_skew', 'agent_silent'];
 
@@ -187,6 +199,29 @@ export class AlertService {
       } catch (err) {
         ctx.log.warn({ err, deviceRef }, '硬體變更告警寫入失敗');
       }
+    }
+  }
+
+  /**
+   * 端點回報的事件(Agent /events、Watchdog report;P5-2):服務被停止、改啟動類型、程式被刪、看守對象不存在 → agent_tampered(critical,不自動關閉)。
+   * 事件已保存,失敗只記 warn
+   */
+  async onAgentEvents(ctx: Ctx, deviceRef: number, events: { type: string; data?: Record<string, unknown> }[]): Promise<void> {
+    const tampered = events.filter((e) => TAMPER_EVENTS.includes(e.type));
+    if (tampered.length === 0) return;
+    const first = tampered[0]!;
+    try {
+      const r = await this.store.openAlert({
+        deviceRef,
+        rule: 'agent_tampered',
+        severity: 'critical',
+        detail: JSON.stringify({ type: first.type, data: first.data ?? {}, count: tampered.length }),
+        keepDetail: true,
+        at: this.now(),
+      });
+      ctx.log.warn({ deviceRef, alertId: r.alertId, types: tampered.map((e) => e.type) }, 'Agent / Watchdog 服務被變更,已開告警');
+    } catch (err) {
+      ctx.log.warn({ err, deviceRef }, 'agent_tampered 告警寫入失敗');
     }
   }
 

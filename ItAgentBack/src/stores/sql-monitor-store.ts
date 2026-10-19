@@ -5,7 +5,7 @@
 import { randomUUID } from 'node:crypto';
 import sql from 'mssql';
 import { companyIn } from './sql-store.js';
-import type { Actor, AlertFilter, AlertOpen, AlertRecord, AlertRule, DeviceHealthRecord, HealthSample, MonitorStore, MonitorTarget } from './types.js';
+import type { Actor, AlertFilter, AlertOpen, AlertRecord, AlertRule, DeviceHealthRecord, HealthSample, MonitorStore, MonitorTarget, WatchdogState } from './types.js';
 
 type Row = Record<string, unknown>;
 
@@ -108,6 +108,25 @@ export class SqlMonitorStore implements MonitorStore {
         IF @@ROWCOUNT = 0
           INSERT INTO ita.device_health (device_ref, health_at, cpu_pct, mem_used_pct, disk_min_free_pct, disk_min_free_drive, uptime_s, agent_rss_mb)
           VALUES (@id, @at, @cpu, @mem, @disk, @drive, @up, @rss);`);
+  }
+
+  async saveWatchdog(deviceRef: number, w: WatchdogState): Promise<void> {
+    await (await this.request())
+      .input('id', sql.Int, deviceRef)
+      .input('ver', sql.VarChar(32), cut(w.version, 32))
+      .input('at', sql.DateTime2(3), w.reportAt)
+      .input('state', sql.VarChar(16), cut(w.agentServiceState, 16))
+      .input('start', sql.VarChar(16), cut(w.agentStartType, 16))
+      .input('ok', sql.Bit, w.agentStatusOk)
+      .input('err', sql.NVarChar(300), cut(w.agentLastError, 300))
+      .input('restarts', sql.Int, w.agentRestarts24h === null ? null : int(w.agentRestarts24h)).query(`
+        UPDATE ita.device_health SET watchdog_version = @ver, watchdog_report_at = @at, agent_service_state = @state, agent_start_type = @start,
+          agent_status_ok = @ok, agent_last_error = @err, agent_restarts_24h = @restarts, updated_at = SYSUTCDATETIME()
+        WHERE device_ref = @id;
+        IF @@ROWCOUNT = 0
+          INSERT INTO ita.device_health (device_ref, watchdog_version, watchdog_report_at, agent_service_state, agent_start_type, agent_status_ok,
+            agent_last_error, agent_restarts_24h)
+          VALUES (@id, @ver, @at, @state, @start, @ok, @err, @restarts);`);
   }
 
   async saveCertNotAfter(deviceRef: number, notAfter: Date): Promise<void> {

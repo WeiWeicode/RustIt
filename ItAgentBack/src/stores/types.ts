@@ -204,8 +204,8 @@ export interface DeviceStore {
   /** 同一 DN 出現新指紋(憑證續約):更新並寫稽核 fingerprint_changed(指南 §3.3) */
   updateFingerprint(device: DeviceRecord, certFp: string, requestId: string): Promise<void>;
   addEvent(device: DeviceRecord | null, type: DeviceEventType, detail: string, requestId: string): Promise<void>;
-  /** Agent 端點事件:以 (裝置, eventUid) 去重,已存在的略過(重送不重複) */
-  addAgentEvents(device: DeviceRecord, events: AgentEvent[], receivedAt: Date, requestId: string): Promise<void>;
+  /** Agent 端點事件:以 (裝置, eventUid) 去重,已存在的略過(重送不重複);回傳這次真正新增的 eventUid */
+  addAgentEvents(device: DeviceRecord, events: AgentEvent[], receivedAt: Date, requestId: string): Promise<string[]>;
   /** 更新最後回報時間;有值時一併更新電腦名稱、Agent 版本、硬體指紋、時鐘偏差 */
   touch(deviceRef: number, at: Date, patch?: TouchPatch): Promise<void>;
   /** 硬體指紋相同的其他裝置(不含已合併者;A1) */
@@ -526,7 +526,20 @@ export interface MonitorTarget {
   openRules: AlertRule[];
 }
 
+/** Watchdog 回報的 Agent 狀態(P5-2;ita.device_health 的 Watchdog 欄位) */
+export interface WatchdogState {
+  version: string;
+  reportAt: Date;
+  agentServiceState: string;
+  agentStartType: string;
+  agentStatusOk: boolean | null;
+  agentLastError: string | null;
+  agentRestarts24h: number | null;
+}
+
 export interface MonitorStore {
+  /** Watchdog 回報(upsert,P5-2) */
+  saveWatchdog(deviceRef: number, w: WatchdogState): Promise<void>;
   /** 健康摘要落盤(upsert) */
   saveHealth(deviceRef: number, at: Date, sample: HealthSample): Promise<void>;
   /** 裝置憑證到期日(hello;upsert) */

@@ -1,0 +1,9 @@
+{
+  "server_time": "2026-10-20T01:05:00.300Z",
+  "accepted": [
+    "8d2f4a6b-1c3e-4f5a-9b7c-0d1e2f3a4b51",
+    "8d2f4a6b-1c3e-4f5a-9b7c-0d1e2f3a4b52"
+  ],
+  "report_interval_sec": 300,
+  "target": null
+}

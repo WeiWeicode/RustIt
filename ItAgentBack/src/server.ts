@@ -31,6 +31,7 @@ const service = new DeviceService(sql, mongo, redis, {
   companyDomains: config.companyDomains,
   monitor: monitorStore,
   onHostEvents: (ctx, deviceRef, events) => alerts?.onHostEvents(ctx, deviceRef, events) ?? Promise.resolve(),
+  onAgentEvents: (ctx, deviceRef, events) => alerts?.onAgentEvents(ctx, deviceRef, events) ?? Promise.resolve(),
 });
 alerts = new AlertService(monitorStore, (deviceId) => service.lookup(deviceId), config.alertThresholds);
 // 指令派送(P4):SQL 與裝置共用連線池,推送經 DeviceService 的 WebSocket 連線表

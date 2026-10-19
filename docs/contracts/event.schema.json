@@ -27,8 +27,83 @@
         { "if": { "properties": { "type": { "const": "offline_period" } } }, "then": { "required": ["data"], "properties": { "data": { "$ref": "#/definitions/OfflinePeriod" } } } },
         { "if": { "properties": { "type": { "enum": ["usb_inserted", "usb_removed"] } } }, "then": { "required": ["data"], "properties": { "data": { "$ref": "#/definitions/UsbVolume" } } } },
         { "if": { "properties": { "type": { "const": "local_overflow" } } }, "then": { "required": ["data"], "properties": { "data": { "$ref": "#/definitions/LocalOverflow" } } } },
-        { "if": { "properties": { "type": { "const": "agent_started" } } }, "then": { "properties": { "data": { "$ref": "#/definitions/AgentStarted" } } } }
+        { "if": { "properties": { "type": { "const": "agent_started" } } }, "then": { "properties": { "data": { "$ref": "#/definitions/AgentStarted" } } } },
+        { "if": { "properties": { "type": { "const": "agent_restarted" } } }, "then": { "required": ["data"], "properties": { "data": { "$ref": "#/definitions/AgentRestarted" } } } },
+        { "if": { "properties": { "type": { "const": "agent_service_stopped" } } }, "then": { "required": ["data"], "properties": { "data": { "$ref": "#/definitions/ServiceStopped" } } } },
+        { "if": { "properties": { "type": { "const": "agent_start_type_changed" } } }, "then": { "required": ["data"], "properties": { "data": { "$ref": "#/definitions/StartTypeChanged" } } } },
+        { "if": { "properties": { "type": { "const": "agent_binary_missing" } } }, "then": { "required": ["data"], "properties": { "data": { "$ref": "#/definitions/BinaryMissing" } } } },
+        { "if": { "properties": { "type": { "const": "agent_start_failed" } } }, "then": { "required": ["data"], "properties": { "data": { "$ref": "#/definitions/StartFailed" } } } },
+        { "if": { "properties": { "type": { "const": "watchdog_stopped" } } }, "then": { "required": ["data"], "properties": { "data": { "$ref": "#/definitions/ServiceStopped" } } } },
+        { "if": { "properties": { "type": { "enum": ["agent_binary_changed", "watchdog_binary_changed"] } } }, "then": { "required": ["data"], "properties": { "data": { "$ref": "#/definitions/BinaryChanged" } } } },
+        { "if": { "properties": { "type": { "const": "agent_pipe_impersonation" } } }, "then": { "required": ["data"], "properties": { "data": { "$ref": "#/definitions/PipeImpersonation" } } } }
       ]
+    },
+    "BinaryChanged": {
+      "description": "服務設定的程式不是預期的那支(路徑被改,P5-2):agent_binary_changed 由 Watchdog 回報(預期為 Watchdog 同目錄的 rustit-agent.exe)、watchdog_binary_changed 由 Agent 回報;同一次執行只記一次",
+      "type": "object",
+      "required": ["path"],
+      "properties": {
+        "path": { "type": "string", "maxLength": 260 },
+        "expected": { "type": "string", "maxLength": 260 }
+      }
+    },
+    "PipeImpersonation": {
+      "description": "本機管道的伺服端不是 SCM 的 Agent 行程(有人搶先建立同名管道,P5-2,指南 §7.2);Watchdog 不送出請求並中斷,同一個伺服端 PID 只記一次",
+      "type": "object",
+      "required": ["server_pid", "agent_pid"],
+      "properties": {
+        "server_pid": { "type": "integer", "minimum": 0 },
+        "agent_pid": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "AgentRestarted": {
+      "description": "Watchdog 偵測到 Agent 重新啟動(P5-2):crashed 行程消失後由 SCM 失敗復原或 Watchdog 重啟、hung get_status 連續 3 次失敗由 Watchdog 強制重啟、restart_command 指令 agent.restart",
+      "type": "object",
+      "required": ["cause"],
+      "properties": {
+        "cause": { "type": "string", "enum": ["crashed", "hung", "restart_command"] },
+        "previous_pid": { "type": "integer", "minimum": 0 },
+        "pid": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "ServiceStopped": {
+      "description": "服務被手動停止(不是關機、不是 agent.restart)。agent_service_stopped:Watchdog 看到 Agent;watchdog_stopped:Agent 看到 Watchdog(P5-2)",
+      "type": "object",
+      "required": ["restarted"],
+      "properties": {
+        "state": { "type": "string", "maxLength": 32 },
+        "start_type": { "type": "string", "maxLength": 16, "description": "看到時的啟動類型(被改成 disabled 時會先改回 auto)" },
+        "restarted": { "type": "boolean", "description": "是否已重新啟動成功" },
+        "error": { "type": "string", "maxLength": 300 }
+      }
+    },
+    "StartTypeChanged": {
+      "description": "Agent 服務的啟動類型被改掉(P5-2);Watchdog 會改回自動",
+      "type": "object",
+      "required": ["from", "restored"],
+      "properties": {
+        "from": { "type": "string", "maxLength": 16 },
+        "to": { "type": "string", "maxLength": 16 },
+        "restored": { "type": "boolean" },
+        "error": { "type": "string", "maxLength": 300 }
+      }
+    },
+    "BinaryMissing": {
+      "description": "Agent 服務不存在或設定指向的 exe 不存在(P5-2);Watchdog 不能自己重裝,只記錄",
+      "type": "object",
+      "properties": {
+        "service_missing": { "type": "boolean" },
+        "path": { "type": "string", "maxLength": 260 }
+      }
+    },
+    "StartFailed": {
+      "description": "Watchdog 嘗試啟動 Agent 失敗(P5-2)",
+      "type": "object",
+      "required": ["error"],
+      "properties": {
+        "error": { "type": "string", "maxLength": 300 },
+        "attempts": { "type": "integer", "minimum": 1 }
+      }
     },
     "AgentStarted": {
       "description": "Agent 行程啟動(P2);P5 起帶上次結束原因,Server 以 previous_exit = unexpected 的筆數判斷「24 小時內非正常重啟」告警(P5-MONITOR-DESIGN §4)。0.5.0 之前的 Agent 只有 agent_version",

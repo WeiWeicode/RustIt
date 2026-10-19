@@ -13,7 +13,10 @@ import { CONTRACTS_DIR, example } from './helpers.js';
 
 const addFormats = ((addFormatsModule as unknown as { default?: unknown }).default ?? addFormatsModule) as (a: Ajv) => Ajv;
 const ajv = addFormats(new Ajv({ strict: true, allErrors: true }));
-for (const name of ['inventory', 'ws-envelope', 'sync', 'event'] as const) ajv.addSchema(loadContract(name, CONTRACTS_DIR));
+for (const name of ['inventory', 'ws-envelope', 'sync', 'event', 'watchdog'] as const) ajv.addSchema(loadContract(name, CONTRACTS_DIR));
+// 本機管道(P5-2):Agent ↔ Watchdog,Server 不使用,只在契約測試驗證範例
+const PIPE_ID = 'https://giganexus.local/rustit/contracts/pipe.schema.json';
+ajv.addSchema(JSON.parse(readFileSync(path.join(CONTRACTS_DIR, 'pipe.schema.json'), 'utf8')) as object);
 // 指令附檔上傳回應(P4-2):Agent 通道以 Fastify 回傳,只在契約測試編譯
 const COMMAND_FILE_ID = 'https://giganexus.local/rustit/contracts/command-file.schema.json';
 ajv.addSchema(JSON.parse(readFileSync(path.join(CONTRACTS_DIR, 'command-file.schema.json'), 'utf8')) as object);
@@ -34,8 +37,12 @@ describe('資料契約範例', () => {
       'event.sample.json',
       'inventory-response.sample.json',
       'inventory.sample.json',
+      'pipe-get-status.sample.json',
+      'pipe-status.sample.json',
       'sync-response.sample.json',
       'sync.sample.json',
+      'watchdog-report-response.sample.json',
+      'watchdog-report.sample.json',
       'ws-command-log-level.sample.json',
       'ws-command-update-ack.sample.json',
       'ws-command-update-diagnose.sample.json',
@@ -66,6 +73,25 @@ describe('資料契約範例', () => {
     assert.equal(validate({ events: [{ ...base, type: 'usb_inserted' }] }), false);
     assert.ok(validate({ events: [{ ...base, type: 'future_event', data: { x: 1 } }] }));
     assert.equal(validate({ events: [] }), false);
+  });
+
+  it('P5-2:Watchdog 上報請求 / 回應、本機管道 get_status / status、Watchdog 事件類型', () => {
+    check(CONTRACT_IDS.watchdog, 'watchdog-report.sample.json');
+    check(`${CONTRACT_IDS.watchdog}#/definitions/WatchdogReportResponse`, 'watchdog-report-response.sample.json');
+    check(PIPE_ID, 'pipe-get-status.sample.json');
+    check(PIPE_ID, 'pipe-status.sample.json');
+    const wd = ajv.getSchema(CONTRACT_IDS.watchdog)!;
+    const sample = example<Record<string, any>>('watchdog-report.sample.json');
+    assert.equal(wd({ ...sample, agent: { ...sample.agent, service_state: 'exploded' } }), false);
+    // 事件依類型檢查 data(引用 event.schema.json)
+    assert.equal(wd({ ...sample, events: [{ ...sample.events[0], data: { cause: 'oops' } }] }), false);
+    assert.equal(wd({ ...sample, events: [{ ...sample.events[1], data: {} }] }), false, 'agent_service_stopped 缺 restarted');
+    const { events: _e, ...noEvents } = sample;
+    assert.ok(wd(noEvents));
+    const pipe = ajv.getSchema(PIPE_ID)!;
+    const st = example<Record<string, any>>('pipe-status.sample.json');
+    const { pid: _p, ...noPid } = st.body;
+    assert.equal(pipe({ ...st, body: noPid }), false);
   });
 
   it('sync 請求與回應(P2)', () => {

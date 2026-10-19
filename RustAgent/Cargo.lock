@@ -3465,7 +3465,7 @@ dependencies = [
 
 [[package]]
 name = "rustit-agent"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "aes-gcm",
  "chrono",
@@ -3522,6 +3522,8 @@ dependencies = [
  "toml 1.1.6+spec-1.1.0",
  "url",
  "uuid",
+ "windows-service",
+ "windows-sys 0.61.2",
  "x509-parser",
 ]
 
@@ -3538,6 +3540,24 @@ dependencies = [
  "tauri-build",
  "tokio",
  "windows",
+]
+
+[[package]]
+name = "rustit-watchdog"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "env_logger",
+ "jsonschema",
+ "log",
+ "rusqlite",
+ "rustit-common",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+ "windows-service",
 ]
 
 [[package]]
