@@ -2,7 +2,7 @@
 
 > 草案 2026-10-19,分支 `docs/p5-monitor-design`(從 `docs/handoff-p5` ab6ee85 開)。依據:PLATFORM-PLAN §4.3、§4.10 A5、§5、§6、§8 P5 列;指南 ENDPOINT-AGENT-GUIDE §5.3、§6.3–§6.5、§7。
 > **2026-10-19 需求方確認**:§9 全部照建議(關閉告警沿用 `endpoint.command.basic`、Watchdog 遇手動停止與改啟動類型會恢復、`watchdog.db` 不加密、告警存表與 §4 門檻、版本不符延到 P6、版本號 0.5.0 / 0.6.0 / Watchdog 0.1.0)。migration 0006 寫好後先給需求方看再套用。
-> **進度(2026-10-19 收尾)**:P5-1 已合併 develop(MR !31)並部署測試區、migration 0006 已套用;P5-2 已合併 develop(MR !32),**2026-10-19 測試區 VM 驗收 7 項通過**(`test-reports/2026-10-19-p5-watchdog-0.6.0.md`;完成標準 1、2、4 項達成,第 3 項 P2 已完成);P5-3 GigaItApp 畫面 2026-10-20 復工(OpenAPI 批次已發佈)。完成標準驗收見 §0。
+> **進度(2026-10-19 收尾)**:P5-1 已合併 develop(MR !31)並部署測試區、migration 0006 已套用;P5-2 已合併 develop(MR !32),**2026-10-19 測試區 VM 驗收 7 項通過**(`test-reports/2026-10-19-p5-watchdog-0.6.0.md`;完成標準 1、2、4 項達成,第 3 項 P2 已完成);P5-3 GigaItApp 畫面 2026-10-20 上測試區並驗證通過(GigaItApp MR !7,告警 Tab 與關閉告警已實測);P5-4 2026-10-20 完成(Gateway 指南 v0.10、甘特圖 W6-18 done)。**P5 測試區完成。**完成標準驗收見 §0。
 > 設計當時的現況(HANDOFF §2 第 0 項):沒有 `watchdog` crate;心跳沒有 `health`;Server 不比對前後兩份資產;GigaItApp 沒有告警畫面。USB 插拔、`offline_period`、`clock_skew`、`agent_started` 事件 P2 已完成。
 
 ## 0. 分批

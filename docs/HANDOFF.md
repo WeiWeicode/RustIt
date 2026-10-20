@@ -25,8 +25,8 @@
    - **進度(2026-10-19,設計 [P5-MONITOR-DESIGN.md](P5-MONITOR-DESIGN.md),需求方確認 §9 全部照建議)**:
      - **P5-1 ✅ 已合併 develop(MR !31,`91ee86c`)並部署測試區**:migration 0006 已套用 `giganexus_It_Agent_test`;健康摘要、資產變更事件、告警 API(`/v1/alerts`、`/v1/devices/{id}/health`);Agent 0.5.0。**待辦**:Gateway OpenAPI 草稿批次發佈(新 API 才會出現在 `/api/endpoint/*`)。
      - **P5-2 ✅ 已合併 develop(MR !32,`568aca9`)並於 2026-10-19 測試區 VM 驗收 7 項通過**(報告 [test-reports/2026-10-19-p5-watchdog-0.6.0.md](test-reports/2026-10-19-p5-watchdog-0.6.0.md):安裝兩個服務、結束行程 → `agent_restarted`、停止服務 → `agent_tampered`、軟體安裝 / 移除事件、停用 Watchdog 被改回、一般使用者停止被拒、解除安裝不互拉)。**VM 目前已解除安裝 Agent**,之後測試要重裝 0.6.0 MSI。實作摘要:`watchdog` crate(Watchdog 0.1.0)、Agent 0.6.0(本機管道、看守 Watchdog、服務 ACL)、監控 MSI 含兩個服務、`POST /agent/v1/watchdog/report`、`agent_tampered`;子代理審查(含 1 High)已修正(設計 §8.3)。本機測試與端到端(前景 Watchdog → 本機 Server)通過;**管道、SCM 看守、服務 ACL、MSI 安裝 / 升級 / 解除安裝要在 VM 驗證**(本機非系統管理員無法測)。合併後 endpoint-server 只多 `watchdog/report` 路由與事件白名單,不需新 migration。測試區 MSI:`dist/msi/GigaNexusAgent-0.6.0-test.msi`(本機建置,SHA-256 `5fd145df…5c4471`;合併後以 develop 重建)。
-     - **P5-3(GigaItApp)2026-10-20 復工**:Gateway OpenAPI 草稿批次已發佈;從 GigaItApp `feature/p5-monitor-ui` 的 stash 恢復、綁 includes、瀏覽器驗證(見下方「P5-3 交接」)。
-     - **待辦**:指南回寫(§6.3 health、§7.2 管道、§7.3 watchdog report、§8.3 告警 API,Gateway repo 需同意);根目錄 `workspace.json` / `PROJECT-MAP.md` 已改(根目錄分支 `docs/rustit-p5-monitor`,待 MR);甘特圖 W6-18;告警 `detail` 保留第一次觸發原因(設計預期,畫面加提示;報告 §4-1);後續項目見設計 §8.1、§8.3「未處理」。
+     - **P5-3 ✅ GigaItApp 監測畫面已上測試區(2026-10-20,GigaItApp MR !7,`092adea`)**:OpenAPI 批次已發佈、includes 已綁、CI rbac-test 已套用。測試區瀏覽器驗證通過:清單健康欄與告警數、「健康與 Agent」Tab、事件標籤、「告警」Tab(未結束 / 已關閉 / 全部、嚴重度篩選、點列開詳情)、關閉告警(VM `agent_tampered` 由 S112009 確認關閉,稽核顯示確認人與說明,`openAlerts` 歸 0)。未驗:關閉衝突(409,需兩人同時關閉)。**P5-4 ✅(2026-10-20)**:Gateway ENDPOINT-AGENT-GUIDE v0.10(Gateway MR !6;§6.3 / §7.2 / §7.3 / §8.3 已在 v0.9 回寫,v0.10 補 VM 驗收、告警 detail 規則、GigaItApp 告警權限)、甘特圖 W6-18 100% done(API 已更新,根目錄 MR !7)。**P5 測試區完成;下一階段 P6 升級(甘特圖 W6-19)**。
+     - **後續**:告警 `detail` 保留第一次觸發原因(設計預期,畫面已加「首次:」提示);關閉告警權限要與一般指令分開時,ItAgentBack 註冊新權限代碼(資安審查 Medium,指南 §8.6);關閉衝突 409 未實測;其他項目見設計 §8.1、§8.3「未處理」。
      - VM 驗收:完成標準 4 項(設計 §0 表)。VM 先建檢查點「P5 前(0.4.2)」,再裝 0.6.0 MSI(同時驗 P5-1 與 P5-2)。
    - **建議做法**:比照 P3 / P4,先寫設計 `docs/P5-MONITOR-DESIGN.md`(分批、資料表 / migration、契約擴充、告警規則、Watchdog 與 Agent 互相看守、MSI 加第二個服務、GigaItApp 畫面),經需求方確認後再實作;牽涉服務、安全與契約,由 Claude 主寫。
    - **要先同意**:migration 套用測試庫、契約變更、MSI 加 Watchdog 服務、GigaItApp 告警頁與 `gateway-rbac.yaml`、指南回寫(§5、§7)、合併 develop(測試區共用)。
@@ -44,7 +44,7 @@
 2. **P3 資料呈現已完成**(2026-10-19);**P8-1 使用者端外殼與我的電腦**可交給同仁並行(甘特圖 W6-21)。
 3. **P2 已完成**(主機端與 Agent 端已合併 `develop`;2026-10-15 P2-3 VM 驗證 7 項通過,見下方)。驗證時發現裝置被停用期間會記成 `offline_period`(rejected),已於 0.2.1 排除(BugFix.md 2026-10-15;測試區 VM 已升級)。**P4 指令通道已完成**(測試區;設計 `P4-COMMAND-DESIGN.md`,需求方 2026-10-15 確認;甘特圖 W6-17;Gateway 指南 v0.6 已回寫):P4-1 已合併 develop;P4-2 已合併並於 2026-10-15 測試區 VM 驗證通過(見下方「P4 測試區 VM 驗證」;含 P4-1 的服務模式 `agent.restart`);`endpoint.command.basic` 已由 GigaItApp `gateway-rbac.yaml` 按鈕節點 `it.endpoint-device.command` 授予 it-admin(GigaItApp MR !1)。**P4-3(2026-10-15,GigaItApp MR !2)**:電腦詳情「指令」Tab(六個指令、結果、日誌下載、指令紀錄、取消)與「端點管理 › 指令紀錄」Tab,本機連測試區 Gateway 對 VM 實測通過(GigaItApp NewFeatures 2026-10-15);已合併(GigaItApp `02f12d2`),「指令紀錄」Tab 由 CI rbac-test 套用權限後可見。小項已修(BugFix.md 2026-10-15,Agent 0.4.1:zip 檔案時間、瞬間完成的指令補 started_at;VM 已於 2026-10-16 升級 0.4.1)。
 
-### P5-3 交接:GigaItApp 監測畫面(下一個討論串從這裡開始)
+### P5-3 交接:GigaItApp 監測畫面(✅ 2026-10-20 完成,以下保留為紀錄)
 
 > 需求方 2026-10-19 同意範圍,同日暫停;改 GigaItApp 已獲同意(電腦清單健康欄與告警數、詳情「健康與 Agent」Tab、事件 Tab 新類型標籤、「告警」Tab、`gateway-rbac.yaml` 加 `it.endpoint-alert.list` / `it.endpoint-alert.resolve`,**includes 等 OpenAPI 發佈後再綁**)。設計 [P5-MONITOR-DESIGN.md](P5-MONITOR-DESIGN.md) §3.3(API)、§4(規則)、§7(畫面)。
 
