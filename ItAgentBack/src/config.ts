@@ -24,12 +24,18 @@
  *   RELEASES_DIR              Agent / Watchdog 版本檔目錄(唯讀;{component}/{version}/{檔名},P6-UPGRADE-DESIGN §4);省略 = 不啟用升級
  *                             (版本 API 不註冊、Watchdog 的 target 一律 null)。容器 /srv/releases
  *   RELEASE_MAX_CONCURRENT    同時升級中的裝置上限,預設 20(P6-UPGRADE-DESIGN §2.1)
+ *   SOFTWARE_DIR              軟體庫(唯讀;{軟體}/{版本}/{安裝檔},P7-SOFTWARE-DESIGN §4);省略 = 不啟用軟體派送
+ *                             (軟體 API 與套件下載不註冊、software.* 指令建立時回 404)。容器 /srv/software
+ *   SOFTWARE_MAX_BYTES        單一安裝檔大小上限(位元組),預設 4 GB
+ *   SOFTWARE_MAX_CONCURRENT   software.install / uninstall 同時執行的總數上限(跨批次與單台),預設 20
+ *   BATCH_APPROVAL_THRESHOLD  admin 批次超過幾台需第二人核可(PLATFORM-PLAN B1),預設 20
  */
 import { readFileSync } from 'node:fs';
 import { isGatewayPort, loadGatewayEnv, loadMonitorEnv, type GatewayEnv, type MonitorEnv } from '@giganexus/backend-sdk';
 import type { AgentSettings } from './contracts.js';
 import { parseCompanyDomains } from './services/company.js';
 import { DEFAULT_THRESHOLDS, type AlertThresholds } from './services/alert-service.js';
+import { SOFTWARE_DEFAULT_MAX_BYTES } from './services/software-files.js';
 
 export interface SqlConfig {
   server: string;
@@ -86,6 +92,14 @@ export interface Config {
   releasesDir: string | null;
   /** 同時升級中的裝置上限(P6) */
   releaseMaxConcurrent: number;
+  /** 軟體庫(P7);null = 不啟用軟體派送 */
+  softwareDir: string | null;
+  /** 單一安裝檔大小上限(P7) */
+  softwareMaxBytes: number;
+  /** software.* 同時執行的總數上限(P7) */
+  softwareMaxConcurrent: number;
+  /** admin 批次超過幾台需第二人核可(B1) */
+  batchApprovalThreshold: number;
 }
 
 export class ConfigError extends Error {
@@ -212,6 +226,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd?: string): 
     alertThresholds: alertThresholds(env),
     releasesDir: env.RELEASES_DIR?.trim() || null,
     releaseMaxConcurrent: int('RELEASE_MAX_CONCURRENT', env.RELEASE_MAX_CONCURRENT, 20, 1, 1000),
+    softwareDir: env.SOFTWARE_DIR?.trim() || null,
+    softwareMaxBytes: int('SOFTWARE_MAX_BYTES', env.SOFTWARE_MAX_BYTES, SOFTWARE_DEFAULT_MAX_BYTES, 1024 * 1024, 16 * 1024 ** 3),
+    softwareMaxConcurrent: int('SOFTWARE_MAX_CONCURRENT', env.SOFTWARE_MAX_CONCURRENT, 20, 1, 1000),
+    batchApprovalThreshold: int('BATCH_APPROVAL_THRESHOLD', env.BATCH_APPROVAL_THRESHOLD, 20, 1, 200),
   };
 }
 

@@ -14,7 +14,8 @@
 | 串行 | 標「是」的類型(會改變系統)在 Agent 上同時間只執行一個;查詢類可並行 |
 | 去重 | Agent 以 `command_id` 去重(本機持久化,保留 7 天);重複收到不重跑,重送最後狀態 |
 | 結果 | `result` 序列化後 4,000 字元內;大量資料(日誌)以 HTTPS 上傳為指令附檔(見「指令附檔」),`result` 只放 `file_id` |
-| 每台上限 | 同一台尚未結束(queued / sent / acked / running)的同類型指令:`message.show` 3 筆,`agent.restart`、`agent.diagnose`、`logs.collect`、`agent.log_level`、`agent.upgrade` 各 1 筆;超過回 `409 ITA_COMMAND_LIMIT`(避免洗版、反覆重啟) |
+| 每台上限 | 同一台尚未結束(queued / sent / acked / running)的同類型指令:`message.show`、`software.install`、`software.uninstall` 各 3 筆,`agent.restart`、`agent.diagnose`、`logs.collect`、`agent.log_level`、`agent.upgrade`、`system.reboot` 各 1 筆;超過回 `409 ITA_COMMAND_LIMIT`(避免洗版、反覆重啟) |
+| 批次與核可 | P7 起:admin 批次超過 `BATCH_APPROVAL_THRESHOLD`(預設 20)台為 `pending_approval`,指令留在 `queued` 不送出,需建立人以外的 IT 核可(見「批次第二人核可」);`software.*` 同時執行的總數另受 `SOFTWARE_MAX_CONCURRENT`(預設 20,跨批次與單台)限制 |
 | 冪等 | 同一工號 + 同一 `Idempotency-Key` 回傳既有的那筆;用在不同電腦、類型或等級回 `422 ITA_IDEMPOTENCY_KEY_REUSED` |
 
 ## 錯誤代碼(`command_update.error_code`)
@@ -31,6 +32,15 @@
 | `UPLOAD_FAILED` | Agent | `logs.collect`:附檔上傳重試後仍失敗,`error_message` 帶 HTTP 狀態或錯誤 |
 | `EXECUTION_FAILED` | Agent | 其他執行錯誤,`error_message` 說明 |
 | `AGENT_UPGRADING` | Agent | P6-2 起:Watchdog 升級 Agent 中(已送 `prepare_shutdown`)收到的新指令,或執行中等 60 秒仍未結束的指令;升級完成後可重新下達 |
+| `DOWNLOAD_FAILED`、`HASH_MISMATCH`、`SIGNATURE_INVALID`、`SIGNER_NOT_TRUSTED`、`DISK_FULL` | Agent | P7 起 `software.install`:與 P6 升級同義(下載失敗、SHA-256 不符、Authenticode 無效或未簽章、簽章者不在主機與本機信任清單的交集、磁碟不足);**驗證失敗時不啟動安裝程式** |
+| `INSTALL_FAILED` | Agent | P7:安裝 / 移除程式結束代碼不是成功碼,`result.exit_code` 帶值 |
+| `INSTALL_TIMEOUT` | Agent | P7:超過 `timeout_sec`,已結束安裝程式的行程樹 |
+| `INSTALL_BUSY` | Agent | P7:結束代碼 1618(另一個安裝進行中),間隔 60 秒重試 3 次仍失敗 |
+| `DETECT_FAILED` | Agent | P7:結束代碼成功,但登錄檔找不到(安裝)或 120 秒內仍存在(移除)該項目 |
+| `UNINSTALL_NOT_SUPPORTED` | Agent | P7:找得到項目,但沒有可用的移除指令 |
+| `DEFERRED_TIMEOUT` | Agent | P7:電池 / 計量網路延後下載超過上限(預設 4 小時) |
+
+主機取消指令(`canceled`)時的 `error_code`(P7 起,只出現在管理 API,不送到 Agent):`PACKAGE_REVOKED`(套件撤回時尚未送出的安裝)、`BATCH_REJECTED`(批次被駁回)、`APPROVAL_EXPIRED`(批次 24 小時無人核可)。
 
 ## 類型
 
@@ -43,7 +53,11 @@
 | `logs.collect` | basic | 1 小時 / 15 分鐘 | 否 | P4-2 |
 | `agent.log_level` | basic | 1 小時 / 1 分鐘 | 否 | P4-2 |
 | `agent.upgrade` | admin | 1 小時 / 5 分鐘 | 是 | P6 |
-| `software.install`、`software.uninstall`、`system.reboot` | admin | — | 是 | P7 |
+| `software.install` | admin | 24 小時 / 4 小時 | 是 | P7(Agent 0.8.0) |
+| `software.uninstall` | admin | 24 小時 / 1 小時 | 是 | P7(Agent 0.8.0) |
+| `system.reboot` | admin | 4 小時 / 30 分鐘 | 是 | P7(Agent 0.8.0) |
+
+> `software.install` 的逾時含下載與電池延後(安裝本身由 `timeout_sec` 控制,預設 30 分鐘);有效期限 24 小時 = 離線太久回來不再執行過期的安裝。待核可批次的指令有效期限自核可時起算。
 
 ### `inventory.collect` — 立即蒐集並回報資產
 
@@ -123,6 +137,58 @@
 - 指定 `version`:這台強制升級 / 降版到該版本(優先於所屬環,到達後清除)。版本必須已登錄且 `published`(`draft` 只能經 pilot 環目標下發,改環目標需 `endpoint.software.manage` 與全部公司角色),否則建立時回 `404 ITA_RELEASE_NOT_FOUND` / `409 ITA_RELEASE_NOT_PUBLISHED` / `409 ITA_RELEASE_REVOKED`,不建立指令。
 - Agent(0.7.0 起)收到後在本機管道 `status.upgrade_requested` 通知 Watchdog 立即上報;`succeeded` 只代表已交給 Watchdog,實際結果看 `GET /v1/devices/{id}/upgrade` 與 `upgrade_*` 事件。0.6.0 以前的 Agent 回 `UNSUPPORTED_COMMAND`(強制版本仍已記錄,Watchdog 下次定期上報會取得)。
 - `result`:`{ "handed_to_watchdog": true }`。前景模式(開發)回 `failed NOT_RUNNING_AS_SERVICE`;`component` / `version` 格式不符回 `INVALID_PARAMS`。
+
+### `software.install` — 安裝軟體(P7)
+
+路徑:單台 `POST /api/endpoint/devices/{deviceId}/admin-commands`(`endpoint.command.admin`);多台 `POST /api/endpoint/software/{packageId}/deploy`(`action: "install"`)。IT 只送 `params: { "packageId": "<uuid>", "ignorePower"?: true }`;主機查軟體目錄、檢查後把 `params` 換成**目錄快照**(範例 `ws-command-software-install.sample.json`)。**Agent 只信任快照**,不接受其他來源的安裝參數。
+
+| 快照欄位 | 型別 | 說明 |
+| --- | --- | --- |
+| `package_id`、`name`、`version` | string | |
+| `url` | string | 固定 `/agent/v1/packages/{package_id}`;以同一組 mTLS 連線下載,不跟隨重新導向 |
+| `sha256`、`size_bytes` | string(64 碼小寫)、integer | 驗整個檔案;不符 `HASH_MISMATCH`,不啟動安裝程式 |
+| `installer_type` | `msi` / `inno` / `nsis` / `burn` / `exe` | 決定 Agent 寫死的命令列(P7-SOFTWARE-DESIGN §5.3) |
+| `install_args` | string ≤ 500 | 額外參數(可為空字串);字元白名單 `[A-Za-z0-9 /\-_=.:,"{}%]`,不可指到其他檔案(`.msi` / `.exe` / `.mst` 等)、不可含 `password=` / `key=` 類字樣;Agent 執行前再驗,不符 `INVALID_PARAMS`。**不經 cmd.exe / PowerShell** |
+| `signer_thumbprints` | string[](40 碼小寫 SHA-1) | 預期簽章者;**`draft` 套件(只會派到 pilot 測試機)為空陣列**:Agent 仍須簽章有效(`Valid`)並回報實際簽章者,不採信空清單放行;非空時實際簽章者須同時在此清單與本機 `trusted_signers` |
+| `detect` | `{ type: "msi_product_code" \| "display_name", value }` | 「已安裝」判斷;`display_name` 為登錄檔 DisplayName 的 `LIKE` 樣式(`%` 萬用字元) |
+| `timeout_sec` | integer | 安裝本身的逾時,預設 1800 |
+| `reboot_policy` | `never` / `required` | |
+| `ignore_power` | boolean(選填) | 略過電池延後(不略過計量網路) |
+
+- 主機檢查(不符就不建立指令):套件存在(`404 ITA_PACKAGE_NOT_FOUND`)、未撤回(`409 ITA_PACKAGE_REVOKED`)、`draft` / `tested` 只能派到 **pilot 環**(`409 ITA_PACKAGE_NOT_PUBLISHED`)、已發佈套件的授權數(`409 ITA_LICENSE_EXCEEDED`)。
+- `result`(序列化後 4,000 字元內;範例 `ws-command-update-software-install.sample.json`):`exit_code`、`reboot_required`、`signer`(實際簽章者 SHA-1 指紋)、`signer_subject`、`duration_ms`、`detected`、`already_installed`、`log_tail`(安裝記錄最後 20 行,經 `logs.collect` 同一套遮罩)。結束代碼 `0` 成功;`3010` / `1641` 成功且 `reboot_required = true`;`1638` 視為 `already_installed`;其餘 `INSTALL_FAILED`。`detect` 已通過時直接 `succeeded` + `already_installed = true`。
+- 測試機(pilot)回報的 `signer` 是 IT 標記 `tested` 的依據:`mark-tested` 填的簽章者必須等於回報值。
+- 安裝檔下載:`GET /agent/v1/packages/{packageId}`(`:9443` mTLS)。只給有**尚未結束**(`sent` / `acked` / `running`)的此套件 `software.install` 的裝置,否則 `404 ITA_PACKAGE_NOT_FOUND`;支援 `Range` / `206`,起點超出檔案 `416`(`Content-Range: bytes */大小`);主機回應前複驗 SHA-256,檔案被換掉 `503 ITA_PACKAGE_CHANGED`、軟體庫讀不到 `503 ITA_PACKAGE_UNAVAILABLE`(稍後重試)。回應標頭 `x-file-sha256` 僅供除錯,**端點以快照的 `sha256` 驗證**。
+
+### `software.uninstall` — 移除軟體(P7)
+
+路徑同 `software.install`(批次 `action: "uninstall"`)。IT 送 `params: { "packageId": "<uuid>" }`,主機換成快照(範例 `ws-command-software-uninstall.sample.json`):`package_id`、`name`、`version`、`installer_type`、`uninstall_args`(同 `install_args` 規則)、`detect`、`timeout_sec`。已撤回的套件仍可移除;`draft` / `tested` 只能對 pilot 環。不檢查授權數。
+
+- `result`:同安裝(`exit_code`、`reboot_required`、`duration_ms`、`log_tail`),另有 `already_absent`(偵測不到項目時直接 `succeeded`)。找不到可用的移除指令 `UNINSTALL_NOT_SUPPORTED`;移除後 120 秒內仍偵測得到 `DETECT_FAILED`。
+
+### `system.reboot` — 重新開機(P7;Agent 端流程在 P7-3)
+
+路徑:單台 `admin-commands`(多台走批次,同樣受核可門檻限制)。`params`(範例 `ws-command-system-reboot.sample.json`):
+
+| 欄位 | 型別 | 必填 | 說明 |
+| --- | --- | --- | --- |
+| `delay_sec` | integer 0–86400 | | 倒數秒數,預設 300(給使用者儲存工作) |
+| `message` | string 1–200、單行 | | 附加說明;安全文字規則同 `message.show`(前綴「【IT 部門通知】」、結尾附發送人) |
+| `force` | boolean | | 預設 `false`;`true` 強制結束應用程式(畫面需二次確認) |
+
+- `result`:`{ "scheduled_at": "...", "delay_sec": 300 }`(已排程即 `succeeded`,關機後無法再回報)。
+
+## 批次第二人核可(P7;PLATFORM-PLAN B1)
+
+| 情況 | 行為 |
+| --- | --- |
+| admin 批次 > `BATCH_APPROVAL_THRESHOLD`(20)台 | 批次 `state = pending_approval`,指令 `queued` 不送出(重連補送也不送) |
+| `POST /api/endpoint/batches/{batchId}/approve`(`endpoint.software.manage`) | 建立人以外、資料範圍涵蓋批次全部電腦的人核可 → `running`,指令有效期限自核可時起算並開始送出;核可人 = 建立人 `403 ITA_APPROVER_SAME_AS_CREATOR`;不是待核可或已超過 24 小時 `409 ITA_BATCH_NOT_PENDING` |
+| `POST /api/endpoint/batches/{batchId}/reject`(`reason` 必填) | `rejected`,指令 `canceled`(`BATCH_REJECTED`);建立人也可撤回自己的批次 |
+| 24 小時無人核可 | 每分鐘掃描 → `expired`,指令 `canceled`(`APPROVAL_EXPIRED`) |
+| ≤ 門檻 | 不需核可(`running`),一樣寫稽核 |
+
+`GET /api/endpoint/batches/{batchId}` 回 `state`(`pending_approval` / `running` / `done` / `rejected` / `expired`)、`requiresApproval`、`approvalExpiresAt`、`approvedBy` / `approvedAt`、`rejectedBy` / `rejectedAt` / `rejectReason`。
 
 ## 指令附檔(P4-2)
 

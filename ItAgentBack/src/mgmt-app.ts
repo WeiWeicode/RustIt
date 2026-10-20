@@ -18,11 +18,13 @@ import { alertRoutes } from './routes/alerts.js';
 import { commandRoutes } from './routes/commands.js';
 import { deviceRoutes } from './routes/devices.js';
 import { releaseRoutes } from './routes/releases.js';
+import { softwareRoutes } from './routes/software.js';
 import type { AlertService } from './services/alert-service.js';
 import type { CommandDispatcher } from './services/command-dispatcher.js';
 import type { CommandFileService } from './services/command-files.js';
 import type { DeviceService } from './services/device-service.js';
 import type { ReleaseService } from './services/release-service.js';
+import type { SoftwareService } from './services/software-service.js';
 import { SCOPE_ALL, scopeOf, type Scope } from './services/scope.js';
 
 declare module 'fastify' {
@@ -51,6 +53,8 @@ export interface MgmtAppOptions {
   alerts?: AlertService;
   /** 升級 API(P6;省略 = 不註冊,RELEASES_DIR 未設定) */
   releases?: ReleaseService;
+  /** 軟體派送 API(P7;省略 = 不註冊,SOFTWARE_DIR 未設定) */
+  software?: SoftwareService;
   /** 就緒檢查:SQL Server 可用(唯一真相);Mongo / Redis 只回報狀態,不影響就緒 */
   readiness?: () => Promise<{ ok: boolean; checks: Record<string, string> }>;
   /** 監控心跳附帶的相依服務狀態(SQL Server / Mongo / Redis) */
@@ -130,5 +134,6 @@ export async function buildMgmtApp(opts: MgmtAppOptions): Promise<FastifyInstanc
   if (opts.commands) await app.register(commandRoutes(opts.commands, opts.files));
   if (opts.alerts) await app.register(alertRoutes(opts.alerts));
   if (opts.releases) await app.register(releaseRoutes(opts.releases));
+  if (opts.software) await app.register(softwareRoutes(opts.software));
   return app;
 }
