@@ -14,7 +14,7 @@
 | 串行 | 標「是」的類型(會改變系統)在 Agent 上同時間只執行一個;查詢類可並行 |
 | 去重 | Agent 以 `command_id` 去重(本機持久化,保留 7 天);重複收到不重跑,重送最後狀態 |
 | 結果 | `result` 序列化後 4,000 字元內;大量資料(日誌)以 HTTPS 上傳為指令附檔(見「指令附檔」),`result` 只放 `file_id` |
-| 每台上限 | 同一台尚未結束(queued / sent / acked / running)的同類型指令:`message.show` 3 筆,`agent.restart`、`agent.diagnose`、`logs.collect`、`agent.log_level` 各 1 筆;超過回 `409 ITA_COMMAND_LIMIT`(避免洗版、反覆重啟) |
+| 每台上限 | 同一台尚未結束(queued / sent / acked / running)的同類型指令:`message.show` 3 筆,`agent.restart`、`agent.diagnose`、`logs.collect`、`agent.log_level`、`agent.upgrade` 各 1 筆;超過回 `409 ITA_COMMAND_LIMIT`(避免洗版、反覆重啟) |
 | 冪等 | 同一工號 + 同一 `Idempotency-Key` 回傳既有的那筆;用在不同電腦、類型或等級回 `422 ITA_IDEMPOTENCY_KEY_REUSED` |
 
 ## 錯誤代碼(`command_update.error_code`)
@@ -41,7 +41,7 @@
 | `agent.diagnose` | basic | 1 小時 / 3 分鐘 | 否 | P4-2 |
 | `logs.collect` | basic | 1 小時 / 15 分鐘 | 否 | P4-2 |
 | `agent.log_level` | basic | 1 小時 / 1 分鐘 | 否 | P4-2 |
-| `agent.upgrade` | admin | — | 是 | P6 |
+| `agent.upgrade` | admin | 1 小時 / 5 分鐘 | 是 | P6 |
 | `software.install`、`software.uninstall`、`system.reboot` | admin | — | 是 | P7 |
 
 ### `inventory.collect` — 立即蒐集並回報資產
@@ -113,6 +113,15 @@
 
 - Agent 記在本機,**重啟後仍有效直到到期**;到期自動恢復設定檔的等級並寫一行日誌。第三方套件(HTTP、TLS、WebSocket)仍只記 warn 以上,不因 trace 記下標頭。
 - `result`:`{ "level", "previous", "until" }`(`default` 時 `until` 為 null)。
+
+### `agent.upgrade` — 立即檢查升級 / 指定版本(P6)
+
+路徑:`POST /api/endpoint/devices/{deviceId}/admin-commands`(`endpoint.command.admin`;admin 批次等 B1 第二人核可再開)。`params`:`component`(必填,`agent` / `watchdog`)、`version`(選填,`x.y.z` 可帶 `-後綴`)。
+
+- 省略 `version`:重設這台該元件的失敗次數,依所屬環的目標立即檢查。
+- 指定 `version`:這台強制升級 / 降版到該版本(優先於所屬環,到達後清除)。版本必須已登錄且 `published`(`draft` 只能經 pilot 環目標下發,改環目標需 `endpoint.software.manage` 與全部公司角色),否則建立時回 `404 ITA_RELEASE_NOT_FOUND` / `409 ITA_RELEASE_NOT_PUBLISHED` / `409 ITA_RELEASE_REVOKED`,不建立指令。
+- Agent(0.7.0 起)收到後在本機管道 `status.upgrade_requested` 通知 Watchdog 立即上報;`succeeded` 只代表已交給 Watchdog,實際結果看 `GET /v1/devices/{id}/upgrade` 與 `upgrade_*` 事件。0.6.0 以前的 Agent 回 `UNSUPPORTED_COMMAND`(強制版本仍已記錄,Watchdog 下次定期上報會取得)。
+- `result`:`{ "handed_to_watchdog": true }`。
 
 ## 指令附檔(P4-2)
 

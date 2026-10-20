@@ -12,10 +12,13 @@ import { AlertService } from './services/alert-service.js';
 import { CommandDispatcher } from './services/command-dispatcher.js';
 import { CommandFileService } from './services/command-files.js';
 import { DeviceService } from './services/device-service.js';
+import { ReleaseFiles } from './services/release-files.js';
+import { ReleaseService } from './services/release-service.js';
 import { MongoSnapshotStore } from './stores/mongo-store.js';
 import { RedisStateStore } from './stores/redis-store.js';
 import { SqlCommandStore } from './stores/sql-command-store.js';
 import { SqlMonitorStore } from './stores/sql-monitor-store.js';
+import { SqlReleaseStore } from './stores/sql-release-store.js';
 import { SqlDeviceStore } from './stores/sql-store.js';
 
 const config = loadConfig();
@@ -25,18 +28,38 @@ const redis = new RedisStateStore(config.redisUrl, config.redisPrefix);
 // 監測(P5):健康、告警與裝置共用連線池;資產比對產生的硬體變更事件交給告警
 const monitorStore = new SqlMonitorStore(() => sql.connection());
 let alerts: AlertService | undefined;
+// 升級(P6):RELEASES_DIR 未設定時不啟用(版本 API 不註冊、Watchdog 的 target 一律 null)
+let releases: ReleaseService | undefined;
 const service = new DeviceService(sql, mongo, redis, {
   heartbeatIntervalSec: config.heartbeatIntervalSec,
   settings: config.agentSettings,
   companyDomains: config.companyDomains,
   monitor: monitorStore,
   onHostEvents: (ctx, deviceRef, events) => alerts?.onHostEvents(ctx, deviceRef, events) ?? Promise.resolve(),
-  onAgentEvents: (ctx, deviceRef, events) => alerts?.onAgentEvents(ctx, deviceRef, events) ?? Promise.resolve(),
+  // 兩者各自容錯(內部只記 warn),一邊失敗不影響另一邊
+  onAgentEvents: async (ctx, deviceRef, events) => {
+    await Promise.allSettled([alerts?.onAgentEvents(ctx, deviceRef, events), releases?.onAgentUpgradeEvents(ctx, deviceRef, events)]);
+  },
+  upgrades: config.releasesDir ? { onWatchdogReport: (ctx, device, req) => releases!.onWatchdogReport(ctx, device, req) } : undefined,
 });
 alerts = new AlertService(monitorStore, (deviceId) => service.lookup(deviceId), config.alertThresholds);
-// 指令派送(P4):SQL 與裝置共用連線池,推送經 DeviceService 的 WebSocket 連線表
+if (config.releasesDir)
+  releases = new ReleaseService(
+    new SqlReleaseStore(() => sql.connection()),
+    new ReleaseFiles(config.releasesDir),
+    monitorStore,
+    sql,
+    (deviceId) => service.lookup(deviceId),
+    { maxConcurrent: config.releaseMaxConcurrent },
+  );
+// 指令派送(P4):SQL 與裝置共用連線池,推送經 DeviceService 的 WebSocket 連線表;agent.upgrade 建立前後交給 ReleaseService(P6)
 const commandStore = new SqlCommandStore(() => sql.connection());
-const commands = new CommandDispatcher(commandStore, sql, service);
+const releaseSvc = releases;
+const commands = new CommandDispatcher(commandStore, sql, service, {
+  kindHooks: releaseSvc
+    ? { 'agent.upgrade': { check: (ctx, ref, params) => releaseSvc.checkUpgradeCommand(ctx, ref, params), apply: (ctx, ref, params, actor) => releaseSvc.applyUpgradeCommand(ctx, ref, params, actor) } }
+    : {},
+});
 // 指令附檔(logs.collect 日誌,P4-2):檔案在 COMMAND_FILES_DIR,索引在 ita.command_file
 const files = new CommandFileService(commandStore, config.commandFilesDir, { keepDays: config.commandFileKeepDays });
 
@@ -67,8 +90,8 @@ const deps = (): Promise<DepStatus[]> =>
     }),
   );
 
-const mgmt = await buildMgmtApp({ config, service, commands, files, alerts, readiness, deps });
-const agent = await buildAgentApp({ config, service, commands, files, alerts, monitor: config.agentMonitor, deps });
+const mgmt = await buildMgmtApp({ config, service, commands, files, alerts, releases, readiness, deps });
+const agent = await buildAgentApp({ config, service, commands, files, alerts, releases, monitor: config.agentMonitor, deps });
 
 await mgmt.listen({ host: config.host, port: config.port });
 await agent.listen({ host: config.host, port: config.agentPort });
@@ -84,6 +107,7 @@ mgmt.log.info(
     companyDomains: config.companyDomains.size,
     monitor: config.monitor.enabled,
     agentMonitor: config.agentMonitor.enabled,
+    releases: !!config.releasesDir,
   },
   '服務已啟動',
 );

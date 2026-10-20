@@ -74,6 +74,23 @@ export const COMMAND_KINDS: readonly CommandKind[] = [
       },
     },
   },
+  // 升級(PLATFORM-PLAN P6;P6-UPGRADE-DESIGN §2.3):交給 Watchdog 立即上報取得目標;指定 version = 這台強制升級 / 降版(建立時由 ReleaseService 檢查與記錄)
+  {
+    kind: 'agent.upgrade',
+    level: 'admin',
+    expiresSec: 3600,
+    timeoutSec: 300,
+    maxPending: 1,
+    params: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['component'],
+      properties: {
+        component: { type: 'string', enum: ['agent', 'watchdog'] },
+        version: { type: 'string', pattern: '^\\d{1,4}\\.\\d{1,4}\\.\\d{1,4}(?:-[0-9A-Za-z.-]{1,20})?$' },
+      },
+    },
+  },
 ];
 
 /** 建立指令時可覆寫的有效期限範圍(秒) */

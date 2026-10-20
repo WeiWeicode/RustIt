@@ -49,7 +49,9 @@ export type DeviceEventType =
   /** IT 合併:目標裝置記一筆(detail 帶來源 deviceId 與舊 DN;P3、A1) */
   | 'merged'
   /** 所屬公司變更(自動判定或 IT 指定;E6) */
-  | 'company_changed';
+  | 'company_changed'
+  /** 開始下載版本檔(從第 0 位元組起的請求;P6) */
+  | 'release_download';
 
 /** Agent 回報的端點事件(event.schema.json;PLATFORM-PLAN §4.2) */
 export interface AgentEvent {
@@ -465,7 +467,19 @@ export interface DeviceHealthRecord extends HealthSample {
   agentRestarts24h: number | null;
 }
 
-export type AlertRule = 'offline_long' | 'disk_low' | 'hardware_changed' | 'agent_restarts' | 'cert_expiring' | 'clock_skew' | 'agent_tampered' | 'agent_silent';
+export type AlertRule =
+  | 'offline_long'
+  | 'disk_low'
+  | 'hardware_changed'
+  | 'agent_restarts'
+  | 'cert_expiring'
+  | 'clock_skew'
+  | 'agent_tampered'
+  | 'agent_silent'
+  /** P6:同一目標版本升級失敗 2 次或還原失敗 */
+  | 'upgrade_failed'
+  /** P6:發佈環目標設定超過 24 小時仍未到目標版本 */
+  | 'version_mismatch';
 export type AlertSeverity = 'warn' | 'critical';
 export type AlertState = 'open' | 'resolved';
 
@@ -559,4 +573,115 @@ export interface MonitorStore {
   listAlerts(filter: AlertFilter): Promise<AlertRecord[]>;
   /** 各裝置未結束告警數 */
   openAlertCounts(deviceRefs: number[]): Promise<Map<number, number>>;
+}
+
+// ---------- 升級(PLATFORM-PLAN P6 §4.5;P6-UPGRADE-DESIGN;migration 0007) ----------
+
+/** 這一階段可升級的元件(desktop 到 P8,資料表先允許) */
+export type ReleaseComponent = 'agent' | 'watchdog';
+export type ReleaseStatus = 'draft' | 'published' | 'revoked';
+export type Ring = 'pilot' | 'it' | 'all';
+export type UpgradeState = 'pending' | 'downloading' | 'verifying' | 'installing' | 'succeeded' | 'failed' | 'rolled_back';
+
+export interface ReleaseRecord {
+  id: number;
+  releaseId: string;
+  component: ReleaseComponent;
+  version: string;
+  fileName: string;
+  sha256: string;
+  sizeBytes: number;
+  signerThumbprints: string[];
+  status: ReleaseStatus;
+  notes: string | null;
+  createdByEmp: string;
+  createdByName: string | null;
+  createdAt: Date;
+  publishedByEmp: string | null;
+  publishedAt: Date | null;
+  revokedByEmp: string | null;
+  revokedAt: Date | null;
+}
+
+export interface NewRelease {
+  component: ReleaseComponent;
+  version: string;
+  fileName: string;
+  sha256: string;
+  sizeBytes: number;
+  signerThumbprints: string[];
+  notes: string | null;
+  actor: Actor;
+  at: Date;
+  requestId: string;
+}
+
+export interface RingRecord {
+  ring: Ring;
+  component: ReleaseComponent;
+  targetVersion: string | null;
+  /** 目前目標開始生效的時間(版本變更時才更新) */
+  targetSetAt: Date | null;
+  updatedByEmp: string | null;
+  updatedByName: string | null;
+  updatedAt: Date;
+}
+
+/** ita.device_upgrade 一列(裝置 × 元件) */
+export interface DeviceUpgradeRecord {
+  deviceRef: number;
+  component: ReleaseComponent;
+  targetVersion: string | null;
+  fromVersion: string | null;
+  state: UpgradeState;
+  attempts: number;
+  errorCode: string | null;
+  errorMessage: string | null;
+  forcedVersion: string | null;
+  forcedByEmp: string | null;
+  forcedAt: Date | null;
+  startedAt: Date | null;
+  updatedAt: Date;
+}
+
+export type UpgradePatch = Omit<DeviceUpgradeRecord, 'deviceRef' | 'component' | 'updatedAt'>;
+
+/** 版本選擇與告警評估用:一台 active、未合併的裝置 */
+export interface UpgradeTargetRow {
+  deviceRef: number;
+  deviceId: string;
+  company: string | null;
+  ring: Ring;
+  lastSeenAt: Date;
+  agentVersion: string | null;
+  watchdogVersion: string | null;
+  watchdogReportAt: Date | null;
+  upgrades: DeviceUpgradeRecord[];
+  /** 目前未結束的升級類告警(upgrade_failed / version_mismatch) */
+  openRules: AlertRule[];
+}
+
+export interface ReleaseStore {
+  listReleases(f: { component?: ReleaseComponent; status?: ReleaseStatus }): Promise<ReleaseRecord[]>;
+  getRelease(releaseId: string): Promise<ReleaseRecord | null>;
+  findRelease(component: ReleaseComponent, version: string): Promise<ReleaseRecord | null>;
+  /** 同一元件同一版本已存在丟 AppError 409 ITA_RELEASE_EXISTS */
+  addRelease(r: NewRelease): Promise<ReleaseRecord>;
+  /**
+   * 條件更新狀態(from 之內才更新);revoked 時同一交易把以此版本為目標的環改為 NULL、清除指定此版本的強制升級。
+   * 回傳是否更新與被清除目標的環
+   */
+  setReleaseStatus(releaseId: string, from: ReleaseStatus[], to: ReleaseStatus, actor: Actor, at: Date, requestId: string): Promise<{ ok: boolean; clearedRings: Ring[] }>;
+  listRings(): Promise<RingRecord[]>;
+  /** 版本不變時只更新操作人,不更新 target_set_at */
+  setRingTarget(ring: Ring, component: ReleaseComponent, version: string | null, actor: Actor, at: Date, requestId: string): Promise<void>;
+  setDeviceRing(deviceRef: number, ring: Ring): Promise<void>;
+  deviceRing(deviceRef: number): Promise<Ring | null>;
+  deviceUpgrades(deviceRef: number): Promise<DeviceUpgradeRecord[]>;
+  /** upsert(裝置 × 元件) */
+  saveUpgrade(deviceRef: number, component: ReleaseComponent, patch: UpgradePatch, at: Date): Promise<void>;
+  /** 有目標版本、pending 且 pendingSince 之後更新,或 downloading ~ installing 且 activeSince 之後更新的台數(同時升級上限) */
+  activeUpgrades(pendingSince: Date, activeSince: Date): Promise<number>;
+  /** active、未合併的裝置(companies:資料範圍,undefined = 全部;deviceRef:只查這一台) */
+  upgradeTargets(companies?: string[], deviceRef?: number): Promise<UpgradeTargetRow[]>;
 }

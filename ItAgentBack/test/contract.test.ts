@@ -41,7 +41,9 @@ describe('資料契約範例', () => {
       'pipe-status.sample.json',
       'sync-response.sample.json',
       'sync.sample.json',
+      'watchdog-report-response-target.sample.json',
       'watchdog-report-response.sample.json',
+      'watchdog-report-upgrade.sample.json',
       'watchdog-report.sample.json',
       'ws-command-log-level.sample.json',
       'ws-command-update-ack.sample.json',
@@ -92,6 +94,23 @@ describe('資料契約範例', () => {
     const st = example<Record<string, any>>('pipe-status.sample.json');
     const { pid: _p, ...noPid } = st.body;
     assert.equal(pipe({ ...st, body: noPid }), false);
+  });
+
+  it('P6:Watchdog 上報帶 upgrade、回應 target;升級事件依類型檢查 data', () => {
+    check(CONTRACT_IDS.watchdog, 'watchdog-report-upgrade.sample.json');
+    check(`${CONTRACT_IDS.watchdog}#/definitions/WatchdogReportResponse`, 'watchdog-report-response-target.sample.json');
+    const resp = ajv.getSchema(`${CONTRACT_IDS.watchdog}#/definitions/WatchdogReportResponse`)!;
+    const t = example<Record<string, any>>('watchdog-report-response-target.sample.json');
+    assert.equal(resp({ ...t, target: { ...t.target, agent: { ...t.target.agent, url: '/agent/v1/releases/agent/../../etc/passwd' } } }), false, 'url 不可含 ..');
+    assert.equal(resp({ ...t, target: { ...t.target, agent: { ...t.target.agent, url: '/agent/v1/releases/agent/../x.exe' } } }), false, '版本段不可為 ..');
+    assert.equal(resp({ ...t, target: { ...t.target, agent: { ...t.target.agent, url: '/agent/v1/releases/agent/0.7.1/..' } } }), false, '檔名不可為 ..');
+    assert.equal(resp({ ...t, target: { ...t.target, agent: { ...t.target.agent, sha256: 'XYZ' } } }), false);
+    assert.equal(resp({ ...t, target: { ...t.target, agent: { ...t.target.agent, signer_thumbprints: [] } } }), false);
+    const wd = ajv.getSchema(CONTRACT_IDS.watchdog)!;
+    const up = example<Record<string, any>>('watchdog-report-upgrade.sample.json');
+    assert.equal(wd({ ...up, upgrade: { ...up.upgrade, state: 'exploded' } }), false);
+    assert.equal(wd({ ...up, upgrade: { ...up.upgrade, error_code: 'NOPE' } }), false);
+    assert.equal(wd({ ...up, events: [{ ...up.events[0], data: { component: 'agent' } }] }), false, 'upgrade_failed 缺 to');
   });
 
   it('sync 請求與回應(P2)', () => {

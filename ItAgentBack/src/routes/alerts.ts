@@ -11,7 +11,18 @@ import type { AlertService } from '../services/alert-service.js';
 import type { Actor, AlertRule, AlertSeverity, AlertState } from '../stores/types.js';
 import { mgmtCtx } from './mgmt-ctx.js';
 
-const RULES = ['offline_long', 'disk_low', 'hardware_changed', 'agent_restarts', 'cert_expiring', 'clock_skew', 'agent_tampered', 'agent_silent'] as const;
+const RULES = [
+  'offline_long',
+  'disk_low',
+  'hardware_changed',
+  'agent_restarts',
+  'cert_expiring',
+  'clock_skew',
+  'agent_tampered',
+  'agent_silent',
+  'upgrade_failed',
+  'version_mismatch',
+] as const;
 const SEVERITIES = ['warn', 'critical'] as const;
 const STATES = ['open', 'resolved'] as const;
 const strOrNull = { type: ['string', 'null'] } as const;
@@ -27,7 +38,7 @@ export const alertSchema = {
       type: 'string',
       enum: RULES,
       description:
-        'offline_long 離線過久、disk_low 磁碟剩餘不足、hardware_changed 硬體變更、agent_restarts Agent 非正常重啟過多、cert_expiring 裝置憑證即將到期、clock_skew 時鐘偏差、agent_tampered Agent / Watchdog 服務被停止或改設定、agent_silent 電腦開著但 Agent 沒有回應',
+        'offline_long 離線過久、disk_low 磁碟剩餘不足、hardware_changed 硬體變更、agent_restarts Agent 非正常重啟過多、cert_expiring 裝置憑證即將到期、clock_skew 時鐘偏差、agent_tampered Agent / Watchdog 服務被停止或改設定、agent_silent 電腦開著但 Agent 沒有回應、upgrade_failed 升級失敗 2 次或還原失敗、version_mismatch 發佈環目標設定超過 24 小時仍未到目標版本',
     },
     severity: { type: 'string', enum: SEVERITIES },
     state: { type: 'string', enum: STATES },

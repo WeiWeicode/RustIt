@@ -1,6 +1,7 @@
 /**
  * 指令 API(ENDPOINT-AGENT-GUIDE §8.2–§8.3;PLATFORM-PLAN P4 §4.4、§5.3):對外 /api/endpoint/*,權限由 BFF 依 x-permission 檢查。
- *   - 依風險拆路徑:basic-commands 只接受 basic 類型(否則 400 ENDPOINT_COMMAND_LEVEL_MISMATCH);admin-commands 在 P6 有第一個 admin 類型時才加
+ *   - 依風險拆路徑:basic-commands 只接受 basic 類型、admin-commands 只接受 admin 類型(否則 400 ENDPOINT_COMMAND_LEVEL_MISMATCH);
+ *     admin 第一個類型 agent.upgrade(P6)。admin 批次等派送的第二人核可(PLATFORM-PLAN B1)一起做,先只開單台
  *   - POST 支援 Idempotency-Key(同一工號 + 同一 key 回傳既有的那筆);建立指令設 x-audit-level: meta,不設 x-cache-ttl
  *   - 操作人(工號、姓名)取自內部 Token,寫入稽核(§8.5)
  *   - 指令附檔(logs.collect 日誌,P4-2):GET /commands/{id} 回應帶 files;下載 GET /commands/{id}/files/{fileId}(x-audit-level: meta)
@@ -17,6 +18,7 @@ import { mgmtCtx } from './mgmt-ctx.js';
 
 const STATES = ['queued', 'sent', 'acked', 'running', 'succeeded', 'failed', 'canceled', 'expired'] as const;
 const BASIC_KINDS = COMMAND_KINDS.filter((k) => k.level === 'basic').map((k) => k.kind);
+const ADMIN_KINDS = COMMAND_KINDS.filter((k) => k.level === 'admin').map((k) => k.kind);
 const uuid = { type: 'string', format: 'uuid' } as const;
 const strOrNull = { type: ['string', 'null'] } as const;
 const dateOrNull = { type: ['string', 'null'], format: 'date-time' } as const;
@@ -68,7 +70,11 @@ const createBody = {
   type: 'object',
   required: ['kind'],
   properties: {
-    kind: { type: 'string', maxLength: 64, description: `指令類型(docs/contracts/command-kinds.md);basic:${BASIC_KINDS.join('、')}` },
+    kind: {
+      type: 'string',
+      maxLength: 64,
+      description: `指令類型(docs/contracts/command-kinds.md);basic:${BASIC_KINDS.join('、')};admin:${ADMIN_KINDS.join('、')}`,
+    },
     params: { type: 'object', additionalProperties: true, description: '依類型定義' },
     expiresInSec: { type: 'integer', minimum: EXPIRES_MIN_SEC, maximum: EXPIRES_MAX_SEC, description: '有效期限(秒);省略用類型預設(1 小時)' },
   },
@@ -144,6 +150,38 @@ export function commandRoutes(commands: CommandDispatcher, files?: CommandFileSe
       },
       async (req, reply) => {
         const view = await commands.create(ctx(req), who(req), 'basic', req.params.deviceId.toLowerCase(), { ...req.body, idempotencyKey: idemKey(req) });
+        return reply.status(202).send(view);
+      },
+    );
+
+    app.post<{ Params: { deviceId: string }; Body: CreateBody }>(
+      '/v1/devices/:deviceId/admin-commands',
+      {
+        schema: {
+          operationId: 'endpoint.command.admin.create',
+          summary: '建立管理指令',
+          description:
+            '對一台電腦建立會影響使用者或系統的指令(目前:agent.upgrade 立即檢查升級或指定版本)。流程同一般指令,回 202 與 commandId。類型不屬於 admin 回 400 ENDPOINT_COMMAND_LEVEL_MISMATCH;agent.upgrade 指定的版本未登錄回 404 ITA_RELEASE_NOT_FOUND、未發佈或已撤回回 409。',
+          tags: ['端點指令'],
+          'x-permission': 'endpoint.command.admin',
+          'x-audit-level': 'meta',
+          'x-gherkin': [
+            '場景: 要求電腦立即檢查 Agent 升級',
+            '  假如 使用者擁有 endpoint.command.admin',
+            '  當 呼叫 POST /api/endpoint/devices/{deviceId}/admin-commands,kind 為 "agent.upgrade"、params 為 {"component":"agent"}',
+            '  那麼 回應 202',
+            '場景: 從管理指令路徑送出一般指令',
+            '  當 呼叫 POST /api/endpoint/devices/{deviceId}/admin-commands,kind 為 "inventory.collect"',
+            '  那麼 回應 400',
+          ].join('\n'),
+          params: { type: 'object', properties: { deviceId: uuid }, required: ['deviceId'] },
+          headers: idemHeaders,
+          body: createBody,
+          response: { 202: commandSchema },
+        },
+      },
+      async (req, reply) => {
+        const view = await commands.create(ctx(req), who(req), 'admin', req.params.deviceId.toLowerCase(), { ...req.body, idempotencyKey: idemKey(req) });
         return reply.status(202).send(view);
       },
     );

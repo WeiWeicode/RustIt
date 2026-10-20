@@ -125,13 +125,48 @@ export interface WatchdogReportRequest {
   agent_restarts_24h?: number;
   cert_not_after?: string;
   events?: EventsRequest['events'];
+  /** 進行中或剛結束的升級(P6) */
+  upgrade?: {
+    component: 'agent' | 'watchdog';
+    target_version: string;
+    from_version?: string;
+    state: 'downloading' | 'verifying' | 'installing' | 'succeeded' | 'failed' | 'rolled_back';
+    attempts?: number;
+    error_code?:
+      | 'DOWNLOAD_FAILED'
+      | 'HASH_MISMATCH'
+      | 'SIGNATURE_INVALID'
+      | 'SIGNER_NOT_TRUSTED'
+      | 'PREPARE_TIMEOUT'
+      | 'STOP_TIMEOUT'
+      | 'REPLACE_FAILED'
+      | 'HEALTH_CHECK_FAILED'
+      | 'ROLLBACK_FAILED'
+      | 'DISK_FULL';
+    error_message?: string;
+  };
+}
+
+/** 一個元件的目標版本(watchdog.schema.json UpgradeTarget;P6) */
+export interface UpgradeTarget {
+  version: string;
+  url: string;
+  sha256: string;
+  size_bytes: number;
+  signer_thumbprints: string[];
+}
+
+export interface WatchdogTargets {
+  agent: UpgradeTarget | null;
+  watchdog: UpgradeTarget | null;
 }
 
 export interface WatchdogReportResponse {
   server_time: string;
   accepted: string[];
   report_interval_sec: number;
-  target: null;
+  /** 未啟用升級(RELEASES_DIR 未設定)時為 null */
+  target: WatchdogTargets | null;
 }
 
 export interface EventsResponse {

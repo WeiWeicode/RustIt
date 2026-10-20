@@ -2,6 +2,7 @@
 
 > 草案 2026-10-20,分支 `docs/p6-upgrade-design`(從 develop `56d2263` 開)。依據:PLATFORM-PLAN §4.5、§4.9、§5、§6、§7、§8 P6 列、§8 B1 / B2;指南 ENDPOINT-AGENT-GUIDE §7.1–§7.4、§8.3、§10.2 E4;ADR 0002、0003;`P5-MONITOR-DESIGN.md`(Watchdog、本機管道、`watchdog/report`)。
 > **2026-10-20 需求方確認**:§9 全部照建議(測試簽章憑證、本機信任清單 P6 就做、測試區先用主機 2 本機目錄、`pilot` 未滿 24 小時回 409 + `force`、改環與版本需 `endpoint.software.manage` 且全部公司角色、執行中指令等最多 60 秒、版本號 Agent 0.7.0 / Watchdog 0.2.0、Windows Runner 在 P6-1~3 驗收後、migration 0007 先給需求方看再由 Claude 套用)。
+> **進度(2026-10-20)**:P6-1 完成實作(分支 `feature/p6-1-release`):migration 0007、管理 API、下載 API、`watchdog/report` 的 `target` / `upgrade`、`agent.upgrade` 與 admin-commands 路由、升級告警;`npm test` 178/178、`test:int` 12/12(0007 已套用整合測試庫 `_poc_test`);審查後調整見 §8.1。**待辦**:migration 0007 套用 `giganexus_It_Agent_test`(需求方看過後)、合併 develop 部署測試區、Gateway OpenAPI 草稿批次發佈。
 > 設計當時的現況:Agent 0.6.0、Watchdog 0.1.0(P5-2,VM `RUSTIT-P34` 驗收通過);`watchdog/report` 回應已有 `target` 欄位(一律 `null`);管道 `prepare_shutdown` 只定義、回 `unsupported`;`ita.device.agent_version`、`ita.device_health.watchdog_version` 已有;**程式碼簽章憑證未簽發(ADR 0003 建議中)、NAS `RustIT\` 未掛載、主機 2 沒有 Windows Runner**。
 
 ## 0. 分批
@@ -188,6 +189,26 @@ Runner 建好前(P6-1~3 開發期):開發機 `build-agent-msi.ps1` 建置 + 測�
 - **ItAgentBack**:契約測試(`watchdog-report` 加 `upgrade`、回應 `target`);`release-service` 單元測試(環 → 目標、`draft` 只限 pilot、強制版本、失敗 2 次、並行上限、撤回連動、路徑穿越);下載 API(Range、非指派版本 404、停用 403、檔案被換掉);`test:int` SQL store(`giganexus_It_Agent_poc_test`)。
 - **Watchdog / Agent**:升級狀態機以假實作測試(成功、下載中斷續傳、雜湊不符、簽章不符、prepare 逾時、啟動失敗還原、2 分鐘不正常還原、還原失敗、Watchdog 中途重啟收尾、同版本失敗 2 次);`authenticode` 以測試簽章檔與未簽章檔測試(只在 Windows 跑)。
 - **測試區 VM**(`RUSTIT-P34`;先建檢查點「P6 前(0.6.0)」):MSI 0.7.0 首次升級 → 完成標準三項 + Watchdog 0.2.0 → 0.2.1 + 降版 0.7.1 → 0.7.0 + 升級中重開機。
+
+## 8.1 P6-1 實作與審查後的調整(code-reviewer、security-auditor 子代理,2026-10-20)
+
+- **admin-commands 路由**:P4 只開了 basic;P6-1 加 `POST /devices/{id}/admin-commands`(`endpoint.command.admin`,只單台;admin 批次等 B1 第二人核可一起做)。
+- **強制版本只能是 published**(資安 M1):原設計「pilot 裝置可用 draft」會讓只有 `command.admin` 的人(把電腦放進 pilot 再下 `agent.upgrade`)繞過 §9-5;改為 draft 只能經 pilot 環目標下發,且**把電腦放進或移出 pilot 需全部公司角色**。其他環照 `command.admin` + 資料範圍。強制指定舊的 published 版本(單台降版)仍允許,屬 `agent.upgrade` 的用途。
+- **舊版 Watchdog 不下發、不佔名額**(資安 M2):`watchdog_version` < 0.2.0 時 `target` 一律 null。名額改為:`pending`(已下發未開始)只佔 10 分鐘,`downloading` ~ `installing` 佔 30 分鐘;同時升級上限是**軟上限**(並行上報之間不加鎖,可能略為超過)。
+- **失敗狀態不被覆寫**(審查必修 1):同一目標失敗 1 次時照樣下發讓 Watchdog 重試,但不把紀錄改回 `pending`(畫面看得到錯誤、重送同一失敗不重複計次);`ROLLBACK_FAILED` 一次就停止下發、告警不會被掃描關掉。
+- **自報成功要核對版本**(資安 L1):`upgrade.state = succeeded` 只在回報的目前版本等於目標時採用;另一元件仍停在失敗時不關 `upgrade_failed`。
+- **agent.upgrade 在建立指令前套用**:檢查通過後先記強制版本 / 重設失敗次數,再寫指令(套用失敗就不建立指令,不會卡住 `maxPending`);沒有紀錄又沒指定版本時不寫任何列。
+- **下載**:416 帶 `Content-Range: bytes */大小`;`bytes=a-b` 而 a > b 時忽略 Range(RFC 9110);`release_download` 稽核同一台同一版本每小時一筆;SHA-256 同時多個請求共用一次計算,快取鍵加 ctime 與 inode。主機端複驗只是第二道防線,**端點必須自己驗**(§8.2)。
+- **其他**:`saveUpgrade` 加 `UPDLOCK, HOLDLOCK`(並行寫入不撞主鍵);裝置升級狀態只查單台;`onAgentEvents` 的告警與升級各自容錯;`PUT release-rings` 可設 `null`。
+- **回滾也需 force**:`it` / `all` 緊急改回舊版時,該舊版通常不是 pilot 目標滿 24 小時,要帶 `force: true`(寫入稽核)。寫進 RUNBOOK。
+
+### 8.2 P6-2 Watchdog 必須遵守(資安 L3、L5)
+
+- 下載檔案以 `target.sha256` 驗**整個組好的檔案**,不採信回應標頭 `x-file-sha256`;`size_bytes` 自設上限 200 MB,下載前檢查磁碟空間。
+- `target.version` 必須與 `url` 的版本段一致,下載後檔案的 FileVersion 也要一致。
+- 簽章者:主機下發的 `signer_thumbprints` **與**本機信任清單取交集,主機清單不能單獨放行(§9-2)。
+- 只用 `agent.toml` 的 Gateway 位址與同一組 mTLS 連線下載,不跟隨重新導向。
+- 告警 `detail` 含端點回報的字串(`errorMessage` 等):GigaItApp 一律以文字顯示(P6-5,與 P5 相同)。
 
 ## 9. 要你決定的事
 
