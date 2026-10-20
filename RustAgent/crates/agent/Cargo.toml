@@ -1,8 +1,8 @@
 [package]
 name = "rustit-agent"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
-description = "GigaNexus 端點 Agent:蒐集資產 → HTTPS 回報、一條 WebSocket 心跳;本機加密暫存與離線補傳;固定類型指令;心跳附健康摘要;本機管道與看守 Watchdog;前景或 Windows 服務執行(RustIt PLATFORM-PLAN P1、P2、P4、P5)"
+description = "GigaNexus 端點 Agent:蒐集資產 → HTTPS 回報、一條 WebSocket 心跳;本機加密暫存與離線補傳;固定類型指令;心跳附健康摘要;本機管道與看守 Watchdog;升級時配合 Watchdog 停止(prepare_shutdown、agent.upgrade);前景或 Windows 服務執行(RustIt PLATFORM-PLAN P1、P2、P4、P5、P6)"
 
 [dependencies]
 rustit-collector = { path = "../collector" }
@@ -23,6 +23,16 @@ aes-gcm = "0.10"
 uuid = { version = "1.28.0", features = ["v4"] }
 # 指令 logs.collect:日誌壓成 zip 上傳(P4-2,需求方 2026-10-15 同意);只用 deflate(純 Rust zlib-rs),不含 zopfli 與其他壓縮法
 zip = { version = "9.0.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[features]
+# 測試用壞版本(P6-UPGRADE-DESIGN §0 完成標準「故意放壞的版本 → 自動還原」;只用於 VM 驗收,不可發佈到 it / all 環)
+# broken-exit:啟動即結束;broken-no-ws:不連 WebSocket(管道正常)
+broken-exit = []
+broken-no-ws = []
+
+[build-dependencies]
+# exe 版本資源(ProductVersion):Watchdog 升級前比對下載檔的版本(P6-UPGRADE-DESIGN §8.2);已在 Cargo.lock(Tauri 用),不另下載
+embed-resource = "3.0.11"
 
 [dev-dependencies]
 # 契約測試:以 RustIt/docs/contracts 的 JSON Schema 驗證 Agent 送出的 JSON(AGENT.md §7.3)

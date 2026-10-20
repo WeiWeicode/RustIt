@@ -4,7 +4,8 @@
 
 use rustit_common::scm::{ExitKind, StartType, SvcInfo, SvcState};
 use rustit_watchdog::monitor::AgentStatus;
-use rustit_watchdog::report::{EventOut, ReportResponse, Snapshot, build};
+use rustit_watchdog::report::{EventOut, ReportResponse, Snapshot, agent_target, build};
+use rustit_watchdog::upgrade::UpgradeRecord;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
@@ -86,17 +87,78 @@ fn report_matches_schema() {
             data: json!({ "service_missing": true }),
         },
     ];
-    let req =
-        serde_json::to_value(build(&snap, events, Some("2027-10-14T08:00:00Z".into()))).unwrap();
+    let req = serde_json::to_value(build(
+        &snap,
+        events,
+        Some("2027-10-14T08:00:00Z".into()),
+        None,
+    ))
+    .unwrap();
     assert_valid(&req);
     // Agent 不存在時也要符合
     let missing = Snapshot {
         info: Some(SvcInfo::missing()),
         ..Default::default()
     };
-    assert_valid(&serde_json::to_value(build(&missing, Vec::new(), None)).unwrap());
+    assert_valid(&serde_json::to_value(build(&missing, Vec::new(), None, None)).unwrap());
     // 範例本身
     assert_valid(&read("examples/watchdog-report.sample.json"));
+    assert_valid(&read("examples/watchdog-report-upgrade.sample.json"));
+}
+
+/// P6-2:升級進度與 upgrade_* 事件符合契約
+#[test]
+fn upgrade_report_matches_schema() {
+    let rec = UpgradeRecord {
+        component: "agent".into(),
+        target_version: "0.7.2-broken".into(),
+        target_sha256: "ab".repeat(32),
+        from_version: Some("0.7.0".into()),
+        state: "rolled_back".into(),
+        attempts: 1,
+        error_code: Some("HEALTH_CHECK_FAILED".into()),
+        error_message: Some(
+            "新版 2 分鐘內 get_status 不正常(WebSocket 未連線),已還原 0.7.0".into(),
+        ),
+        started_at: "2026-10-21T02:07:09.000Z".into(),
+    };
+    let events = vec![
+        EventOut {
+            event_id: "5b1e7c2d-3f4a-4b5c-8d6e-7f8091a2b3c1".into(),
+            kind: "upgrade_started".into(),
+            occurred_at: "2026-10-21T02:07:09.000Z".into(),
+            data: json!({ "component": "agent", "from": "0.7.0", "to": "0.7.2-broken" }),
+        },
+        EventOut {
+            event_id: "5b1e7c2d-3f4a-4b5c-8d6e-7f8091a2b3c4".into(),
+            kind: "upgrade_failed".into(),
+            occurred_at: "2026-10-21T02:09:40.000Z".into(),
+            data: json!({ "component": "agent", "from": "0.7.0", "to": "0.7.2-broken", "duration_ms": 151000,
+                          "error_code": "HEALTH_CHECK_FAILED", "error_message": "x", "rolled_back": true }),
+        },
+    ];
+    let req = build(&Snapshot::default(), events, None, Some(rec.progress()));
+    assert_valid(&serde_json::to_value(req).unwrap());
+}
+
+#[test]
+fn target_example_parses() {
+    let res: ReportResponse =
+        serde_json::from_value(read("examples/watchdog-report-response-target.sample.json"))
+            .unwrap();
+    let t = agent_target(&res).expect("target.agent");
+    assert_eq!(t.version, "0.7.1");
+    assert_eq!(t.url, "/agent/v1/releases/agent/0.7.1/rustit-agent.exe");
+    assert_eq!(t.signer_thumbprints.len(), 1);
+    // 沒有 target / target.agent 為 null / 格式不符:None,且整個回應仍可解析
+    let none: ReportResponse =
+        serde_json::from_value(read("examples/watchdog-report-response.sample.json")).unwrap();
+    assert!(agent_target(&none).is_none());
+    let bad: ReportResponse = serde_json::from_value(json!({
+        "server_time": "2026-10-21T02:00:00Z", "accepted": [], "target": { "agent": { "version": 1 }, "watchdog": null }
+    }))
+    .unwrap();
+    assert!(agent_target(&bad).is_none());
 }
 
 #[test]

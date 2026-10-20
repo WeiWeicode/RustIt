@@ -121,6 +121,15 @@ pub fn classify(status: u16, body: &str, retry_after: Option<&str>) -> SendError
     }
 }
 
+/// [`Transport::download`] 的結果
+#[derive(Debug, PartialEq, Eq)]
+pub enum Download {
+    /// 下載結束,檔案總長(含續傳前已有的部分)
+    Done(u64),
+    /// 416:續傳位置超出檔案(續傳檔有問題,刪除後重來)
+    RangeNotSatisfiable,
+}
+
 pub struct Transport {
     http: reqwest::Client,
     server: Url,
@@ -143,7 +152,9 @@ impl Transport {
             .user_agent(user_agent)
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(60))
-            .pool_idle_timeout(Duration::from_secs(90));
+            .pool_idle_timeout(Duration::from_secs(90))
+            // 只連 agent.toml 的 Gateway 位址,不跟隨重新導向(升級檔下載,P6-UPGRADE-DESIGN §8.2;其他 API 也沒有重新導向)
+            .redirect(reqwest::redirect::Policy::none());
         if let Some(cfg) = &tls {
             builder = builder.tls_backend_preconfigured(ClientConfig::clone(cfg));
         }
@@ -238,6 +249,91 @@ impl Transport {
             .await
             .map_err(|e| SendError::Retry(format!("連線失敗:{}", error_chain(&e))))?;
         Ok(res.status().as_u16())
+    }
+
+    /// 下載 `GET <server><path>` 到 `file`(P6-2 升級檔,支援續傳):`offset > 0` 時帶 `Range: bytes=<offset>-`。
+    /// - 206 且 `Content-Range` 從 `offset` 開始:接在後面寫;200(主機不支援 Range):從頭寫
+    /// - 416:回 [`Download::RangeNotSatisfiable`](呼叫端刪除續傳檔重來)
+    /// - 檔案總長超過 `limit` 立即中止(不信任主機宣告的大小);回應標頭的雜湊不採信,由呼叫端以目標 SHA-256 驗整個檔案
+    pub async fn download(
+        &self,
+        path: &str,
+        file: &mut std::fs::File,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Download, SendError> {
+        use std::io::{Seek, SeekFrom, Write};
+        let url = self
+            .server
+            .join(path)
+            .map_err(|e| SendError::Rejected(format!("路徑錯誤 {path}:{e}")))?;
+        // 慢速網路以每秒 100 KB 估算,至少 60 秒
+        let secs = (limit.saturating_sub(offset) / 100_000).max(60);
+        let mut rb = self.http.get(url).timeout(Duration::from_secs(secs));
+        if offset > 0 {
+            rb = rb.header("range", format!("bytes={offset}-"));
+        }
+        for (k, v) in &self.extra_headers {
+            rb = rb.header(*k, v);
+        }
+        let mut res = rb
+            .send()
+            .await
+            .map_err(|e| SendError::Retry(format!("下載連線失敗:{}", error_chain(&e))))?;
+        let status = res.status().as_u16();
+        let start = match status {
+            200 => 0,
+            206 => {
+                let range = res
+                    .headers()
+                    .get("content-range")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default();
+                if !range.starts_with(&format!("bytes {offset}-")) {
+                    return Err(SendError::Retry(format!(
+                        "下載續傳位置不符(要求 {offset},回應 {range})"
+                    )));
+                }
+                offset
+            }
+            416 => return Ok(Download::RangeNotSatisfiable),
+            _ => {
+                let retry_after = res
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
+                // 錯誤內容最多讀 8 KB(主機回超大錯誤內容也不會吃光記憶體,資安 M4)
+                let mut body = Vec::new();
+                while body.len() < 8192 {
+                    match res.chunk().await {
+                        Ok(Some(c)) => body.extend_from_slice(&c[..c.len().min(8192 - body.len())]),
+                        _ => break,
+                    }
+                }
+                let body = String::from_utf8_lossy(&body);
+                return Err(classify(status, &body, retry_after.as_deref()));
+            }
+        };
+        let io = |e: std::io::Error| SendError::Retry(format!("寫入下載檔失敗:{e}"));
+        file.set_len(start).map_err(io)?;
+        file.seek(SeekFrom::Start(start)).map_err(io)?;
+        let mut total = start;
+        while let Some(chunk) = res
+            .chunk()
+            .await
+            .map_err(|e| SendError::Retry(format!("下載中斷:{}", error_chain(&e))))?
+        {
+            total += chunk.len() as u64;
+            if total > limit {
+                return Err(SendError::Rejected(format!(
+                    "下載內容超過預期大小 {limit} bytes"
+                )));
+            }
+            file.write_all(&chunk).map_err(io)?;
+        }
+        file.flush().map_err(io)?;
+        Ok(Download::Done(total))
     }
 
     /// WebSocket 位址:`<server><path>`,https → wss、http → ws

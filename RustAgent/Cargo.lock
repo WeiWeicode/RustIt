@@ -3465,10 +3465,11 @@ dependencies = [
 
 [[package]]
 name = "rustit-agent"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "aes-gcm",
  "chrono",
+ "embed-resource",
  "env_logger",
  "futures-util",
  "hex",
@@ -3544,16 +3545,19 @@ dependencies = [
 
 [[package]]
 name = "rustit-watchdog"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
+ "embed-resource",
  "env_logger",
+ "hex",
  "jsonschema",
  "log",
  "rusqlite",
  "rustit-common",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "uuid",

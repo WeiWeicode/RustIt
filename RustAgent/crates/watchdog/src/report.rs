@@ -4,6 +4,7 @@
 //! - 事件取本機最舊的 50 筆,主機回 accepted 才刪
 //! - 連不上依一般退避(429 依 Retry-After,停用 / 退役 403 每 10 分鐘)重試,失敗後有新事件也等退避結束;啟動時隨機延遲 0–30 秒
 //! - 上報連線(裝置憑證)建立失敗時每 10 分鐘重試,看守照常
+//! - P6-2:請求帶本機 `upgrade` 表的進度(進行中,或結束後尚未送達);回應的 `target.agent` 交給升級工作([`crate::upgrade`])
 
 use crate::Shared;
 use crate::monitor::{AgentStatus, Monitor};
@@ -99,6 +100,9 @@ pub struct ReportRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cert_not_after: Option<String>,
     pub events: Vec<EventOut>,
+    /// 升級進度(watchdog.schema.json UpgradeProgress);沒有時省略
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upgrade: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -106,6 +110,20 @@ pub struct ReportResponse {
     pub accepted: Vec<String>,
     #[serde(default)]
     pub report_interval_sec: Option<u64>,
+    /// 各元件目標版本;格式不符時只略過這個欄位([`agent_target`]),不影響事件確認
+    #[serde(default)]
+    pub target: Option<Value>,
+}
+
+/// 回應 `target.agent`;null、沒有或格式不符回 None(格式不符記警告)
+pub fn agent_target(res: &ReportResponse) -> Option<crate::upgrade::UpgradeTarget> {
+    let v = res.target.as_ref()?.get("agent")?;
+    if v.is_null() {
+        return None;
+    }
+    serde_json::from_value(v.clone())
+        .map_err(|e| warn!("主機下發的 Agent 目標版本格式錯誤,略過:{e}"))
+        .ok()
 }
 
 /// 由最新狀態組請求;Agent 執行中才帶 status_ok(管道最近一次是否成功)
@@ -113,6 +131,7 @@ pub fn build(
     snap: &Snapshot,
     events: Vec<EventOut>,
     cert_not_after: Option<String>,
+    upgrade: Option<Value>,
 ) -> ReportRequest {
     let info = snap.info.clone().unwrap_or_else(SvcInfo::missing);
     let running = info.state == rustit_common::scm::SvcState::Running;
@@ -144,6 +163,7 @@ pub fn build(
         agent_restarts_24h: snap.restarts_24h,
         cert_not_after,
         events,
+        upgrade,
     }
 }
 
@@ -192,9 +212,27 @@ pub(crate) async fn run(shared: Arc<Shared>, mut shutdown: watch::Receiver<bool>
             })
             .collect();
         let n = out.len();
+        let upgrade = shared
+            .outbox
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .upgrade_to_report(
+                shared
+                    .upgrade_active
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .unwrap_or_else(|e| {
+                warn!("{e}");
+                None
+            });
         let req = {
             let snap = shared.snapshot.lock().unwrap_or_else(|p| p.into_inner());
-            build(&snap, out, cert_not_after(&shared))
+            build(
+                &snap,
+                out,
+                cert_not_after(&shared),
+                upgrade.as_ref().map(|(r, _)| r.progress()),
+            )
         };
         match transport
             .post_json::<_, ReportResponse>(REPORT_PATH, &req)
@@ -202,14 +240,19 @@ pub(crate) async fn run(shared: Arc<Shared>, mut shutdown: watch::Receiver<bool>
         {
             Ok(res) => {
                 backoff.reset();
-                if let Err(e) = shared
-                    .outbox
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .remove(&res.accepted)
                 {
-                    warn!("{e}");
+                    let outbox = shared.outbox.lock().unwrap_or_else(|p| p.into_inner());
+                    if let Err(e) = outbox.remove(&res.accepted) {
+                        warn!("{e}");
+                    }
+                    if let Some((r, rev)) = &upgrade
+                        && let Err(e) = outbox.upgrade_reported(&r.component, *rev)
+                    {
+                        warn!("{e}");
+                    }
                 }
+                // 最新的目標交給升級工作(沒有目標也送,讓它知道主機已不要求升級)
+                let _ = shared.target.send(agent_target(&res));
                 if n > 0 {
                     info!("Watchdog 上報完成:事件 {} 筆", res.accepted.len());
                 } else {
@@ -266,13 +309,13 @@ mod tests {
             probe_error: None,
             restarts_24h: 2,
         };
-        let r = serde_json::to_value(build(&snap, Vec::new(), None)).unwrap();
+        let r = serde_json::to_value(build(&snap, Vec::new(), None, None)).unwrap();
         assert_eq!(r["agent"]["status_ok"], true);
         assert_eq!(r["agent"]["version"], "0.6.0");
         assert_eq!(r["agent_restarts_24h"], 2);
         assert!(r.get("cert_not_after").is_none());
         snap.probe_error = Some("本機管道逾時".into());
-        let r = serde_json::to_value(build(&snap, Vec::new(), None)).unwrap();
+        let r = serde_json::to_value(build(&snap, Vec::new(), None, None)).unwrap();
         assert_eq!(r["agent"]["status_ok"], false);
         assert_eq!(r["agent"]["last_error"], "本機管道逾時");
         assert!(r["agent"].get("version").is_none());
@@ -284,7 +327,7 @@ mod tests {
             start_type: StartType::Disabled,
             exe: None,
         });
-        let r = serde_json::to_value(build(&snap, Vec::new(), None)).unwrap();
+        let r = serde_json::to_value(build(&snap, Vec::new(), None, None)).unwrap();
         assert_eq!(r["agent"]["service_state"], "stopped");
         assert_eq!(r["agent"]["start_type"], "disabled");
         assert!(r["agent"].get("status_ok").is_none());

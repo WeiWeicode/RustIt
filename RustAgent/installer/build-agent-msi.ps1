@@ -4,14 +4,15 @@
 
 .DESCRIPTION
   1. cargo build --release -p rustit-agent -p rustit-watchdog(P5-2 起 MSI 含兩個服務;MSI 版本號跟 Agent)
-  2. 產生 agent.toml(server_url、[tls] ca_file、store_issuer;裝置憑證一律讀 LocalMachine\My)
+  2. 產生 agent.toml(server_url、[tls] ca_file、store_issuer;裝置憑證一律讀 LocalMachine\My;
+     [upgrade] trusted_signers:升級檔簽章者 SHA-1 指紋的本機信任清單,P6-2 起。沒有給 = 端點拒絕任何升級檔)
   3. wix build installer\agent.wxs → dist\msi\GigaNexusAgent-<版本>-<部署區>.msi,並印出 SHA-256
 
   需要:Rust(MSVC)、WiX v5(dotnet tool install --global wix --version 5.0.2;v6 起企業使用需付 OSMF,不使用)。
   產出的 MSI 未簽章;正式發版由簽章人員以人工簽章(PLATFORM-PLAN §4.9 選項 C)。
 
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File installer\build-agent-msi.ps1 -Env test -Gateway 10.10.130.124:9443 -StoreIssuer "GigaNexus Temporary Agent CA (test)" -CaFile dist\rustit-agent-test\pki\ca.crt
+  powershell -ExecutionPolicy Bypass -File installer\build-agent-msi.ps1 -Env test -Gateway 10.10.130.124:9443 -StoreIssuer "GigaNexus Temporary Agent CA (test)" -CaFile dist\rustit-agent-test\pki\ca.crt -TrustedSigners a1b2c3d4e5f60718293a4b5c6d7e8f9012345678
 #>
 param(
     [Parameter(Mandatory)][ValidateSet('test', 'prod')][string]$Env,
@@ -20,7 +21,9 @@ param(
     # 裝置憑證簽發者名稱(Agent 專用中繼 CA)所含字串
     [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$StoreIssuer,
     # 驗證 Gateway 的根憑證(PEM)
-    [Parameter(Mandatory)][string]$CaFile
+    [Parameter(Mandatory)][string]$CaFile,
+    # 升級檔簽章者 SHA-1 指紋(40 個十六進位字元;換憑證時可同時列新舊,最多 8 個)。測試期:installer\new-test-signing-cert.ps1 印出的指紋
+    [ValidateCount(0, 8)][ValidatePattern('^[0-9A-Fa-f]{40}$')][string[]]$TrustedSigners = @()
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot   # RustAgent\
@@ -39,6 +42,8 @@ if ($LASTEXITCODE -ne 0) { throw 'cargo build 失敗' }
 
 $stage = Join-Path $root "target\msi-stage\$Env"
 New-Item -ItemType Directory -Force $stage | Out-Null
+if ($TrustedSigners.Count -eq 0) { Write-Warning '沒有 -TrustedSigners:安裝後端點會拒絕任何升級檔(SIGNER_NOT_TRUSTED)' }
+$signers = ($TrustedSigners | ForEach-Object { '"' + $_.ToLower() + '"' }) -join ', '
 $toml = @"
 # 由 installer\build-agent-msi.ps1 產生($Env,rustit-agent $version);要修改請重新建置 MSI
 server_url = "https://$Gateway"
@@ -46,6 +51,10 @@ server_url = "https://$Gateway"
 [tls]
 ca_file = "pki/ca.crt"
 store_issuer = "$StoreIssuer"
+
+[upgrade]
+# 升級檔簽章者 SHA-1 指紋(必須同時在主機下發的 signer_thumbprints 內,P6-UPGRADE-DESIGN §9-2)
+trusted_signers = [$signers]
 "@
 $tomlPath = Join-Path $stage 'agent.toml'
 [IO.File]::WriteAllText($tomlPath, $toml.Replace("`r`n", "`n") + "`n", (New-Object Text.UTF8Encoding $false))

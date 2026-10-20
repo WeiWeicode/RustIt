@@ -8,7 +8,7 @@
 | --- | --- |
 | 基本階段(INTEGRATION-PLAN M0–M4、M6) | ✅ 完成:Agent 經 Gateway `:9443` 回報 ItAgentBack,GigaItApp「電腦清單」看得到 |
 | `RustAgent/crates/collector` | ✅ 硬體、軟體、網路、防毒、USB 儲存、RustDesk 狀態 |
-| `RustAgent/crates/watchdog`(`rustit-watchdog`) | ✅ **0.1.0**(P5-2,MR !32 已合併 develop,2026-10-19 測試區 VM 驗收 7 項通過):`GigaNexusWatchdog` 服務看守 Agent、自己經 `:9443` 上報 |
+| `RustAgent/crates/watchdog`(`rustit-watchdog`) | **0.2.0 升級 Agent 實作完成(P6-2,待 VM 驗收)**;✅ **0.1.0**(P5-2,MR !32 已合併 develop,2026-10-19 測試區 VM 驗收 7 項通過):`GigaNexusWatchdog` 服務看守 Agent、自己經 `:9443` 上報 |
 | `RustAgent/crates/agent`(`rustit-agent`) | ✅ **0.6.0**(develop;2026-10-19 測試區 VM 由 0.4.2 升級驗收通過,驗收後已解除安裝):0.5.0(P5-1)心跳健康摘要、上次結束原因、hello 憑證到期日;0.6.0(P5-2)本機管道、看守 Watchdog、服務 ACL。0.4.2:2026-10-19 停用改每 1 分鐘重試; 前景執行(`run`)與 **Windows 服務**(`service`;開發用 `install` / `uninstall`,P1 第一批);HTTPS 回報、WebSocket hello / 心跳、退避重連、裝置憑證(PEM 檔或 Windows `LocalMachine\My`,P1 PoC 實測通過)、服務模式檔案日誌、監控 MSI(未簽章,P1 VM 驗證通過)。**P2**:本機加密暫存 `state\store.db`(資產 / 事件 outbox、連線紀錄)、離線照常蒐集與 `/sync` 補傳、`offline_period`、USB 插拔與 `agent_started` 事件、429 依 Retry-After、主機下發設定(2026-10-15 VM 驗證通過,見下方 P2-3)。**P4-1(0.3.0,已合併 develop)**:指令執行器 `inventory.collect` / `agent.restart` / `message.show`、本機 `command_log` 去重與待回報狀態。**P4-2(0.4.0,已合併 develop,2026-10-15 測試區 VM 驗證通過)**:`agent.diagnose`、`logs.collect`(日誌 zip 上傳)、`agent.log_level` |
 | `RustAgent/crates/demo` | 示範介面;**將改造為使用者端程式 `desktop`**(P8),`src/deploy.rs` 是軟體派送的參考實作(P7 移植到 Agent) |
 | `RustAgent/crates/native` | ✅ 已移除(P1;最後版本 `3ba3827`) |
@@ -19,7 +19,7 @@
 
 ## 2. 下一步
 
-0. **目前階段:P6 升級(甘特圖 W6-19)**:設計 [P6-UPGRADE-DESIGN.md](P6-UPGRADE-DESIGN.md),2026-10-20 需求方確認 §9 全部照建議;分批 P6-1(版本登錄與發佈環,後端)→ P6-2(Watchdog 升級 Agent)→ P6-3(Agent 升級 Watchdog)→ P6-4(Windows Runner + 人工簽章,P6-1~3 驗收後)→ P6-5(GigaItApp,動手前另外確認)→ P6-6 收尾。**P6-1 實作完成**(分支 `feature/p6-1-release`,測試 178/178、整合 12/12);待:migration 0007 套用 `giganexus_It_Agent_test`(需求方看過後)→ MR 合併 develop 部署 → Gateway OpenAPI 草稿批次發佈 → 主機 2 建 `/srv/giganexus/ita-releases/`。下一批 P6-2(Watchdog 0.2.0 / Agent 0.7.0,要遵守設計 §8.2)。前置條件替代:測試簽章憑證(正式 AD CS 憑證待 IT)、主機 2 `/srv/giganexus/ita-releases/`(NAS 掛載待帳密,與 P7 一起)。
+0. **目前階段:P6 升級(甘特圖 W6-19)**:設計 [P6-UPGRADE-DESIGN.md](P6-UPGRADE-DESIGN.md),2026-10-20 需求方確認 §9 全部照建議;分批 P6-1(版本登錄與發佈環,後端)→ P6-2(Watchdog 升級 Agent)→ P6-3(Agent 升級 Watchdog)→ P6-4(Windows Runner + 人工簽章,P6-1~3 驗收後)→ P6-5(GigaItApp,動手前另外確認)→ P6-6 收尾。**P6-1 實作完成**(分支 `feature/p6-1-release`,測試 178/178、整合 12/12);待:migration 0007 套用 `giganexus_It_Agent_test`(需求方看過後)→ MR 合併 develop 部署 → Gateway OpenAPI 草稿批次發佈 → 主機 2 建 `/srv/giganexus/ita-releases/`。P6-1 已合併 develop(MR !37)。**P6-2 實作完成**(分支 `feature/p6-2-watchdog-upgrade`,Watchdog 0.2.0 / Agent 0.7.0 / MSI 0.7.0;審查後調整見設計 §8.3);待 VM 驗收(設計 §8.4:需求方建立測試簽章憑證、建 MSI 與 0.7.1 / 壞版本、主機 2 建 `/srv/giganexus/ita-releases/`、OpenAPI 批次發佈後登錄版本)。下一批 P6-3(Agent 替換 Watchdog,`replace_watchdog`)。前置條件替代:測試簽章憑證(正式 AD CS 憑證待 IT)、主機 2 `/srv/giganexus/ita-releases/`(NAS 掛載待帳密,與 P7 一起)。
    - 以下為 P5 紀錄(已完成)。
 0. **P5 監測(甘特圖 W6-18)**
    - **範圍**:PLATFORM-PLAN §4.3(三層資料：健康摘要附在心跳、事件、Server 比對軟硬體變更、固定告警規則)、§4.10 A5(Agent 被停用 / 移除偵測)、§8 P5 完成標準;Watchdog 規格見 Gateway `ENDPOINT-AGENT-GUIDE.md` §7。

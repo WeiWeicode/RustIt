@@ -9,6 +9,8 @@
 //! - `message.show`:使用者端程式(P8)尚未存在,一律 `WTSSendMessage` 送到主控台工作階段,不等待使用者按下。
 //! - `agent.diagnose`([`crate::diagnose`])、`logs.collect`([`crate::logs`],日誌 zip 以 HTTPS 上傳為指令附檔)、
 //!   `agent.log_level`(暫時調整日誌等級,記在本機 kv,重啟後仍有效直到到期):P4-2,PLATFORM-PLAN A4。
+//! - `agent.upgrade`(P6-2):只記下要求,經本機管道 `status.upgrade_requested` 交給 Watchdog(結果 `handed_to_watchdog`);
+//!   升級中(Watchdog 已送 `prepare_shutdown`)收到的新指令回 `failed AGENT_UPGRADING`。
 
 use crate::Shared;
 use crate::protocol::{
@@ -26,14 +28,17 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 
 /// 本版支援的類型(與 command-kinds.md 一致)
-pub const KINDS: [&str; 6] = [
+pub const KINDS: [&str; 7] = [
     "inventory.collect",
     "agent.restart",
     "message.show",
     "agent.diagnose",
     "logs.collect",
     "agent.log_level",
+    "agent.upgrade",
 ];
+/// agent.upgrade 交給 Watchdog 的要求有效多久(與指令有效期限相同)
+pub const UPGRADE_REQUEST_TTL: Duration = Duration::from_secs(3600);
 /// kv:agent.log_level 暫時調整的等級 `{"level","until"}`(重啟後仍有效直到到期)
 const LOG_LEVEL_KEY: &str = "log_level_override";
 /// 服務模式日誌檔名前綴(`agent-YYYY-MM-DD.log`,rustit_common::logging)
@@ -74,6 +79,13 @@ fn report(shared: &Shared, id: &str, state: &str, fill: impl FnOnce(&mut Command
         occurred_at: now_rfc3339(),
     };
     fill(&mut u);
+    // 已結束(succeeded / failed)的指令不再改狀態:升級逾時已記 AGENT_UPGRADING 的指令之後才完成時,不覆寫(審查建議 8)
+    if let Ok(Some(last)) = shared.store.lock().command_last_update(id)
+        && matches!(last["state"].as_str(), Some("succeeded" | "failed"))
+    {
+        warn!("指令 {id} 已結束({}),不再改為 {state}", last["state"]);
+        return;
+    }
     let saved = serde_json::to_value(&u)
         .map_err(|e| e.to_string())
         .and_then(|v| {
@@ -192,6 +204,19 @@ async fn execute(shared: Arc<Shared>, cmd: CommandBody) {
             ),
         );
     }
+    // 先登記為執行中再檢查升級旗標:prepare_shutdown 先設旗標再等執行中歸零,兩邊不會互相錯過(審查建議 8)
+    // agent.restart 會一直持有到行程結束,不算執行中(prepare_shutdown 不等它)
+    let _running = (cmd.kind != "agent.restart").then(|| Running::new(&shared, &id));
+    if shared.upgrading.load(Ordering::SeqCst) {
+        return report_failure(
+            &shared,
+            &id,
+            fail(
+                "AGENT_UPGRADING",
+                "Agent 升級中,不接受新指令;升級完成後請重新下達",
+            ),
+        );
+    }
     report(&shared, &id, "acked", |_| {});
     let outcome = match cmd.kind.as_str() {
         "inventory.collect" => {
@@ -214,6 +239,10 @@ async fn execute(shared: Arc<Shared>, cmd: CommandBody) {
             report(&shared, &id, "running", |_| {});
             log_level(&shared, &cmd.params)
         }
+        "agent.upgrade" => {
+            report(&shared, &id, "running", |_| {});
+            agent_upgrade(&shared, &id, &cmd.params)
+        }
         "agent.restart" => return agent_restart(&shared, &id).await,
         _ => Err(fail("UNSUPPORTED_COMMAND", cmd.kind.clone())),
     };
@@ -227,6 +256,84 @@ async fn execute(shared: Arc<Shared>, cmd: CommandBody) {
         }
         Err(f) => report_failure(&shared, &id, f),
     }
+}
+
+/// 執行中的指令(prepare_shutdown 等待用);Drop 時移除
+struct Running<'a>(&'a Shared, String);
+
+impl<'a> Running<'a> {
+    fn new(shared: &'a Shared, id: &str) -> Self {
+        if let Ok(mut set) = shared.running_commands.lock() {
+            set.insert(id.to_string());
+        }
+        Self(shared, id.to_string())
+    }
+}
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut set) = self.0.running_commands.lock() {
+            set.remove(&self.1);
+        }
+    }
+}
+
+/// 執行中的指令數
+pub fn running_count(shared: &Shared) -> usize {
+    shared.running_commands.lock().map(|s| s.len()).unwrap_or(0)
+}
+
+/// prepare_shutdown 等待逾時:仍在執行的指令記 failed AGENT_UPGRADING(IT 可重下,§9-6);只處理執行中的,不含 agent.restart
+pub fn abort_running(shared: &Shared) -> usize {
+    let ids: Vec<String> = shared
+        .running_commands
+        .lock()
+        .map(|s| s.iter().cloned().collect())
+        .unwrap_or_default();
+    for id in &ids {
+        report_failure(
+            shared,
+            id,
+            fail(
+                "AGENT_UPGRADING",
+                "Agent 升級中,執行中的指令已中斷;升級完成後請重新下達",
+            ),
+        );
+    }
+    ids.len()
+}
+
+/// agent.upgrade(P6-2):記下要求,Watchdog 每 30 秒 get_status 看到後立即上報、重設失敗次數(command-kinds.md)
+fn agent_upgrade(shared: &Shared, id: &str, p: &Value) -> Result<Value, Failure> {
+    if !crate::SERVICE_MODE.load(Ordering::Relaxed) {
+        return Err(fail(
+            "NOT_RUNNING_AS_SERVICE",
+            "前景模式沒有 Watchdog,無法升級",
+        ));
+    }
+    // command_id 會原樣放進管道 status(單則上限 4 KB);主機給的是 UUID(資安 L6)
+    if id.len() > 64 {
+        return Err(fail("INVALID_PARAMS", "command_id 過長"));
+    }
+    let component = p["component"]
+        .as_str()
+        .filter(|c| matches!(*c, "agent" | "watchdog"))
+        .ok_or_else(|| fail("INVALID_PARAMS", "component 需 agent / watchdog"))?;
+    let version = match &p["version"] {
+        Value::Null => None,
+        Value::String(v) if v.len() <= 32 && rustit_common::version::core(v).is_some() => {
+            Some(v.as_str())
+        }
+        _ => {
+            return Err(fail("INVALID_PARAMS", "version 格式需 x.y.z(可帶 -後綴)"));
+        }
+    };
+    let req = crate::protocol::upgrade_requested(id, component, version);
+    info!("指令 {id}:要求 Watchdog 立即檢查 {component} 升級");
+    if let Ok(mut r) = shared.upgrade_requested.lock() {
+        *r = Some((req, std::time::Instant::now()));
+    }
+    Ok(json!({ "handed_to_watchdog": true }))
 }
 
 /// expires_at 是主機時間;本機時間 − 偏差 = 主機時間

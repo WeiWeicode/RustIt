@@ -3,6 +3,7 @@
 > 草案 2026-10-20,分支 `docs/p6-upgrade-design`(從 develop `56d2263` 開)。依據:PLATFORM-PLAN §4.5、§4.9、§5、§6、§7、§8 P6 列、§8 B1 / B2;指南 ENDPOINT-AGENT-GUIDE §7.1–§7.4、§8.3、§10.2 E4;ADR 0002、0003;`P5-MONITOR-DESIGN.md`(Watchdog、本機管道、`watchdog/report`)。
 > **2026-10-20 需求方確認**:§9 全部照建議(測試簽章憑證、本機信任清單 P6 就做、測試區先用主機 2 本機目錄、`pilot` 未滿 24 小時回 409 + `force`、改環與版本需 `endpoint.software.manage` 且全部公司角色、執行中指令等最多 60 秒、版本號 Agent 0.7.0 / Watchdog 0.2.0、Windows Runner 在 P6-1~3 驗收後、migration 0007 先給需求方看再由 Claude 套用)。
 > **進度(2026-10-20)**:P6-1 完成實作(分支 `feature/p6-1-release`):migration 0007、管理 API、下載 API、`watchdog/report` 的 `target` / `upgrade`、`agent.upgrade` 與 admin-commands 路由、升級告警;`npm test` 178/178、`test:int` 12/12(0007 已套用整合測試庫 `_poc_test`);審查後調整見 §8.1。**待辦**:migration 0007 套用 `giganexus_It_Agent_test`(需求方看過後)、合併 develop 部署測試區、Gateway OpenAPI 草稿批次發佈。
+> **進度(2026-10-20,P6-2)**:P6-1 已合併 develop(MR !37)。P6-2 實作完成(分支 `feature/p6-2-watchdog-upgrade`):Watchdog 0.2.0 升級 Agent、Agent 0.7.0 `prepare_shutdown` / `agent.upgrade`、監控 MSI 0.7.0 `-TrustedSigners`、測試簽章憑證腳本;`cargo test` / `clippy` 通過、契約測試通過;子代理審查後調整見 §8.3。**待辦**:VM 驗收(§8.4,需求方執行)。
 > 設計當時的現況:Agent 0.6.0、Watchdog 0.1.0(P5-2,VM `RUSTIT-P34` 驗收通過);`watchdog/report` 回應已有 `target` 欄位(一律 `null`);管道 `prepare_shutdown` 只定義、回 `unsupported`;`ita.device.agent_version`、`ita.device_health.watchdog_version` 已有;**程式碼簽章憑證未簽發(ADR 0003 建議中)、NAS `RustIT\` 未掛載、主機 2 沒有 Windows Runner**。
 
 ## 0. 分批
@@ -209,6 +210,48 @@ Runner 建好前(P6-1~3 開發期):開發機 `build-agent-msi.ps1` 建置 + 測�
 - 簽章者:主機下發的 `signer_thumbprints` **與**本機信任清單取交集,主機清單不能單獨放行(§9-2)。
 - 只用 `agent.toml` 的 Gateway 位址與同一組 mTLS 連線下載,不跟隨重新導向。
 - 告警 `detail` 含端點回報的字串(`errorMessage` 等):GigaItApp 一律以文字顯示(P6-5,與 P5 相同)。
+
+### 8.3 P6-2 實作與審查後的調整(code-reviewer、security-auditor 子代理,2026-10-20)
+
+實作照 §5.2;與設計不同或補充的地方:
+
+- **版本比對用 ProductVersion**(§8.2 寫 FileVersion):兩支 exe 由 `build.rs` 寫入版本資源,FileVersion 只能是數字(`0.7.2.0`),帶後綴的版本要比字串,所以比 `ProductVersion`(與 FileVersion 字串同值)。版本可由 `RUSTIT_BUILD_VERSION` 覆寫(測試版)。不符回 `HASH_MISMATCH`(錯誤代碼列舉沒有更適合的,`error_message` 說明);目標格式不合法回 `DOWNLOAD_FAILED`。
+- **不降到 0.7.0 以前**:0.6.0 讀不了含 `[upgrade]` 的 `agent.toml`(`deny_unknown_fields`),Watchdog 拒絕 `< 0.7.0` 的目標。
+- **`prepare_shutdown` 逾時**只記警告、照樣停止(§5.2 第 3 步),不上報 `PREPARE_TIMEOUT`(升級可能仍成功;代碼保留給之後需要時)。
+- **`upgrade_requested`** 加 `id`(指令 command_id,去重用;契約只新增欄位)。
+- **`duration_ms`** 從開始(下載)算到結束(event.schema 描述已改)。
+- **審查必修 1**:升級期間每次上報都送 `target`,原本結束後會立刻再跑一次,2 次失敗額度幾分鐘內就用完 → 結束後丟掉積壓的目標;任何升級失敗後 **30 分鐘冷卻**(任何版本,存 `watchdog.db` kv),主機輪流下發兩個版本也不會反覆停止 Agent(資安 M1)。`agent.upgrade` 解除冷卻並重設失敗次數(含 `ROLLBACK_FAILED`)。
+- **審查建議**:已處理的 `agent.upgrade` id 存本機(Watchdog 重啟不重複重設);看守的 SCM 操作在維護中一律不動作、該輪事件丟棄,維護中結束後看守狀態重新為基準(不誤記重啟);維護中最多 20 分鐘、以 Drop 保證結束(資安 L5);不在執行中的未結束紀錄不上報;舊版本以安裝目錄 exe 的版本資源為準;雜湊與檔案複製在阻塞執行緒;中途重啟時若仍是舊版不算失敗(清掉紀錄、下次重來)、清 `.new` 殘檔;Agent 端 `abort_running` 只處理真的在執行的指令、已結束的指令不再被改狀態、「先登記執行中再檢查升級旗標」消除空隙、5 分鐘自動恢復只解除同一次收尾。
+- **資安**:WinVerifyTrust 加 `WTD_CACHE_ONLY_URL_RETRIEVAL`(不依 AIA 連網,M2);還原後管道失敗但 SCM PID 穩定視為已還原(一般使用者搶建管道不會造成 `ROLLBACK_FAILED`,M3);下載錯誤內容最多讀 8 KB(M4);先檢查目標再寫紀錄 / 日誌,主機字串去控制字元(L1);下載前要「500 MB + 檔案大小」、每次開始先清其他版本(L2);`cache\` 是 junction / 連結或 ACL 套用失敗就停用升級(L4);`agent.upgrade` 的 command_id 上限 64 字(L6)。
+- **未處理(列入後續)**:驗證時以同一個 handle 算雜湊與驗簽(L3,cache 只有 SYSTEM / Administrators 可寫,目前以 `.new` 再驗雜湊為第二道);本機最低版本下限、壞版本改用只在測試 VM 信任的另一張憑證、撤銷檢查與 SHA-256 指紋(L7,上線前);測試憑證金鑰保護、`-Env prod` 拒絕測試指紋、驗收後移除 VM 的測試根憑證(L8);`protect_dir` 設擁有者;下載寫檔仍在 async 工作內(每塊幾 KB)。
+
+### 8.4 P6-2 VM 驗收步驟(`RUSTIT-P34`;VM 內指令由需求方執行)
+
+**前置**
+
+1. P6-1 已在測試區(develop 部署);Gateway OpenAPI 草稿批次已發佈(`/api/endpoint/releases`、`/release-rings`、`/devices/{id}/ring`、`/admin-commands`),否則經 BFF 呼叫會 404。
+2. 主機 2 建 `/srv/giganexus/ita-releases/{agent,watchdog}/`(`RELEASES_DIR` 唯讀掛載,§4、§9-3)。
+3. **開發機(需求方)**:`installer\new-test-signing-cert.ps1` → 記下 SHA-1 指紋 `<T>`,公鑰 `dist\signing\GigaNexus-Test-CodeSigning.cer`(私鑰不離開這台電腦)。
+4. 開發機:`build-agent-msi.ps1 -Env test … -TrustedSigners <T>` → `GigaNexusAgent-0.7.0-test.msi`(Agent 0.7.0 + Watchdog 0.2.0);
+   `build-test-release.ps1 -Version 0.7.1 -Thumbprint <T>`、`-Version 0.7.2-broken -Features broken-no-ws`、`-Version 0.7.3-broken -Features broken-exit`(壞版本的版本號要不同,失敗次數依版本計)。
+5. 升級檔複製到主機 2 `/srv/giganexus/ita-releases/agent/<版本>/rustit-agent.exe`;GigaItApp 尚無畫面(P6-5),以瀏覽器 Console 經 BFF 呼叫:`POST /api/endpoint/releases`(`component: agent`、`version`、`fileName: rustit-agent.exe`、`signerThumbprints: [<T>]`)→ `POST …/{releaseId}/publish`(0.7.1;壞版本可留 draft,只經 pilot 環)。
+
+**VM**
+
+| # | 步驟 | 通過條件 |
+| --- | --- | --- |
+| 0 | 建檢查點「P6 前(未安裝)」;複製 `.cer` 到 VM → 系統管理員 PowerShell:`Import-Certificate -FilePath .\GigaNexus-Test-CodeSigning.cer -CertStoreLocation Cert:\LocalMachine\Root`(與 `TrustedPublisher` 各一次)→ 刪除 VM 上的 `.cer` 複本可留 | `Get-AuthenticodeSignature`(對 0.7.1 檔)為 `Valid` |
+| 1 | `msiexec /i GigaNexusAgent-0.7.0-test.msi /qn /l*v install.log` | 兩個服務執行中;`Get-Content C:\ProgramData\GigaNexus\Agent\agent.toml` 有 `[upgrade] trusted_signers`;GigaItApp 顯示 Agent 0.7.0、Watchdog 0.2.0;建檢查點「P6-2 0.7.0」 |
+| 2 | 主機:`PUT /api/endpoint/devices/de87bce2…/ring` `{ ring: "pilot" }`、`PUT /api/endpoint/release-rings/pilot/agent` `{ targetVersion: "0.7.1" }` | 10 分鐘內(上報 ≤ 5 分鐘 + 下載 + 2 分鐘檢查):`(Get-Item 'C:\Program Files\GigaNexus\Agent\rustit-agent.exe').VersionInfo.ProductVersion` = 0.7.1、`previous\rustit-agent.exe` 為 0.7.0;`GET /api/endpoint/devices/{id}/upgrade` `succeeded`;事件 `upgrade_started` / `upgrade_succeeded`;**沒有** `agent_service_stopped` / `agent_tampered`(維護中) |
+| 3 | pilot 目標改 `0.7.2-broken`(不連 WebSocket) | 約 2 分鐘後還原 0.7.1;`rolled_back` / `HEALTH_CHECK_FAILED`、事件 `upgrade_failed`(`rolled_back: true`);冷卻 30 分鐘後(或下 `agent.upgrade` 立即)再試一次仍失敗 → `attempts = 2` 後不再下發、告警 `upgrade_failed` |
+| 4 | pilot 目標改 `0.7.3-broken`(啟動即結束) | 同 3(還原 0.7.1) |
+| 5 | 反向:①未簽章 0.7.4(`$env:RUSTIT_BUILD_VERSION='0.7.4'; cargo build --release -p rustit-agent --target-dir target\rel-0.7.4`,不跑簽章腳本)②0.7.5 以另一張自簽憑證簽章(第二張只匯入 VM 的 Root,不列入 `trusted_signers`;登錄時 `signerThumbprints` 填第二張的指紋)。SHA-256 不符由主機下載前複驗擋下、端點驗證由單元測試涵蓋 | ① `SIGNATURE_INVALID` ② `SIGNER_NOT_TRUSTED`;Agent 都沒有被停止(`previous\` 未變、沒有 `prepare_shutdown`) |
+| 6 | `agent.upgrade` 指令(`POST /api/endpoint/devices/{id}/admin-commands` `{ kind: "agent.upgrade", params: { component: "agent" } }`) | 指令 `succeeded`、`result.handed_to_watchdog = true`;Watchdog 日誌「收到 agent.upgrade…立即上報」,失敗次數重設 |
+| 7 | 降版:pilot 目標改 `0.7.0`(需先登錄 0.7.0 簽章檔) | 換回 0.7.0 並 `succeeded` |
+| 8 | 升級中重開機:設新目標,看到 `installing`(Watchdog 日誌「開始升級」後、`previous\` 寫入時)立即 `Restart-Computer -Force` | 開機後 Watchdog 日誌「上一次升級…中斷,收尾中」,最後 `succeeded` 或 `rolled_back`,Agent 執行中、沒有停在半套 |
+| 9 | 升級時有執行中的指令(下 `logs.collect` 後立即觸發升級) | 指令完成或 60 秒後 `failed AGENT_UPGRADING`;升級照常 |
+
+查看:VM `C:\ProgramData\GigaNexus\Agent\logs\watchdog-*.log`、`agent-*.log`(`-Encoding UTF8`,系統管理員);主機 `ita.device_upgrade`、`ita.device_event`。驗收後還原檢查點或解除安裝。
 
 ## 9. 要你決定的事
 

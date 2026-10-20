@@ -33,6 +33,11 @@ impl EventQueue {
         }
     }
 
+    /// 要求事件工作立即送出(prepare_shutdown,P6-2)
+    pub fn kick(&self) {
+        self.notify.notify_one();
+    }
+
     /// 記一筆事件(occurred_at 為端點上的發生時間);寫入失敗只記日誌,不影響呼叫端
     pub fn record(&self, kind: &str, occurred_at: String, data: Value) {
         let result = self.store.lock().push_event(kind, &occurred_at, &data);

@@ -46,6 +46,18 @@ pub struct AgentStatus {
     pub cert_not_after: Option<String>,
     #[serde(default)]
     pub previous_exit: Option<String>,
+    /// agent.upgrade 指令(P6-2):Watchdog 看到新的 id 就重設失敗次數並立即上報
+    #[serde(default)]
+    pub upgrade_requested: Option<UpgradeRequested>,
+}
+
+/// 管道 status.upgrade_requested(pipe.schema.json)
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct UpgradeRequested {
+    pub id: String,
+    pub component: String,
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -104,6 +116,15 @@ pub struct Monitor {
 impl Monitor {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 維護中(升級)結束:升級期間的停止 / 換行程不算重啟或竄改,重新以目前狀態為基準(24 小時重啟次數保留)
+    pub fn resync(&mut self) {
+        let expected = self.expected_exe.take();
+        let restarts = std::mem::take(&mut self.restarts);
+        *self = Self::default();
+        self.expected_exe = expected;
+        self.restarts = restarts;
     }
 
     /// 24 小時內非正常重啟(crashed + hung)次數

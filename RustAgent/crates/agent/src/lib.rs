@@ -5,6 +5,7 @@
 //!   - WebSocket([`ws`]):`hello`(端點時間、硬體指紋、憑證到期日)+ 每 30 秒 `heartbeat`(附健康摘要,P5),斷線退避重連;`hello_ack` 的主機設定寫入本機
 //!   - 端點事件([`events`]):本機暫存 → `POST /agent/v1/events`
 //!   - USB 插拔([`usb`]):每 10 秒比對可移除磁碟區
+//!   - 升級(P6-2):Watchdog 經本機管道 `prepare_shutdown` 要求停止前收尾([`pipe`]);指令 `agent.upgrade` 經管道 `status.upgrade_requested` 通知 Watchdog
 //!   - 指令([`command`],P4):WebSocket 收到 `command` 在背景執行,結果先寫本機再經 WebSocket 回報;
 //!     遠端診斷([`diagnose`]、[`logs`],P4-2)。另有每分鐘檢查暫時日誌等級是否到期
 //!
@@ -99,6 +100,16 @@ pub(crate) struct Shared {
     pub last_error: std::sync::Mutex<Option<String>>,
     /// 裝置憑證到期日(RFC 3339;每次連線前讀)
     pub cert_not_after: std::sync::Mutex<String>,
+    /// 升級中(收到 prepare_shutdown,P6-2):新指令回 failed AGENT_UPGRADING
+    pub upgrading: AtomicBool,
+    /// 執行中的指令 command_id(prepare_shutdown 等它們結束,最多 60 秒)
+    pub running_commands: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// prepare_shutdown 的次數(5 分鐘自動恢復只解除同一次的收尾)
+    pub prepare_gen: AtomicU64,
+    /// true = WebSocket 送完待送狀態後以 1000 關閉並暫停重連(prepare_shutdown)
+    pub ws_hold: watch::Sender<bool>,
+    /// agent.upgrade(P6-2):管道 status.upgrade_requested 的內容與時間(1 小時內有效)
+    pub upgrade_requested: std::sync::Mutex<Option<(serde_json::Value, std::time::Instant)>>,
 }
 
 impl Shared {
@@ -187,6 +198,13 @@ where
 
 /// 執行到收到結束訊號(shutdown 變成 true)為止
 pub async fn run(settings: Settings, mut shutdown: watch::Receiver<bool>) -> Result<(), String> {
+    // 測試用壞版本(P6-2 VM 驗收「故意放壞的版本 → 自動還原」)
+    if cfg!(feature = "broken-exit") {
+        return Err(format!(
+            "broken-exit 測試版 {}:啟動即結束",
+            protocol::AGENT_VERSION
+        ));
+    }
     let transport = Transport::new(&settings, &protocol::user_agent())?;
     let store = SharedStore::new(Store::open(&settings.state_dir)?);
     let (saved_settings, disabled, previous_exit) = {
@@ -257,6 +275,11 @@ pub async fn run(settings: Settings, mut shutdown: watch::Receiver<bool>) -> Res
         last_ack_ms: AtomicI64::new(0),
         last_error: std::sync::Mutex::new(None),
         cert_not_after: std::sync::Mutex::new(String::new()),
+        upgrading: AtomicBool::new(false),
+        running_commands: std::sync::Mutex::new(std::collections::HashSet::new()),
+        prepare_gen: AtomicU64::new(0),
+        ws_hold: watch::channel(false).0,
+        upgrade_requested: std::sync::Mutex::new(None),
     });
     // 上次的 agent.restart 回報成功、中途停止的指令回報失敗(重連後送出);未到期的暫時日誌等級重新套用
     command::recover(&shared);

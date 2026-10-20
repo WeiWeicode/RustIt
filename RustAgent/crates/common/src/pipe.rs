@@ -14,7 +14,7 @@ use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
 use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
-use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
+use windows_sys::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId};
 
 pub const PIPE_NAME: &str = r"\\.\pipe\giganexus-agent-v1";
 /// 只允許 SYSTEM 與 Administrators(指南 §7.2);P:不繼承
@@ -76,6 +76,19 @@ pub fn create_server(first: bool) -> Result<NamedPipeServer, String> {
         opts.create_with_security_attributes_raw(PIPE_NAME, &mut attrs.sa as *mut _ as *mut _)
     }
     .map_err(|e| format!("無法建立本機管道 {PIPE_NAME}:{e}"))
+}
+
+/// 伺服端:連線用戶端的 PID(P6-2 prepare_shutdown 只接受 Watchdog 服務)
+pub fn client_pid(server: &NamedPipeServer) -> Result<u32, String> {
+    let mut pid = 0u32;
+    // SAFETY:server 的控制代碼在此期間有效
+    if unsafe { GetNamedPipeClientProcessId(server.as_raw_handle() as _, &mut pid) } == 0 {
+        return Err(format!(
+            "無法取得管道用戶端 PID:{}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(pid)
 }
 
 /// 讀一行(上限 MAX_LINE),不含換行

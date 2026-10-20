@@ -7,10 +7,34 @@ use sha2::{Digest, Sha256};
 
 pub use rustit_common::envelope::Envelope;
 
-pub const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// 版本(build.rs:RUSTIT_BUILD_VERSION 或 Cargo.toml;與 exe 版本資源相同,Watchdog 升級時比對)
+pub const AGENT_VERSION: &str = env!("RUSTIT_VERSION");
 /// HTTPS / WebSocket 的 User-Agent(指南 §5.6)
 pub fn user_agent() -> String {
     format!("giganexus-agent/{AGENT_VERSION}")
+}
+
+/// 本機管道 prepare_shutdown_ack 的 body(pipe.schema.json PrepareShutdownAck,P6-2)
+pub fn prepare_shutdown_ack(
+    flushed: bool,
+    outbox_pending: u64,
+    events_pending: u64,
+    commands_aborted: usize,
+) -> serde_json::Value {
+    serde_json::json!({ "flushed": flushed, "outbox_pending": outbox_pending, "events_pending": events_pending, "commands_aborted": commands_aborted })
+}
+
+/// 本機管道 status.upgrade_requested(pipe.schema.json,P6-2):agent.upgrade 的 command_id、元件、指定版本
+pub fn upgrade_requested(
+    command_id: &str,
+    component: &str,
+    version: Option<&str>,
+) -> serde_json::Value {
+    let mut v = serde_json::json!({ "id": command_id, "component": component });
+    if let Some(ver) = version {
+        v["version"] = serde_json::json!(ver);
+    }
+    v
 }
 
 /// Agent 通道路徑(契約 `/agent/v1`)

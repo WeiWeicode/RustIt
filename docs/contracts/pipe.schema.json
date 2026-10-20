@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://giganexus.local/rustit/contracts/pipe.schema.json",
   "title": "本機具名管道 \\\\.\\pipe\\giganexus-agent-v1 訊息",
-  "description": "Watchdog ↔ Agent 的本機通道(ENDPOINT-AGENT-GUIDE §7.2;P5-MONITOR-DESIGN §2.4)。伺服端為 Agent,ACL 只允許 SYSTEM、Administrators;每條連線一則請求、一則回應(各一行 JSON,UTF-8,以 \\n 結尾,單則上限 4 KB),之後由 Agent 關閉。信封同 WebSocket {v, type, id, body},回應沿用請求的 id。用戶端連線後以 GetNamedPipeServerProcessId 比對 SCM 的 GigaNexusAgent PID,不一致即中斷(防冒充)。不認得的 type 回 unsupported;prepare_shutdown 只定義,P6 升級時實作(P5 的 Agent 回 unsupported)。",
+  "description": "Watchdog ↔ Agent 的本機通道(ENDPOINT-AGENT-GUIDE §7.2;P5-MONITOR-DESIGN §2.4)。伺服端為 Agent,ACL 只允許 SYSTEM、Administrators;每條連線一則請求、一則回應(各一行 JSON,UTF-8,以 \\n 結尾,單則上限 4 KB),之後由 Agent 關閉。信封同 WebSocket {v, type, id, body},回應沿用請求的 id。用戶端連線後以 GetNamedPipeServerProcessId 比對 SCM 的 GigaNexusAgent PID,不一致即中斷(防冒充)。不認得的 type 回 unsupported。prepare_shutdown(P6-2,Agent 0.7.0 起;0.6.0 回 unsupported):Watchdog 升級 Agent 前送出,Agent 只接受用戶端 PID 為 SCM 的 GigaNexusWatchdog,停止接新指令、執行中的指令等最多 60 秒(逾時記 failed AGENT_UPGRADING)、送完待送資料(上限 20 秒)並以 1000 關閉 WebSocket 後回 prepare_shutdown_ack(P6-UPGRADE-DESIGN §2.2)。",
   "type": "object",
   "required": ["v", "type", "id"],
   "properties": {
@@ -11,7 +11,11 @@
     "id": { "type": "string", "minLength": 1, "maxLength": 64 },
     "body": { "type": "object" }
   },
-  "allOf": [{ "if": { "properties": { "type": { "const": "status" } } }, "then": { "required": ["body"], "properties": { "body": { "$ref": "#/definitions/StatusBody" } } } }],
+  "allOf": [
+    { "if": { "properties": { "type": { "const": "status" } } }, "then": { "required": ["body"], "properties": { "body": { "$ref": "#/definitions/StatusBody" } } } },
+    { "if": { "properties": { "type": { "const": "prepare_shutdown" } } }, "then": { "required": ["body"], "properties": { "body": { "$ref": "#/definitions/PrepareShutdown" } } } },
+    { "if": { "properties": { "type": { "const": "prepare_shutdown_ack" } } }, "then": { "required": ["body"], "properties": { "body": { "$ref": "#/definitions/PrepareShutdownAck" } } } }
+  ],
   "definitions": {
     "StatusBody": {
       "description": "Agent 目前狀態(指南 §6.4、§7.2 草案欄位 + P5 補充)",
@@ -32,7 +36,37 @@
           "description": "這次啟動前,上一次的結束原因(同 agent_started.previous_exit);Watchdog 看到 PID 變更後據此判斷重啟原因"
         },
         "outbox_pending": { "type": "integer", "minimum": 0 },
-        "events_pending": { "type": "integer", "minimum": 0 }
+        "events_pending": { "type": "integer", "minimum": 0 },
+        "upgrade_requested": {
+          "description": "agent.upgrade 指令(P6-2,1 小時內有效):Watchdog 看到新的 id 就重設該元件的失敗次數並立即上報",
+          "type": "object",
+          "required": ["id", "component"],
+          "properties": {
+            "id": { "type": "string", "maxLength": 64, "description": "指令 command_id(去重用)" },
+            "component": { "type": "string", "enum": ["agent", "watchdog"] },
+            "version": { "type": "string", "maxLength": 32 }
+          }
+        }
+      }
+    },
+    "PrepareShutdown": {
+      "description": "Watchdog → Agent:升級前要求收尾(P6-2)",
+      "type": "object",
+      "required": ["reason"],
+      "properties": {
+        "reason": { "type": "string", "enum": ["upgrade"] },
+        "timeout_sec": { "type": "integer", "minimum": 1, "maximum": 600, "description": "Watchdog 等待 ack 的上限(90)" }
+      }
+    },
+    "PrepareShutdownAck": {
+      "description": "Agent → Watchdog:收尾完成(或已到上限),Watchdog 接著停止服務",
+      "type": "object",
+      "required": ["flushed"],
+      "properties": {
+        "flushed": { "type": "boolean", "description": "待送的指令狀態與事件都已送達、WebSocket 已關閉" },
+        "outbox_pending": { "type": "integer", "minimum": 0 },
+        "events_pending": { "type": "integer", "minimum": 0 },
+        "commands_aborted": { "type": "integer", "minimum": 0, "description": "等 60 秒仍未結束、記為 AGENT_UPGRADING 的指令數" }
       }
     }
   }
