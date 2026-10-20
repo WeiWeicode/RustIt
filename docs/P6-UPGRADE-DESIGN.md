@@ -1,7 +1,7 @@
 # P6 升級設計
 
 > 草案 2026-10-20,分支 `docs/p6-upgrade-design`(從 develop `56d2263` 開)。依據:PLATFORM-PLAN §4.5、§4.9、§5、§6、§7、§8 P6 列、§8 B1 / B2;指南 ENDPOINT-AGENT-GUIDE §7.1–§7.4、§8.3、§10.2 E4;ADR 0002、0003;`P5-MONITOR-DESIGN.md`(Watchdog、本機管道、`watchdog/report`)。
-> **狀態:待需求方確認 §9。** 確認前不動程式。
+> **2026-10-20 需求方確認**:§9 全部照建議(測試簽章憑證、本機信任清單 P6 就做、測試區先用主機 2 本機目錄、`pilot` 未滿 24 小時回 409 + `force`、改環與版本需 `endpoint.software.manage` 且全部公司角色、執行中指令等最多 60 秒、版本號 Agent 0.7.0 / Watchdog 0.2.0、Windows Runner 在 P6-1~3 驗收後、migration 0007 先給需求方看再由 Claude 套用)。
 > 設計當時的現況:Agent 0.6.0、Watchdog 0.1.0(P5-2,VM `RUSTIT-P34` 驗收通過);`watchdog/report` 回應已有 `target` 欄位(一律 `null`);管道 `prepare_shutdown` 只定義、回 `unsupported`;`ita.device.agent_version`、`ita.device_health.watchdog_version` 已有;**程式碼簽章憑證未簽發(ADR 0003 建議中)、NAS `RustIT\` 未掛載、主機 2 沒有 Windows Runner**。
 
 ## 0. 分批
@@ -87,7 +87,7 @@ P6-1 先做(後端可單獨用 API 與 curl 驗證);P6-2 依賴 P6-1 的 API;P6-
 
 | type | 方向 | body | 說明 |
 | --- | --- | --- | --- |
-| `prepare_shutdown` / `prepare_shutdown_ack` | Watchdog → Agent | `reason: "upgrade"`、`timeout_sec` / `flushed`、`outbox_pending` | **實作**:Agent 停止接新指令、送完待送的 `command_update` 與事件(上限 20 秒)、以 1000 關閉 WebSocket 後回 ack;執行中的指令記為 `failed` / `AGENT_UPGRADING`(§9-6) |
+| `prepare_shutdown` / `prepare_shutdown_ack` | Watchdog → Agent | `reason: "upgrade"`、`timeout_sec` / `flushed`、`outbox_pending` | **實作**:Agent 停止接新指令、送完待送的 `command_update` 與事件(上限 20 秒)、以 1000 關閉 WebSocket 後回 ack;執行中的指令先等最多 60 秒,逾時才記 `failed` / `AGENT_UPGRADING`(§9-6;Watchdog 的 `prepare_shutdown` 等待因此為 90 秒) |
 | `status`(加欄位) | Agent → Watchdog | `upgrade_requested: { component, version? }` | `agent.upgrade` 指令設定;Watchdog 看到後立即上報(不等 5 分鐘) |
 | `replace_watchdog` / `replace_watchdog_ack` | Watchdog → Agent | `version`、`path`(`cache\` 內已驗證的檔案)、`sha256`、`signer_thumbprints` / `accepted` | P6-3:Agent **自行再驗一次**雜湊與簽章後才替換;Watchdog 被停止前收到 `accepted` |
 
@@ -148,7 +148,7 @@ P6-1 先做(後端可單獨用 API 與 curl 驗證);P6-2 依賴 P6-1 的 API;P6-
 
 1. 上報取得 `target.agent` → 本機記錄目標(`watchdog.db` 新表 `upgrade`:元件、目標版本、狀態、失敗次數),上報 `upgrade.state = downloading`。
 2. 下載完成 → 驗 SHA-256、Authenticode、簽章者;任一失敗 → `failed`(不還原,因為還沒動),刪除檔案。
-3. **維護中**(看守暫停,不把接下來的停止當成竄改)→ 管道 `prepare_shutdown`(等 30 秒;逾時照樣繼續,記 `PREPARE_TIMEOUT` 警告)。
+3. **維護中**(看守暫停,不把接下來的停止當成竄改)→ 管道 `prepare_shutdown`(等 90 秒;逾時照樣繼續,記 `PREPARE_TIMEOUT` 警告)。
 4. 停止 `GigaNexusAgent`(沿用 P5 M2:握住行程控制代碼、等 50 秒、逾時才結束行程)。
 5. `Program Files\GigaNexus\Agent\rustit-agent.exe` → `previous\rustit-agent.exe`(覆蓋上一份 previous);新檔先複製為同目錄 `rustit-agent.exe.new`、**在目的地再驗一次雜湊**,再以 `MoveFileEx(REPLACE_EXISTING)` 換上。
 6. 啟動服務 → 2 分鐘內每 10 秒 `get_status`:`version` = 目標、`ws_connected = true`、PID 穩定 → `succeeded`,結束維護中,立即上報。
