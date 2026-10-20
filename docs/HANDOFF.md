@@ -19,7 +19,7 @@
 
 ## 2. 下一步
 
-0. **下一階段:P7 軟體派送(2026-10-20 設計草案)**:[P7-SOFTWARE-DESIGN.md](P7-SOFTWARE-DESIGN.md) 已寫好,§9 其餘已照建議確認,**第 2(未簽章套件)、11(測試電腦)項待需求方決定**;P7-1 可先開工(後端、migration 0008)。
+0. **下一階段:P7 軟體派送(2026-10-20 設計草案)**:[P7-SOFTWARE-DESIGN.md](P7-SOFTWARE-DESIGN.md) 已寫好,§9 全部已確認(11 項先用需求方本機電腦 + VM);可開工 P7-1(後端、migration 0008)。
 0. **目前階段:P6 升級(甘特圖 W6-19)**:設計 [P6-UPGRADE-DESIGN.md](P6-UPGRADE-DESIGN.md),2026-10-20 需求方確認 §9 全部照建議;分批 P6-1(版本登錄與發佈環,後端)→ P6-2(Watchdog 升級 Agent)→ P6-3(Agent 升級 Watchdog)→ P6-4(Windows Runner + 人工簽章,P6-1~3 驗收後)→ P6-5(GigaItApp,動手前另外確認)→ P6-6 收尾。**P6-1 實作完成**(分支 `feature/p6-1-release`,測試 178/178、整合 12/12);待:migration 0007 套用 `giganexus_It_Agent_test`(需求方看過後)→ MR 合併 develop 部署 → Gateway OpenAPI 草稿批次發佈 → 主機 2 建 `/srv/giganexus/ita-releases/`。P6-1 已合併 develop(MR !37)。**P6-2 實作完成**(分支 `feature/p6-2-watchdog-upgrade`,Watchdog 0.2.0 / Agent 0.7.0 / MSI 0.7.0;審查後調整見設計 §8.3);待 VM 驗收(設計 §8.4:需求方建立測試簽章憑證、建 MSI 與 0.7.1 / 壞版本、主機 2 建 `/srv/giganexus/ita-releases/`、OpenAPI 批次發佈後登錄版本)。下一批 P6-3(Agent 替換 Watchdog,`replace_watchdog`)。前置條件替代:測試簽章憑證(正式 AD CS 憑證待 IT)、主機 2 `/srv/giganexus/ita-releases/`(NAS 掛載待帳密,與 P7 一起)。
    - 以下為 P5 紀錄(已完成)。
 0. **P5 監測(甘特圖 W6-18)**

@@ -1,7 +1,7 @@
 # P7 軟體派送設計
 
 > 草案 2026-10-20,分支 `docs/p7-software-design`(從 develop `948adf1` 開,P6-2 已合併)。依據:PLATFORM-PLAN §4.4、§4.6、§4.10 A6、§5、§8 P7 列、§8 B1;[ADR 0002](decisions/0002-software-deployment.md)(採方案 B)、[ADR 0003](decisions/0003-code-signing-pki.md);`P4-COMMAND-DESIGN.md`(指令通道、批次);`P6-UPGRADE-DESIGN.md`(`authenticode`、本機信任清單、版本檔目錄、下載 API 模式);`contracts/command-kinds.md`。
-> **狀態**:2026-10-20 需求方指示 §9「其他照建議」:第 1、3~10、12 項依建議確認;**第 2 項(未簽章套件)與第 11 項(另 2 台測試電腦)為重要決策,待需求方回覆**,P7-1 後端可先開工,P7-2 驗收前必須定案。
+> **狀態**:2026-10-20 需求方確認 §9 全部:第 2 項依建議(未簽章套件由公司憑證加簽),第 11 項先用需求方自己的本機電腦(開發機)加 VM `RUSTIT-P34`,另一台 IT 同意的電腦之後再補;其餘照建議。可開工 P7-1。
 > 設計當時的現況:Agent 0.7.0、Watchdog 0.2.0(P6-2 已合併 develop);`rustit-common::authenticode`(WinVerifyTrust + 簽章者指紋)與 `agent.toml` `[upgrade] trusted_signers` 已有;`ita.command_batch` 已有 `requires_approval` / `approved_by_*` 欄位(P4 預留、無邏輯);`kindHooks`、批次 `max_concurrent` 補送(`refillBatch`)已有;`ita.device_software`(P3)有每台最新軟體清單;**NAS `RustIT\` 未掛載、軟體目錄與 `software.*` 指令都還沒有**。`RustAgent/crates/demo/src/deploy.rs`(536 行,Firefox / WinRAR 單機版)是移植來源。
 
 ## 0. 分批
@@ -320,10 +320,10 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
 
 ## 9. 要你決定的事
 
-> 標 ✅ 者已確認(照建議);標 ⏳ 者待需求方決定。
+> 全部已確認(2026-10-20)。第 11 項調整:先以需求方本機電腦 + VM 驗收(2 台),完成標準的第 3 台 IT 電腦待同意後補測。
 
 1. ✅ **套件版本號**:Agent 0.8.0(P7-2 / P7-3 一起發;Watchdog 不變 0.2.0)。(建議:同意)
-2. ⏳ **未簽章 / 簽章不在本機清單的套件**:所有套件必須有有效 Authenticode 簽章,且簽章者在本機信任清單內;廠商沒簽的檔案(例如 7-Zip MSI)由 IT 以**公司程式碼簽章憑證**簽章後再登錄(沿用 P6-4 簽章流程,MSI 加簽不改內容)。/ 允許目錄標記「未簽章但雜湊釘選」,由本機 GPO 清單列入雜湊(每個新版都要更新 GPO,維運負擔大)。/ 允許未簽章套件只憑主機雜湊(**不建議**:主機被入侵即可推任意程式)。(建議:第一個)
+2. ✅ **未簽章 / 簽章不在本機清單的套件**:所有套件必須有有效 Authenticode 簽章,且簽章者在本機信任清單內;廠商沒簽的檔案(例如 7-Zip MSI)由 IT 以**公司程式碼簽章憑證**簽章後再登錄(沿用 P6-4 簽章流程,MSI 加簽不改內容)。/ 允許目錄標記「未簽章但雜湊釘選」,由本機 GPO 清單列入雜湊(每個新版都要更新 GPO,維運負擔大)。/ 允許未簽章套件只憑主機雜湊(**不建議**:主機被入侵即可推任意程式)。(建議:第一個)
 3. ✅ **軟體庫目錄**:NAS 帳密到位前,測試區先用主機 2 `/srv/giganexus/ita-software/`;NAS 掛載(P7-4,含 P6 的 `releases\`)等你提供帳密後做。(建議:同意)
 4. ✅ **覆核規則**:`published_by ≠ created_by`(第二人);`tested_by` 可以是建立人。/ 三者都需不同人(IT 人少時太嚴)。(建議:第一個)
 5. ✅ **誰能管理軟體目錄**:`endpoint.software.manage` **且**全部公司角色(`ENDPOINT_SCOPE_ALL_ROLES`),與 P6 版本管理一致,因為目錄是全公司共用。/ 只要 `endpoint.software.manage`。(建議:兩者都要)
@@ -332,7 +332,7 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
 8. ✅ **派送時段與頻寬**:先只用並行上限(20 台)控制,下載不限速;正式區上線前依 NAS 與網路實測再決定是否在 Nginx 加 `limit_rate`、是否限制上班時間派送。(建議:同意)
 9. ✅ **A6 延後上限**:電池 / 計量網路最多延後 4 小時,逾時失敗讓 IT 重派;`ignore_power` 只對電池有效。/ 不設上限,指令過期為止。(建議:4 小時)
 10. ✅ **授權數**:`license_limit` 只做派送時的上限檢查,並以 `display_name` 樣式計數;報表與 MSI 產品代碼計數留路線圖。(建議:同意)
-11. ⏳ **測試機範圍**:`draft` 套件只能派到 `pilot` 環;P7 驗收的「3 台 IT 電腦」= VM `RUSTIT-P34` + 另 2 台 IT 同意的電腦(**不在使用者電腦上測試**,AGENT.md §5)。(建議:同意,請指定另 2 台)
+11. ✅ **測試機範圍**(調整:先用需求方本機電腦 + VM):`draft` 套件只能派到 `pilot` 環;P7 驗收的「3 台 IT 電腦」= VM `RUSTIT-P34` + 另 2 台 IT 同意的電腦(**不在使用者電腦上測試**,AGENT.md §5)。(建議:同意,請指定另 2 台)
 12. ✅ migration 0008 寫好後先給你看,由 Claude 經同意套用 `giganexus_It_Agent_test`(同 P5、P6)。
 
 PLATFORM-PLAN 要配合修正的地方(確認後與 P7-1 一起改):§5.2 `0006_software.sql` → `0008_software.sql`(加 `command_batch.state`);§4.6 補「參數快照」「`draft` 只能派 pilot」「安裝前複驗」「批次核可」;§4.4 補 `system.reboot` 與三個新類型的每台上限;`command-kinds.md` 補三類型與錯誤代碼。
