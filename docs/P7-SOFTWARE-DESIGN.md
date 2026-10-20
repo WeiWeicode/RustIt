@@ -1,0 +1,338 @@
+# P7 軟體派送設計
+
+> 草案 2026-10-20,分支 `docs/p7-software-design`(從 develop `948adf1` 開,P6-2 已合併)。依據:PLATFORM-PLAN §4.4、§4.6、§4.10 A6、§5、§8 P7 列、§8 B1;[ADR 0002](decisions/0002-software-deployment.md)(採方案 B)、[ADR 0003](decisions/0003-code-signing-pki.md);`P4-COMMAND-DESIGN.md`(指令通道、批次);`P6-UPGRADE-DESIGN.md`(`authenticode`、本機信任清單、版本檔目錄、下載 API 模式);`contracts/command-kinds.md`。
+> **狀態**:2026-10-20 需求方指示 §9「其他照建議」:第 1、3~10、12 項依建議確認;**第 2 項(未簽章套件)與第 11 項(另 2 台測試電腦)為重要決策,待需求方回覆**,P7-1 後端可先開工,P7-2 驗收前必須定案。
+> 設計當時的現況:Agent 0.7.0、Watchdog 0.2.0(P6-2 已合併 develop);`rustit-common::authenticode`(WinVerifyTrust + 簽章者指紋)與 `agent.toml` `[upgrade] trusted_signers` 已有;`ita.command_batch` 已有 `requires_approval` / `approved_by_*` 欄位(P4 預留、無邏輯);`kindHooks`、批次 `max_concurrent` 補送(`refillBatch`)已有;`ita.device_software`(P3)有每台最新軟體清單;**NAS `RustIT\` 未掛載、軟體目錄與 `software.*` 指令都還沒有**。`RustAgent/crates/demo/src/deploy.rs`(536 行,Firefox / WinRAR 單機版)是移植來源。
+
+## 0. 分批
+
+| 批 | 內容 | 版本 | 需要同意 |
+| --- | --- | --- | --- |
+| **P7-1 軟體目錄與下載(後端)** | migration `0008_software.sql`;`software-service`(目錄、狀態機、兩人覆核);管理 API(登錄、測試完成、發佈、撤回、挑檔);Agent 下載 API `GET /agent/v1/packages/{packageId}`(Range、僅限被指派);`software.install` / `software.uninstall` 指令類型(admin、參數快照);派送 API(單台、批次)與授權數檢查 | — | migration 套用 `giganexus_It_Agent_test`;軟體庫目錄(§9-3);合併 develop |
+| **P7-2 Agent `software` 模組** | 從 `deploy.rs` 移植:下載(續傳、本機快取)→ 驗 SHA-256 與簽章者 → 靜默安裝 / 移除(SYSTEM、逾時、1618 重試)→ 輪詢登錄檔確認 → 立即重新蒐集;A6 電池 / 計量網路延後;回報簽章者(測試機用) | Agent **0.8.0** | VM 驗收;測試簽章憑證沿用 P6 |
+| **P7-3 `system.reboot` 與批次核可** | `system.reboot`(先提示使用者、可延後、強制期限);批次第二人核可(B1:> 20 台);`3010` 之後的 `reboot_required` 顯示與一鍵重開機 | Agent 0.8.0 | VM 驗收 |
+| **P7-4 NAS 唯讀掛載** | `endpoint-server` 以 CIFS 唯讀掛載 `RustIT\`(`releases\` 與 `software\` 共用);正式區 `main` 部署前必須完成 | — | NAS 帳密機密腳本由需求方執行(AI 不經手);`docker-compose.yml`、主機 2 修改 |
+| **P7-5 GigaItApp「軟體派送」頁** | 軟體目錄 / 派送工作兩個 Tab;電腦詳情「派送軟體」「重新開機」按鈕;`gateway-rbac.yaml` | — | **GigaItApp、`gateway-rbac.yaml`:動手前另外確認**(OpenAPI 註冊、IT 發佈後才綁 `includes`) |
+| P7-6 收尾 | 指南回寫(§8.3 指令類型、§5 套件下載)、`command-kinds.md`、根目錄 `workspace.json` / `PROJECT-MAP.md`、甘特圖 W6-20、測試報告、RUNBOOK「軟體派送失敗處理」 | — | Gateway / 根目錄 repo 修改前確認 |
+
+P7-1 先做(後端可單獨用 API 與 curl 驗證);P7-2 依賴 P7-1 的下載與指令參數;P7-3 依賴 P7-2 的 Agent 指令執行;P7-4 與 P7-1~3 互不依賴(測試區先用本機目錄,§4);P7-5 在 P7-1 API 上線後可開始。
+
+**完成標準對應**(PLATFORM-PLAN §8 P7):
+
+| 完成標準 | 由哪一批達成 | 驗證方式 |
+| --- | --- | --- |
+| 對 3 台 IT 電腦派送 7-Zip(MSI)與 Notepad++(Inno),再移除;每台狀態與結束代碼正確 | P7-1、P7-2 | 測試機(VM `RUSTIT-P34` + 另 2 台 IT 同意的電腦)登錄兩個套件 → 測試機驗證 → `tested` → 第二人 `published` → 派送;每台 `succeeded`、`exit_code = 0`;資產出現 `software_installed` 事件;`software.uninstall` 後出現 `software_removed`,詳細步驟 §8.3 |
+| 雜湊不符時拒絕安裝 | P7-2 | 換掉 `software\` 內檔案(主機複驗擋下一次;再以 Agent 單元測試與「繞過主機複驗」的測試參數驗端點自己驗)→ `HASH_MISMATCH`,沒有啟動安裝程式 |
+| 簽章者不在本機信任清單時拒絕安裝 | P7-2 | 套件簽章者已在主機 `signer_thumbprints`、但不在 VM `agent.toml` `trusted_signers` → `SIGNER_NOT_TRUSTED` |
+| 派送中斷線,重連後結果正確 | P7-2 | 安裝中停用 VM 網卡 → 安裝完成後結果存本機 → 重連補送 `command_update`,主機最終 `succeeded`(沿用 P4 去重與補送) |
+
+## 1. 資料表(`0008_software.sql`,SQL Server 2012)
+
+> PLATFORM-PLAN §5.2 原訂 `0006_software.sql`;0005~0007 已被 E6、P5、P6 使用,本階段為 **0008**(§5.2 一併更正)。
+
+### `ita.software_package` — 軟體目錄
+
+| 欄位 | 型別 | 說明 |
+| --- | --- | --- |
+| `package_id` | `UNIQUEIDENTIFIER` PK | |
+| `name` / `version` | `NVARCHAR(100)` / `NVARCHAR(50)` | 顯示名稱與版本;`UNIQUE (name, version)`。同一軟體的不同版本是不同的列(新版有問題可切回舊版,ADR 0002) |
+| `file_name` | `NVARCHAR(260)` | 軟體庫 `software\` 之下的**相對路徑**,固定三層 `{軟體}\{版本}\{檔名}`;每層只允許 `[A-Za-z0-9._ -]`(不含 `..`、路徑分隔、冒號) |
+| `sha256` / `size_bytes` | `CHAR(64)` / `BIGINT` | **登錄時由 Server 讀檔計算**,不接受人工輸入;下載時再比對一次,檔案被換掉就拒絕下發並記錯。大小上限 `SOFTWARE_MAX_BYTES`(預設 4 GB) |
+| `installer_type` | `VARCHAR(16)` | `msi` / `inno` / `nsis` / `burn` / `exe`(其他);決定參數範本與 Agent 的執行方式 |
+| `install_args` | `NVARCHAR(500)` | 靜默安裝參數,依類型帶範本(MSI 的 `/qn /norestart` 與 `/i 檔案` 由 Agent 組,這裡只放額外屬性,例如 `ALLUSERS=1`);見 §2.3 的字元限制 |
+| `uninstall_args` | `NVARCHAR(500)` | 靜默移除額外參數(`QuietUninstallString` 不存在時補上,例如 NSIS `/S`、Inno `/VERYSILENT`) |
+| `detect_type` / `detect_value` | `VARCHAR(16)` / `NVARCHAR(400)` | 「已安裝」判斷:`msi_product_code`(`{GUID}`)或 `display_name`(登錄檔 Uninstall 的 DisplayName,`LIKE` 樣式,`%` 為萬用字元)。安裝後確認與移除輪詢都用它;MSI 產品代碼登錄時由 Server 嘗試讀出(失敗則由 IT 填) |
+| `reboot_policy` | `VARCHAR(16)` | `never`(預設,3010 也只標記)/ `required`(已知必須重開機,顯示提示) |
+| `signer_thumbprints` | `VARCHAR(400)` | 預期簽章者憑證 SHA-1 指紋(逗號分隔,可同時列新舊);`tested` 之前可為 NULL |
+| `observed_signers` | `VARCHAR(400)` | 測試機 Agent 回報的實際簽章者(`software.install` 的 `result.signer`),供 IT 確認後寫入 `signer_thumbprints`(§3.3) |
+| `license_limit` | `INT NULL` | 授權數;NULL = 不限。已安裝數由 `ita.device_software` 比對(§3.4) |
+| `status` | `VARCHAR(16)` | `draft` → `tested` → `published` → `revoked`(見 §3.2) |
+| `notes` | `NVARCHAR(1000)` | 說明(來源網址、授權、已知問題) |
+| `created_by` / `created_at`、`tested_by` / `tested_at`、`published_by` / `published_at`、`revoked_by` / `revoked_at` | | 工號取自內部 Token;**`published_by` 必須不同於 `created_by`**(ADR 0002 兩人覆核) |
+
+### `ita.command_batch`(沿用 0003,P7 補邏輯)
+
+`requires_approval`、`approved_by_emp`、`approved_by_name`、`approved_at` 欄位已有;P7 補狀態:批次加 `state`(`pending_approval` / `running` / `done` / `rejected` / `expired`)。0003 的 `ita.command_batch` 沒有 `state` 欄(指令的 `queued` 在批次未核可時不補送),由 0008 補 `ALTER TABLE`。
+
+### 其他
+
+- `ita.command.params` 已原樣保存(P4:參數不得含機密);`software.install` 的參數快照也放這裡,供稽核與重連補送。
+- 不另建「安裝狀態表」:裝了什麼以資產(`device_software`)為準,派送結果以指令紀錄為準,避免兩份真相不一致。
+- 軟體組合(ADR 0002 的「業務部標準組合」、綁 OU 自動安裝)**不做**,留路線圖(§7)。
+
+## 2. 契約變更(只新增,舊版 Agent 回 `UNSUPPORTED_COMMAND`)
+
+### 2.1 指令類型(`command-kinds.md`)
+
+| kind | 等級 | 有效 / 逾時 | 串行 | 每台上限 |
+| --- | --- | --- | --- | --- |
+| `software.install` | admin | 24 小時 / 4 小時 | 是 | 3 筆未結束 |
+| `software.uninstall` | admin | 24 小時 / 1 小時 | 是 | 3 筆未結束 |
+| `system.reboot` | admin | 4 小時 / 30 分鐘 | 是 | 1 筆未結束 |
+
+> 逾時:安裝本身 30 分鐘,但含下載(大檔、頻寬受限)與 A6 延後下載,整體給 4 小時;超過仍未到終態,主機設 `failed TIMEOUT`。有效期限 24 小時 = Agent 離線太久回來就不再執行過期的安裝。`maxPending` 3 筆讓一次派 2~3 個軟體可以排隊,同類型超過回 `409 ITA_COMMAND_LIMIT`。
+
+### 2.2 `software.install` 參數(Server 建立時從目錄產生的**快照**)
+
+IT 只送 `{ packageId }`;Server 建立指令時查目錄(必須 `published`,測試機例外見 §3.2),把下列快照寫入 `params`。**Agent 只信任指令內的快照,不接受其他來源的安裝參數**。
+
+| 欄位 | 說明 |
+| --- | --- |
+| `package_id`、`name`、`version` | |
+| `url` | `/agent/v1/packages/{packageId}`(Agent 以同一組 mTLS 連線下載,不跟隨重新導向) |
+| `sha256`、`size_bytes` | 驗整個檔案 |
+| `installer_type`、`install_args` | 見 §2.3 |
+| `signer_thumbprints` | 預期簽章者;`draft` 套件在測試機上為空 → Agent 仍須簽章有效(`Valid`),回報實際簽章者,**不採信空清單放行**(見 §3.3) |
+| `detect` | `{ type, value }` |
+| `timeout_sec` | 安裝逾時,預設 1800 |
+| `reboot_policy` | |
+
+### 2.3 安裝參數的限制(防止把「靜默參數」變成任意程式執行)
+
+`install_args` / `uninstall_args` 由 IT 輸入,風險等於可在全公司電腦以 SYSTEM 執行指令,所以:
+
+- Agent 一律 `CreateProcess` 直接執行**已驗證的下載檔案**(MSI 是 `msiexec.exe /i <檔> …`),**不經 `cmd.exe` / PowerShell**;不使用 shell 展開。
+- 參數字元白名單:`[A-Za-z0-9 /\-_=.:,"{}%]`,不含 `& | ; < > ^ \` $ \r \n`;長度 ≤ 500;主機建立與登錄時驗,Agent 執行前再驗一次,不符 `INVALID_PARAMS`。
+- 不允許把 `installer_type = msi` 的參數指到其他檔案(出現 `.msi` / `.exe` / `\\` 開頭的路徑一律拒絕)。
+- 這兩個欄位與簽章者一起,屬於「第二人覆核」要看的內容(§3.2)。
+
+### 2.4 `result` 與錯誤代碼
+
+`result`(序列化後 4,000 字元內):`{ "exit_code": 0, "reboot_required": false, "signer": "<SHA-1 指紋>", "signer_subject": "<CN>", "duration_ms": 41200, "detected": true, "already_installed": false, "log_tail": "<最後 20 行,遮罩後>" }`(移除:`already_absent`)。`log_tail` 來自安裝記錄(MSI `/l*v`),經 `logs.collect` 同一套遮罩。
+
+新增 `command_update.error_code`:
+
+| 代碼 | 說明 |
+| --- | --- |
+| `DOWNLOAD_FAILED`、`HASH_MISMATCH`、`SIGNATURE_INVALID`、`SIGNER_NOT_TRUSTED`、`DISK_FULL` | 與 P6 同義(寫入 `command-kinds.md`) |
+| `INSTALL_FAILED` | 安裝程式結束代碼不是成功碼;`result.exit_code` 帶值 |
+| `INSTALL_TIMEOUT` | 超過 `timeout_sec`,已結束安裝程式的行程樹 |
+| `INSTALL_BUSY` | 結束代碼 1618(另一個安裝進行中),重試 3 次(間隔 60 秒)仍失敗 |
+| `DETECT_FAILED` | 結束代碼成功,但登錄檔找不到(安裝)或仍存在(移除,輪詢 120 秒)該項目 |
+| `UNINSTALL_NOT_SUPPORTED` | 找得到項目,但沒有可用的移除指令(沒有 `UninstallString`,目錄也沒有 `uninstall_args`) |
+| `DEFERRED_TIMEOUT` | A6:電池 / 計量網路延後超過上限(§5.4) |
+
+結束代碼成功集合:`0`;`3010`、`1641` = 成功且 `reboot_required = true`;`1638`(MSI 已安裝同版本)視為 `already_installed`、`succeeded`。其餘為 `INSTALL_FAILED`。
+
+### 2.5 `system.reboot`
+
+`params`:`delay_sec`(預設 300,0–86400:給使用者儲存工作的時間)、`message`(≤ 200 字,選填,安全文字規則同 `message.show`)、`force`(預設 `false`)。流程見 §5.5。
+
+## 3. ItAgentBack
+
+### 3.1 模組
+
+| 模組 | 內容 |
+| --- | --- |
+| `services/software-files.ts` | 軟體庫讀取。**沿用 `release-files.ts` 的做法並抽出共用部分**:三層路徑、realpath 後必須在根目錄下、SHA-256 串流計算與快取(鍵含 ctime、inode、size)。根目錄 `SOFTWARE_DIR`(預設 `/srv/software`) |
+| `services/software-service.ts` | 目錄 CRUD、狀態機(§3.2)、授權數檢查(§3.4)、派送(建立指令與批次)、`software.install` 的 kindHook(查目錄、產生參數快照、驗證目標與狀態) |
+| `routes/software.ts` | 管理 API(§3.5) |
+| `agent-app.ts`(續) | `GET /agent/v1/packages/:packageId`(§3.3) |
+| `commands/kinds.ts` | 三個新類型與 params schema(§2) |
+| `services/command-dispatcher.ts` | 批次核可閘門(§6)、`refillBatch` 加「全域並行上限」`SOFTWARE_MAX_CONCURRENT`(預設 20,跨批次)|
+| `services/alert-service.ts` | 新規則 `software_install_failed`(同一台同一套件失敗 → 開;重新派送成功時自動關)、`reboot_pending`(`reboot_required` 超過 7 天仍未重開機)|
+
+設定(`ita.env`):`SOFTWARE_DIR`(容器內唯讀掛載點;未設定不啟用軟體派送)、`SOFTWARE_MAX_BYTES`(4 GB)、`SOFTWARE_MAX_CONCURRENT`(20)、`BATCH_APPROVAL_THRESHOLD`(20)。
+
+### 3.2 狀態機與覆核
+
+```
+draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(第二人)──► published ──► revoked
+  │                                          │                       ▲
+  └──(只能派到 pilot 環裝置)                  └─ 可退回 draft         └─ 撤回後不可再派送,已派送的指令不受影響
+```
+
+| 動作 | 條件 | 權限 |
+| --- | --- | --- |
+| 登錄(`draft`) | 檔案在軟體庫、未登錄過;Server 算雜湊、驗 §2.3 字元限制 | `endpoint.software.manage` |
+| `draft` 派送 | **只能派到 `pilot` 環的裝置**(沿用 P6:放進 / 移出 pilot 需全部公司角色);不計授權數 | `endpoint.command.admin` + `endpoint.software.manage` |
+| 標記 `tested` | 該套件在某台 `pilot` 裝置有 `succeeded` 的 `software.install` 且 `detect` 通過;**IT 填入的 `signerThumbprints` 必須等於該次回報的 `observed_signers` 之一**(防止手誤與事後亂填);同時會記錄 `tested_by` | `endpoint.software.manage` |
+| 發佈(`published`) | 狀態為 `tested`;**`published_by` ≠ `created_by`**(第二人);發佈時畫面顯示完整 `install_args`、`uninstall_args`、`signer_thumbprints`、檔案大小與雜湊讓覆核者確認 | `endpoint.software.manage` |
+| 修改欄位 | 只有 `draft` 可改安裝參數、偵測規則、簽章者;`tested` / `published` 要改就**退回 `draft`**(清除 `tested_*` / `published_*`,已發佈版本改參數等於新的覆核) | `endpoint.software.manage` |
+| 撤回(`revoked`) | 立即不能再被派送;已 `queued` 但尚未送出的指令被取消 | `endpoint.software.manage` |
+
+**簽章者為什麼不只靠 IT 填**:Linux 的 endpoint-server 不解析 Authenticode(PLATFORM-PLAN §4.6),實際簽章者由測試機 Agent 回報,IT 確認(通常核對廠商憑證主體)後才寫入預期值。
+
+### 3.3 下載 API:`GET /agent/v1/packages/{packageId}`
+
+比照 P6 `releases` 下載,`:9443` mTLS、裝置憑證:
+
+- 裝置必須 `active`;該裝置必須有一筆**尚未結束**(`sent` / `acked` / `running`)且 `params.package_id` 相同的 `software.install` 指令 → 否則 `404`(端點不能任意下載軟體庫的檔案)。
+- 套件狀態:`published`,或 `draft` / `tested` 且該裝置在 `pilot` 環;`revoked` → `404`。
+- 回應前複驗 SHA-256(與 `ita.software_package.sha256` 比對,檔案被換掉 → `503 ITA_PACKAGE_CHANGED` 並寫告警);支援 `Range` / `206` / `416`(`Content-Range: bytes */大小`);回應標頭 `x-file-sha256` 僅供除錯,**端點不採信**。
+- 稽核 `package_download`:同一台同一套件每小時一筆(裝置、套件、位元組彙總)。
+- 大檔頻寬:Nginx 該路徑加 `proxy_buffering off`、`proxy_request_buffering off`,單檔 `client_max_body_size` 不影響下載;下載限速 `limit_rate`(預設不限,正式區視 NAS 與網路決定,§9-8)。**Gateway 的 Nginx 設定在 Gateway repo,動手前先確認**。
+
+### 3.4 授權數
+
+派送時(`software.install` kindHook)與批次建立時檢查:`license_limit` 不為 NULL 時,`已安裝數 + 本批新增台數(排除已安裝)> license_limit` → `409 ITA_LICENSE_EXCEEDED`。已安裝數以 `ita.device_software` 依 `detect` 比對(`display_name` 樣式 `LIKE`;MSI 產品代碼 P3 的軟體清單沒有存,先只支援 `display_name` 計數,`msi_product_code` 的套件授權數檢查回「無法計算」並要求 IT 同時填 `display_name` 樣式)。授權報表屬路線圖(§7)。
+
+### 3.5 管理 API(`:51240`,對外 `/api/endpoint/*`)
+
+| 方法 | 路徑 | `x-permission` | 說明 |
+| --- | --- | --- | --- |
+| `GET` | `/software` | `endpoint.device.read` | 目錄清單(篩選 `status`、名稱關鍵字);含「已安裝台數」 |
+| `GET` | `/software/files` | `endpoint.device.read` | 軟體庫內尚未登錄的檔案(給登錄畫面挑選;只列兩層深度內、副檔名 `.msi` / `.exe` / `.zip` 等) |
+| `POST` | `/software` | `endpoint.software.manage` | 登錄:`name`、`version`、`fileName`、`installerType`、`installArgs`、`uninstallArgs`、`detectType`、`detectValue`、`rebootPolicy`、`licenseLimit`、`notes`;`x-audit-level: meta` |
+| `PUT` | `/software/{packageId}` | `endpoint.software.manage` | 修改(§3.2 規則);`x-audit-level: meta` |
+| `POST` | `/software/{packageId}/mark-tested`、`/publish`、`/revoke` | `endpoint.software.manage` | 狀態轉換(§3.2);`mark-tested` 帶 `signerThumbprints`;`x-audit-level: meta` |
+| `GET` | `/software/{packageId}` | `endpoint.device.read` | 詳情:狀態、覆核人、歷次測試機結果、已安裝電腦(依資料範圍過濾) |
+| `POST` | `/devices/{deviceId}/admin-commands` | `endpoint.command.admin` | 單台派送:`{ kind: "software.install", params: { packageId } }`(`software.uninstall` 同形;`system.reboot` 帶 §2.5 參數)|
+| `POST` | `/software/{packageId}/deploy` | `endpoint.software.manage` + `endpoint.command.admin` | 批次派送:`{ action: "install" \| "uninstall", deviceIds: [...], maxConcurrent? }` → 建立 `command_batch`(> `BATCH_APPROVAL_THRESHOLD` 台進入 `pending_approval`,§6) |
+| `POST` | `/command-batches/{batchId}/approve`、`/reject` | `endpoint.software.manage` | 第二人核可 / 駁回(§6) |
+| `GET` | `/command-batches/{batchId}` | `endpoint.device.read` | 批次進度(沿用 P4 `GET /batches/{id}`,加 `state`、核可資訊) |
+
+- 全部依 E6 資料範圍過濾裝置。**軟體目錄是全公司共用**,與 P6 版本一樣:登錄 / 修改 / 發佈 / 撤回需 `ENDPOINT_SCOPE_ALL_ROLES` 角色,其他回 `403 ITA_SCOPE_ALL_REQUIRED`(§9-5)。
+- 派送給哪些電腦仍受資料範圍限制(只能派自己看得到的公司的電腦)。
+- `system.reboot` 只提供單台(admin-commands);多台重開機走批次,同樣受核可閾值限制。
+
+## 4. 軟體庫目錄
+
+- 結構:`software\{軟體}\{版本}\{安裝檔}`,例如 `7-Zip\24.09\7z2409-x64.msi`、`Notepad++\8.7.1\npp.8.7.1.Installer.x64.exe`。IT 直接把測過的安裝檔放進去(不經網頁上傳,避開 Nginx 單檔上限);**每個版本一個資料夾**,登錄後不得覆寫該檔案(覆寫會使雜湊不符 → 下載被拒,需重新登錄新版本)。
+- 正式:NAS `\\10.10.130.31\docker-folder\RustIT\software\`;`endpoint-server` 以 CIFS **唯讀**掛載 `RustIT\`,與 P6 `releases\` 共用同一個掛載(容器內 `/srv/rustit/releases`、`/srv/rustit/software`)。NAS 權限:IT 可寫、`endpoint-server` 帳號唯讀(ADR 0002)。
+- 測試區在 NAS 帳密到位前:主機 2 `/srv/giganexus/ita-software/`(root 擁有、唯讀 bind mount 到 `SOFTWARE_DIR`),由需求方或 Claude 經 `ssh host2` 複製(§9-3)。**NAS 帳密只給後端**:由需求方執行的機密腳本寫入主機 2 `/srv/giganexus/ita-secrets/`,AI 不經手;Agent 不拿 NAS 帳密、不直接連 NAS。
+- 容量與備份:軟體庫是 IT 工作區,不是唯一副本;安裝檔的原始來源(廠商網址、取得日期)記在 `notes`。
+
+## 5. Agent(0.8.0)
+
+### 5.1 新模組(`crates/agent/src/software/`)
+
+| 模組 | 內容 |
+| --- | --- |
+| `mod.rs` | 執行器:收到 `software.install` / `software.uninstall` → 串行佇列(P4:會改變系統的指令同時只跑一個)→ 狀態機(§5.2)。核心流程以 trait 注入下載 / 驗證 / 行程 / 登錄檔 / 時鐘,單元測試用假實作 |
+| `download.rs` | 下載到 `ProgramData\GigaNexus\Agent\cache\software\{packageId}\*.part`,`Range` 續傳,完成後比對大小與 SHA-256 才改名;**沿用 `rustit-common::transport::download`**(P6-2 已有,不跟隨重新導向);磁碟剩餘需 ≥ 檔案大小 + 1 GB(`DISK_FULL`);快取只保留已成功與進行中的,成功後立即刪除安裝檔(§5.6) |
+| `install.rs` | 依 `installer_type` 組命令列(§5.3)、啟動行程(SYSTEM、`CREATE_NO_WINDOW`、放入 Job Object 以便逾時時連同子行程一併結束)、收結束代碼與記錄檔 |
+| `uninstall.rs` | 從登錄檔 Uninstall 找到項目 → `QuietUninstallString` 優先,否則 `UninstallString` + `uninstall_args`;MSI 用 `msiexec /x {產品代碼} /qn /norestart`。移植 `deploy.rs` 的 `split_command` / `uninstall_command` / MSI 轉靜默 |
+| `detect.rs` | 登錄檔(`HKLM\...\Uninstall`、`WOW6432Node`)比對 `display_name` 樣式或 MSI 產品代碼;`poll` 輪詢(移植 `deploy.rs` 的 `poll`) |
+| `power.rs` | A6:`GetSystemPowerStatus`(電池供電)、`INetworkCostManager`/`GetConnectionCost`(計量網路) |
+
+### 5.2 `software.install` 流程
+
+1. 驗參數(§2.3 字元白名單、`url` 必須是 `/agent/v1/packages/{package_id}`、`size_bytes` ≤ 4 GB)。
+2. **`detect` 已通過 → 直接 `succeeded` + `already_installed = true`**(派送是冪等的;版本差異由 IT 先移除舊版,不做自動升級取代)。
+3. **A6 延後**(§5.4)→ 進度 `deferred`。
+4. 下載(進度 `downloading` + 百分比,每 5% 或 5 秒 `command_update`)→ 驗大小與 SHA-256(`HASH_MISMATCH`)→ 驗 Authenticode(`SIGNATURE_INVALID`)→ 簽章者:**主機 `signer_thumbprints` ∩ 本機 `agent.toml` `[upgrade] trusted_signers`** 必須非空且包含實際簽章者(`SIGNER_NOT_TRUSTED`);沿用 P6 的 `signer_allowed`。
+5. 安裝(進度 `installing`):§5.3 命令列,逾時 `timeout_sec`(`INSTALL_TIMEOUT`,Job Object 結束行程樹);1618 重試 3 次(`INSTALL_BUSY`)。
+6. 偵測(進度 `detecting`):輪詢 `detect` 最多 120 秒(`DETECT_FAILED`)。
+7. 立即重新蒐集並 `POST /agent/v1/inventory`(不等 24 小時),讓主機的 `device_software` 與 `software_installed` 事件即時反映;失敗只記警告,不影響指令結果。
+8. `succeeded`,`result` 如 §2.4。
+
+結果先寫本機持久化(P2 `store`)再回報;指令以 `command_id` 去重,重連後補送(P4)。
+
+**測試機 `draft` 套件(`signer_thumbprints` 為空)**:第 4 步簽章者檢查改為「簽章必須 `Valid`(鏈到受信任的根)並回報實際簽章者,不比對清單」。因為只有 `pilot` 環的裝置會收到 `draft` 的指令(§3.3)、且 IT 後續要核對 `observed_signers` 才能 `tested`,所以可行;**未簽章的檔案在任何狀態都拒絕**(§9-2:未簽章套件由 IT 以公司憑證簽章後再登錄)。
+
+### 5.3 命令列組法(Agent 端寫死,不由主機給完整命令)
+
+| `installer_type` | 安裝 | 備註 |
+| --- | --- | --- |
+| `msi` | `msiexec.exe /i "<檔>" /qn /norestart /l*v "<記錄>" <install_args>` | 結束代碼 0 / 3010 / 1641 / 1638 / 1618 |
+| `inno` | `<檔> /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- <install_args>` | |
+| `nsis` | `<檔> /S <install_args>` | NSIS 的移除程式會自我複製後結束,**完成與否看登錄檔輪詢**,不看行程 |
+| `burn` | `<檔> /quiet /norestart <install_args>` | |
+| `exe` | `<檔> <install_args>` | 參數完全由目錄決定;第二人覆核時特別檢視 |
+
+記錄檔放 `ProgramData\GigaNexus\Agent\logs\software\{commandId}.log`(14 天,同日誌保留);`log_tail` 經遮罩後放 `result`。
+
+### 5.4 A6:電池與計量網路
+
+- 條件:`AC 電源離線(電池供電)` 或 `連線成本為計量`(Cost Manager 回 `Fixed` 以外/`Variable` 且資料量接近上限)→ 延後**下載**(安裝已下載的檔案不延後)。健康、心跳、其他指令照常。
+- 行為:進度 `deferred`,每 5 分鐘重新檢查;解除條件(接上電源 / 回到非計量網路)後繼續。延後上限 `defer_max_min`(`agent.toml` `[software]`,預設 240,但不超過指令的 `expires_at` 剩餘時間)→ 到期 `failed DEFERRED_TIMEOUT`(IT 可看到原因,在使用者回到辦公室插電後重派)。
+- 指令參數 `ignore_power: true`(admin 專用,選填)可略過延後(例如 IT 現場處理);預設 `false`。**不略過計量網路判斷**(流量費由使用者承擔)。
+- 偵測失敗(API 不可用、桌機沒有電池)視為「無限制」,不阻擋。
+
+### 5.5 `system.reboot`
+
+1. 使用者端程式(P8)未實作前:一律 `WTSSendMessage` 系統訊息框(沿用 `message.show` 的做法與防偽裝規則,前綴「【IT 部門通知】」、結尾附發送人)提示「電腦將於 N 分鐘後重新開機,請儲存工作」。沒有登入者 → 不提示直接排程。
+2. 排程 `delay_sec` 後以 `InitiateSystemShutdownEx` 重新啟動(`force = false` 不強制關閉應用程式,應用程式可拒絕關閉;`ERROR_SHUTDOWN_IN_PROGRESS` 等失敗記 `EXECUTION_FAILED`)。`force = true`:同上但強制結束應用程式,**只有 admin 且需在畫面二次確認**。
+3. 指令在「已排程」就 `succeeded`(`result: { "scheduled_at": "...", "delay_sec": 300 }`)——關機後無法再回報;下次 `hello` 時主機把該指令對應的 `reboot_required` 標記清除(以 `boot_time` 變新為準,P5 已有 `agent_started.boot_time`)。
+4. 同一時間若有 `software.*` 正在執行 → 先等待(串行),避免重開機中斷安裝。
+5. 該台 `reboot_required` 狀態來源:最近一次成功的 `software.*` 指令 `result.reboot_required = true` 且之後 `boot_time` 沒有變新;GigaItApp 詳情顯示並提供「重新開機」按鈕。
+
+### 5.6 清理與安全
+
+- 安裝成功或失敗結束後立即刪除快取的安裝檔(只保留進行中的與失敗但可續傳的 `.part` 24 小時),避免 SYSTEM 可執行檔長期留在可被替換的目錄。`cache\software\` 與 P6 `cache\` 同樣由 SYSTEM / Administrators 專用 ACL;是連結 / junction 或 ACL 套用失敗就停用軟體派送(沿用 P6 L4)。
+- **驗證後立即執行有 TOCTOU 風險**(驗完雜湊到啟動之間被換掉):安裝前把檔案複製到僅 SYSTEM 可寫的 `staging\{commandId}\` 並**在目的地再驗一次雜湊與簽章**,從該位置執行(沿用 P6-2 `.new` 再驗雜湊的作法)。
+- 安裝程式的子行程繼承 SYSTEM:不提供對外網路限制(列入風險,§8.2);`Job Object` 設定 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`。
+- 日誌不記命令列中的完整 `install_args` 以外的機密(目錄本來就不得含機密);`install_args` 內若偵測到 `password=` / `key=` 類字樣,主機登錄時拒絕(沿用 `logs.collect` 遮罩關鍵字清單),需要序號的軟體不在 P7 支援範圍(§7)。
+
+## 6. 第二人核可(B1)
+
+| 條件 | 行為 |
+| --- | --- |
+| 批次派送(`software.*` 或 `system.reboot`)**> `BATCH_APPROVAL_THRESHOLD`(20)台** | 批次 `state = pending_approval`,指令不送出;建立人以外的、具 `endpoint.software.manage` 且資料範圍涵蓋該批所有裝置的人,`POST /command-batches/{id}/approve` 後才進入 `running` 並開始補送 |
+| 核可人 = 建立人 | `403 ITA_APPROVER_SAME_AS_CREATOR` |
+| 24 小時沒人核可 | 批次 `expired`,指令全部設 `canceled`(沿用 P4 過期掃描) |
+| 駁回 | `reject` 帶原因;指令設 `canceled` |
+| 單台或 ≤ 20 台 | 不需核可,但寫稽核 |
+
+- 核可畫面顯示:套件(名稱、版本、安裝參數、簽章者、雜湊)、目標台數與公司/部門分布、並行數。稽核記錄建立人、核可人、時間(`x-audit-level: meta`,參數快照在指令列)。
+- 核可通知:建立批次時經 BFF 通知逐人寄給有 `endpoint.software.manage` 的 IT(沿用 P5 告警的通知路徑,若尚未實作則只在 GigaItApp 顯示待核可徽章)。
+- 「兩人覆核」共三道:目錄 `published`(第二人)、本機信任簽章者(GPO,主機無法改)、批次核可(> 20 台);目的是主機被入侵或單一 IT 帳號被盜時,無法一次對全公司推任意程式。
+
+## 7. 不做的事(留路線圖)
+
+- **軟體組合、綁 AD OU / 群組的自動安裝**(ADR 0002)、新電腦加入網域自動裝標準組合。
+- **使用者自助安裝**(托盤列出 IT 核准的軟體,P8 之後)。
+- **授權報表**(只做派送時的上限檢查,§3.4)。
+- **自動升級取代**(裝了舊版自動換新版):P7 只做「沒有就裝、有就跳過、要換先移除」。
+- **需要序號 / 帳密 / 回應檔含機密的安裝**(例如 Office 部署工具 `setup.exe /configure`):設定檔要放軟體庫且不得含機密,先不支援,待需求。
+- **多廠區分發點 NAS**、下載限速策略(§9-8)。
+- **從廠商網址自動抓新版**(ADR 0002 的自動更新)。
+- **使用者登入後才安裝的軟體**(每使用者安裝):目錄一律選「整台電腦」版本(ADR 0002)。
+
+## 8. 測試與驗證
+
+### 8.1 自動化
+
+- **ItAgentBack**:契約測試(新 kind 的 params、`result`、錯誤代碼範例);`software-service` 單元測試(狀態機與兩人覆核、`draft` 只能派 pilot、`mark-tested` 簽章者需等於回報值、字元白名單、授權數、批次核可閘門、核可人≠建立人、過期);下載 API(非指派 404、停用 403、`draft` 非 pilot 404、Range / 416、檔案被換掉 503、路徑穿越);`test:int` SQL store(`giganexus_It_Agent_poc_test`:套件登錄重複、狀態條件更新、批次核可條件更新)。
+- **Agent**:`software` 以假實作測試——成功(MSI / Inno / NSIS)、`3010` 標記重開機、`1638` 已安裝、`1618` 重試後成功 / 失敗、逾時、`HASH_MISMATCH`(沒有啟動安裝程式)、`SIGNATURE_INVALID`、`SIGNER_NOT_TRUSTED`、已安裝時跳過、偵測失敗、移除輪詢(NSIS 自我複製)、A6 延後與恢復 / 逾時、斷線補送、重複 `command_id` 不重跑、參數字元白名單、`system.reboot` 排程與取消;`power.rs` 以注入測試。
+- **契約**:`command-kinds.md` 對應範例檔,兩端吃同一份。
+
+### 8.2 風險與已知限制(實作前先看)
+
+1. **全公司任意程式執行**:最高風險功能。防線:目錄第二人覆核、`published` 才能派送、參數字元白名單且不經 shell、簽章者需同時符合主機與本機清單(GPO)、SHA-256、> 20 台第二人核可、全部稽核。
+2. **廠商簽章者憑證會換**:本機信任清單以葉憑證指紋比對,廠商每年續約憑證指紋就變,新舊指紋要同時列;GPO 清單需有流程維護(RUNBOOK B10)。
+3. **子行程繼承 SYSTEM**:安裝程式可做任何事;只能靠簽章與覆核控管。安裝後不留快取檔。
+4. **頻寬**:`SOFTWARE_MAX_CONCURRENT`(20)是軟上限;ADR 0002 估 2,000 台 × 90 MB ≈ 180 GB,NAS 1 GbE 約 30 分鐘,仍需分批與非尖峰時段派送(§9-8)。
+5. **沒有使用者互動**:服務在 session 0,安裝程式若跳視窗會卡住;靠靜默參數與逾時,逾時後 Job Object 結束行程樹。已知不靜默的軟體在 `draft` 測試機階段就會失敗,不會進 `tested`。
+6. **7-Zip 官方 MSI 未簽章**(實作時再確認當時版本):依 §9-2 由 IT 以公司憑證簽章後登錄;測試期用 P6 的測試簽章憑證(`new-test-signing-cert.ps1`)簽章。
+
+### 8.3 測試區 VM 驗收步驟(草案,`RUSTIT-P34` + 另 2 台 IT 同意的電腦;VM 內指令由需求方執行)
+
+**前置**:P7-1 已合併 develop 並部署測試區、migration 0008 已套用 `giganexus_It_Agent_test`、Gateway OpenAPI 草稿批次已發佈、主機 2 `/srv/giganexus/ita-software/` 已建立並放入兩個套件(`7-Zip\<版本>\*.msi`,以測試憑證簽章;`Notepad++\<版本>\*.exe`)、VM 已裝 Agent 0.8.0、Notepad++ 的簽章者指紋已加入該機 `trusted_signers`、VM 設為 `pilot` 環。
+
+| # | 步驟 | 通過條件 |
+| --- | --- | --- |
+| 1 | 經 BFF 登錄兩個套件(`draft`),對 VM 單台派送 | `succeeded`、`exit_code = 0`;`result.signer` 為預期指紋;詳情出現 `software_installed` 事件;登錄檔可見項目 |
+| 2 | `mark-tested`(帶回報的指紋)→ **另一位**覆核者 `publish` | 同一人發佈回 `409`/`403 ITA_REVIEWER_SAME_AS_CREATOR`;第二人成功 |
+| 3 | 對 3 台批次派送兩個套件 | 三台皆 `succeeded`;批次進度正確;同時執行不超過上限 |
+| 4 | `software.uninstall` 兩個套件 | `succeeded`;`software_removed` 事件;NSIS/Inno 以登錄檔輪詢確認消失 |
+| 5 | 重複派送已安裝套件 | `succeeded` + `already_installed = true` |
+| 6 | 反向:替換 `software\` 內檔案(同檔名內容不同) | 主機複驗 `ITA_PACKAGE_CHANGED`(下載被拒);繞過主機複驗的測試版 → `HASH_MISMATCH`,安裝程式未啟動 |
+| 7 | 反向:移除 VM `trusted_signers` 內的簽章者指紋後重派 | `SIGNER_NOT_TRUSTED`;未簽章檔 → `SIGNATURE_INVALID` |
+| 8 | 安裝中斷線:派送後 `Disable-NetAdapter`、安裝完成後再啟用 | 重連後主機收到最終結果,指令只執行一次 |
+| 9 | 逾時:`timeout_sec` 設 30 的長時間安裝程式 | `INSTALL_TIMEOUT`,行程樹已結束 |
+| 10 | 3010:套件模擬回傳 3010(測試用) | `succeeded` + `reboot_required`;`system.reboot` 排程,畫面提示;重開機後標記清除 |
+| 11 | A6:VM 模擬電池(Hyper-V 無電池,以測試旗標 `RUSTIT_TEST_POWER=battery`)與計量網路 | `deferred`;恢復後繼續;超過上限 `DEFERRED_TIMEOUT` |
+| 12 | 批次 21 台(用測試資料或多台 VM) | `pending_approval`;同一人核可 `403`;第二人核可後開始;24 小時未核可 `expired` |
+
+查看:VM `C:\ProgramData\GigaNexus\Agent\logs\agent-*.log`、`logs\software\*.log`(`-Encoding UTF8`,系統管理員);主機 `ita.command`、`ita.command_batch`、`ita.software_package`、`ita.device_event`。驗收後還原檢查點。
+
+## 9. 要你決定的事
+
+> 標 ✅ 者已確認(照建議);標 ⏳ 者待需求方決定。
+
+1. ✅ **套件版本號**:Agent 0.8.0(P7-2 / P7-3 一起發;Watchdog 不變 0.2.0)。(建議:同意)
+2. ⏳ **未簽章 / 簽章不在本機清單的套件**:所有套件必須有有效 Authenticode 簽章,且簽章者在本機信任清單內;廠商沒簽的檔案(例如 7-Zip MSI)由 IT 以**公司程式碼簽章憑證**簽章後再登錄(沿用 P6-4 簽章流程,MSI 加簽不改內容)。/ 允許目錄標記「未簽章但雜湊釘選」,由本機 GPO 清單列入雜湊(每個新版都要更新 GPO,維運負擔大)。/ 允許未簽章套件只憑主機雜湊(**不建議**:主機被入侵即可推任意程式)。(建議:第一個)
+3. ✅ **軟體庫目錄**:NAS 帳密到位前,測試區先用主機 2 `/srv/giganexus/ita-software/`;NAS 掛載(P7-4,含 P6 的 `releases\`)等你提供帳密後做。(建議:同意)
+4. ✅ **覆核規則**:`published_by ≠ created_by`(第二人);`tested_by` 可以是建立人。/ 三者都需不同人(IT 人少時太嚴)。(建議:第一個)
+5. ✅ **誰能管理軟體目錄**:`endpoint.software.manage` **且**全部公司角色(`ENDPOINT_SCOPE_ALL_ROLES`),與 P6 版本管理一致,因為目錄是全公司共用。/ 只要 `endpoint.software.manage`。(建議:兩者都要)
+6. ✅ **批次核可閾值**:> 20 台需第二人核可(B1 的數字);`system.reboot` 批次同樣 > 20 台需核可。/ 所有批次(≥ 2 台)都要核可。(建議:20)
+7. ✅ **重開機政策**:3010 / 1641 只標記 `reboot_required`、不強制;`system.reboot` 預設 5 分鐘倒數並提示、`force` 另行確認;`reboot_required` 超過 7 天開告警。/ 3010 時自動排到下班時間(需要「下班時間」定義)。(建議:前者)
+8. ✅ **派送時段與頻寬**:先只用並行上限(20 台)控制,下載不限速;正式區上線前依 NAS 與網路實測再決定是否在 Nginx 加 `limit_rate`、是否限制上班時間派送。(建議:同意)
+9. ✅ **A6 延後上限**:電池 / 計量網路最多延後 4 小時,逾時失敗讓 IT 重派;`ignore_power` 只對電池有效。/ 不設上限,指令過期為止。(建議:4 小時)
+10. ✅ **授權數**:`license_limit` 只做派送時的上限檢查,並以 `display_name` 樣式計數;報表與 MSI 產品代碼計數留路線圖。(建議:同意)
+11. ⏳ **測試機範圍**:`draft` 套件只能派到 `pilot` 環;P7 驗收的「3 台 IT 電腦」= VM `RUSTIT-P34` + 另 2 台 IT 同意的電腦(**不在使用者電腦上測試**,AGENT.md §5)。(建議:同意,請指定另 2 台)
+12. ✅ migration 0008 寫好後先給你看,由 Claude 經同意套用 `giganexus_It_Agent_test`(同 P5、P6)。
+
+PLATFORM-PLAN 要配合修正的地方(確認後與 P7-1 一起改):§5.2 `0006_software.sql` → `0008_software.sql`(加 `command_batch.state`);§4.6 補「參數快照」「`draft` 只能派 pilot」「安裝前複驗」「批次核可」;§4.4 補 `system.reboot` 與三個新類型的每台上限;`command-kinds.md` 補三類型與錯誤代碼。

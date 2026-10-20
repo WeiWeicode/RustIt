@@ -363,7 +363,7 @@ Demo(Tauri)改造為使用者端程式 `desktop`:使用者會用的頁面保留(
 | `0003_command.sql` | `ita.command`、`ita.command_batch`(含第二人核可欄位,B1);診斷檔案索引(`logs.collect`,A4) | P4 |
 | `0006_monitor.sql` | `ita.device_health`(最近健康、Watchdog 最近回報、憑證到期、重啟次數;1:1)、`ita.device_alert`(告警);原訂 0004,0004 / 0005 已用於 P3 軟體清單與 E6 公司 | P5 |
 | `0007_release.sql` | `ita.agent_release`、`ita.release_ring`、`ita.device_upgrade`、`ita.device` 加 `ring`(`watchdog_version` 已在 0006 `device_health`;`desktop_version` 到 P8);原訂 0005,0005 / 0006 已用於 E6 與 P5(`P6-UPGRADE-DESIGN.md` §1) | P6 |
-| `0006_software.sql` | `ita.software_package` | P7 |
+| `0008_software.sql` | `ita.software_package`、`ita.command_batch` 加 `state`;原訂 0006,0005~0007 已被 E6、P5、P6 使用 | P7 |
 
 同步更新 `ItAgentBack/docs/DB_SCHEMA.md` 與 `../GigaNexusAIPlan/architecture/projects/`(若建立 RustIt 專案檔)。
 
@@ -414,7 +414,7 @@ Demo(Tauri)改造為使用者端程式 `desktop`:使用者會用的頁面保留(
 
 ## 8. 階段與完成標準
 
-> 進度(細節以甘特圖為準):P0–P4 已在測試區完成(P3 於 2026-10-19 完成合併驗證;P4 含 GigaItApp 指令畫面，見 `HANDOFF.md`);**P5 測試區完成(2026-10-20)**(設計 `P5-MONITOR-DESIGN.md`:P5-1 健康 / 變更事件 / 告警已上測試區;P5-2 Watchdog 已合併並於 2026-10-19 VM 驗收通過;P5-3 GigaItApp 畫面 2026-10-20 上測試區並驗證通過;P5-4 指南 v0.10 回寫);P6 設計 2026-10-20 確認(`P6-UPGRADE-DESIGN.md`),P6-1 進行中;P7、P8 未開始。
+> 進度(細節以甘特圖為準):P0–P4 已在測試區完成(P3 於 2026-10-19 完成合併驗證;P4 含 GigaItApp 指令畫面，見 `HANDOFF.md`);**P5 測試區完成(2026-10-20)**(設計 `P5-MONITOR-DESIGN.md`:P5-1 健康 / 變更事件 / 告警已上測試區;P5-2 Watchdog 已合併並於 2026-10-19 VM 驗收通過;P5-3 GigaItApp 畫面 2026-10-20 上測試區並驗證通過;P5-4 指南 v0.10 回寫);P6 設計 2026-10-20 確認(`P6-UPGRADE-DESIGN.md`),P6-1 進行中;P7 設計草案 2026-10-20(`P7-SOFTWARE-DESIGN.md`,§9 第 2、11 項待決)、P8 未開始。
 
 | 階段 | 內容 | 主要 repo | 完成標準 | 依賴 |
 | --- | --- | --- | --- | --- |
