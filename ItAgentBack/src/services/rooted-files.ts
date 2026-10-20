@@ -3,11 +3,13 @@
  *   - 路徑由呼叫端以已驗證格式的各段組成,這裡再以 realpath 確認實際位置(含符號連結)仍在根目錄內,防路徑穿越
  *   - SHA-256 以 (路徑, 大小, 修改時間, 狀態變更時間, inode) 快取,檔案被換掉時重新計算;同一檔案同時多個請求只算一次
  *   - Range 標頭解析(單一範圍)
+ *   - 檔案或目錄不存在視為「沒有」;其他錯誤(權限、NAS 掛載中斷)回 503 ITA_FILES_UNAVAILABLE,不當成不存在(AGENT.md §5)
  */
 import { createHash } from 'node:crypto';
 import { createReadStream, type ReadStream } from 'node:fs';
 import { readdir, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { AppError } from '../errors.js';
 
 export interface ResolvedFile {
   file: string;
@@ -15,6 +17,13 @@ export interface ResolvedFile {
   mtimeMs: number;
   /** 快取鍵:大小、修改時間、狀態變更時間、inode(內容被換掉時至少有一項改變) */
   key: string;
+}
+
+/** 不存在(含路徑中間是檔案)視為沒有;其他錯誤丟 503 */
+function missingOrThrow(err: unknown): null {
+  const code = (err as NodeJS.ErrnoException).code;
+  if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+  throw new AppError(503, 'ITA_FILES_UNAVAILABLE', `檔案目錄暫時無法讀取(${code ?? 'unknown'}),請稍後重試`);
 }
 
 export class RootedFiles {
@@ -31,8 +40,8 @@ export class RootedFiles {
       const s = await stat(real);
       if (!s.isFile() || s.size <= 0 || s.size > maxBytes) return null;
       return { file: real, size: s.size, mtimeMs: s.mtimeMs, key: `${s.size}:${s.mtimeMs}:${s.ctimeMs}:${s.ino}` };
-    } catch {
-      return null;
+    } catch (err) {
+      return missingOrThrow(err);
     }
   }
 
@@ -58,8 +67,8 @@ export class RootedFiles {
   protected async dirs(dir: string): Promise<string[]> {
     try {
       return (await readdir(dir, { withFileTypes: true })).filter((d) => d.isDirectory()).map((d) => d.name);
-    } catch {
-      return [];
+    } catch (err) {
+      return missingOrThrow(err) ?? [];
     }
   }
 
@@ -67,8 +76,8 @@ export class RootedFiles {
   protected async names(dir: string): Promise<string[]> {
     try {
       return await readdir(dir);
-    } catch {
-      return [];
+    } catch (err) {
+      return missingOrThrow(err) ?? [];
     }
   }
 }

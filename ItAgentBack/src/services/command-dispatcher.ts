@@ -151,6 +151,8 @@ export const BATCH_MAX_DEVICES = 200;
 const SWEEP_LIMIT = 500;
 /** 待核可批次的核可期限(B1:24 小時無人核可 → expired) */
 export const APPROVAL_WINDOW_MS = 24 * 3_600_000;
+/** 全域並行上限補送一次最多掃幾頁(每頁 BATCH_MAX_DEVICES 筆) */
+const LIMITED_MAX_PAGES = 50;
 /** 會送出指令的批次狀態 */
 const SENDABLE: readonly BatchState[] = ['running', 'done'];
 
@@ -309,7 +311,8 @@ export class CommandDispatcher {
     const same = (c: CommandRecord) => {
       this.assertScoped(ctx, c.deviceCompany, `command ${c.commandId}`);
       // 同一個 key 用在不同電腦或類型:不可回傳舊的那筆(稽核會看不出沒有建立)
-      if (c.deviceId !== deviceId || c.kind !== input.kind || c.level !== level)
+      const pkg = typeof input.params?.packageId === 'string' ? input.params.packageId.toLowerCase() : undefined;
+      if (c.deviceId !== deviceId || c.kind !== input.kind || c.level !== level || (pkg !== undefined && parse(c.params)?.package_id !== pkg))
         throw new AppError(422, 'ITA_IDEMPOTENCY_KEY_REUSED', 'Idempotency-Key 已用於另一筆不同的指令');
       return toView(c);
     };
@@ -387,7 +390,10 @@ export class CommandDispatcher {
         ctx.log.info({ batchId: b.batchId, scopeDenied: true }, '既有批次含資料範圍外的裝置');
         throw new AppError(404, 'ITA_DEVICE_NOT_FOUND', '找不到此電腦');
       }
-      if (b.kind !== input.kind || b.level !== level) throw new AppError(422, 'ITA_IDEMPOTENCY_KEY_REUSED', 'Idempotency-Key 已用於另一筆不同的批次');
+      // 軟體派送:同一個 key 用在另一個套件也算不同的批次(否則會以為派了新套件,實際回傳舊的那批)
+      const pkg = typeof input.params?.packageId === 'string' ? input.params.packageId.toLowerCase() : undefined;
+      if (b.kind !== input.kind || b.level !== level || (pkg !== undefined && parse(b.params)?.package_id !== pkg))
+        throw new AppError(422, 'ITA_IDEMPOTENCY_KEY_REUSED', 'Idempotency-Key 已用於另一筆不同的批次');
       return result(b);
     };
     if (key) {
@@ -464,7 +470,7 @@ export class CommandDispatcher {
     if (!batch) throw storageUnavailable();
     if (requiresApproval) return result(batch);
     await this.refillBatch(ctx, batch.id);
-    return result((await this.store.getBatch(batchId).catch(() => null)) ?? batch);
+    return result((await this.rereadBatch(ctx, batchId)) ?? batch);
   }
 
   // ---------- 批次第二人核可(B1;P7-SOFTWARE-DESIGN §6) ----------
@@ -479,6 +485,16 @@ export class CommandDispatcher {
     return b;
   }
 
+  /** 寫入後重讀批次;讀取失敗記 warn,由呼叫端退回寫入前的紀錄(寫入已成功,不回 503) */
+  private async rereadBatch(ctx: Ctx, batchId: string): Promise<BatchRecord | null> {
+    try {
+      return await this.store.getBatch(batchId);
+    } catch (err) {
+      ctx.log.warn({ err, batchId }, '重讀批次失敗,回應以寫入前的狀態為準');
+      return null;
+    }
+  }
+
   private assertPending(b: BatchRecord, at: Date): void {
     if (b.state !== 'pending_approval') throw new AppError(409, 'ITA_BATCH_NOT_PENDING', `此批次目前為 ${batchView(b).state},不是待核可`);
     if (at.getTime() - b.createdAt.getTime() >= APPROVAL_WINDOW_MS) throw new AppError(409, 'ITA_BATCH_NOT_PENDING', '此批次已超過 24 小時核可期限');
@@ -491,13 +507,14 @@ export class CommandDispatcher {
     const at = this.now();
     this.assertPending(b, at);
     if (b.createdByEmp === emp) throw new AppError(403, 'ITA_APPROVER_SAME_AS_CREATOR', '核可人不可是批次建立人,請由另一位 IT 核可');
+    // 批次一律用類型預設的有效期限(批次路由不開放 expiresInSec);開放覆寫時需改為記在批次上
     const expiresAt = new Date(at.getTime() + (kindOf(b.kind)?.expiresSec ?? 3600) * 1000);
     const ok = await this.sqlDo(ctx, 'batch.approve', () => this.store.approveBatch(b.id, { emp, name: who.name ?? null }, at, expiresAt));
     if (!ok) throw new AppError(409, 'ITA_BATCH_NOT_PENDING', '批次狀態已被變更,請重新整理');
     ctx.log.info({ batchId, kind: b.kind, devices: b.targetCount, createdBy: b.createdByEmp, approvedBy: emp }, '批次已核可');
     await this.refillBatch(ctx, b.id);
     if (this.limited?.kinds.includes(b.kind)) await this.refillLimited(ctx);
-    return batchView((await this.store.getBatch(batchId).catch(() => null)) ?? b);
+    return batchView((await this.rereadBatch(ctx, batchId)) ?? b);
   }
 
   /** 駁回(建立人也可撤回自己的批次):指令全部 canceled */
@@ -509,7 +526,7 @@ export class CommandDispatcher {
     const ok = await this.sqlDo(ctx, 'batch.reject', () => this.store.rejectBatch(b.id, { emp, name: who.name ?? null }, at, reason));
     if (!ok) throw new AppError(409, 'ITA_BATCH_NOT_PENDING', '批次狀態已被變更,請重新整理');
     ctx.log.info({ batchId, kind: b.kind, devices: b.targetCount, rejectedBy: emp }, '批次已駁回');
-    return batchView((await this.store.getBatch(batchId).catch(() => null)) ?? b);
+    return batchView((await this.rereadBatch(ctx, batchId)) ?? b);
   }
 
   /** 只能取消自己建立、仍是 queued 的指令(指南 §8.3) */
@@ -630,8 +647,15 @@ export class CommandDispatcher {
     if (!limited) return Promise.resolve();
     const run = async () => {
       try {
-        const queued = await this.store.queuedOfKinds(limited.kinds, this.now(), BATCH_MAX_DEVICES);
-        for (const cmd of queued) if (this.channel.isOnline(cmd.deviceId)) await this.trySend(ctx, cmd);
+        // 依 id 分頁掃到底:最舊的一頁全是離線電腦時,後面在線的仍補送得到;名額已滿就提早結束
+        let afterId = 0;
+        for (let page = 0; page < LIMITED_MAX_PAGES; page++) {
+          if ((await this.store.activeOfKinds(limited.kinds)) >= limited.max) return;
+          const queued = await this.store.queuedOfKinds(limited.kinds, this.now(), BATCH_MAX_DEVICES, afterId);
+          for (const cmd of queued) if (this.channel.isOnline(cmd.deviceId)) await this.trySend(ctx, cmd);
+          if (queued.length < BATCH_MAX_DEVICES) return;
+          afterId = queued[queued.length - 1]!.id;
+        }
       } catch (err) {
         ctx.log.warn({ err }, '軟體派送補送失敗,下次掃描再試');
       }

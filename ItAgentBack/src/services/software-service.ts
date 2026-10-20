@@ -472,6 +472,8 @@ export class SoftwareService {
     if (q.commandIds.length === 0)
       throw new AppError(409, 'ITA_PACKAGE_NOT_TESTED', '尚無 pilot 測試機以目前的檔案與參數安裝成功(且偵測通過)的紀錄,請先派送到測試機');
     const signers = [...new Set(signerThumbprints.map((s) => s.toLowerCase()))];
+    if (signers.length === 0 || signers.length > 8 || !signers.every((s) => SIGNER_RE.test(s)))
+      throw new AppError(400, 'VALIDATION_FAILED', '簽章者指紋需 1–8 個 40 碼十六進位', [{ field: 'signerThumbprints', message: '格式不符' }]);
     const unknown = signers.filter((s) => !q.signers.includes(s));
     if (unknown.length)
       throw new AppError(

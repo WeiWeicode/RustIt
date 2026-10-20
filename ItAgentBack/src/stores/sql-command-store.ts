@@ -405,12 +405,13 @@ export class SqlCommandStore implements CommandStore, CommandFileStore {
     return Number((r.recordset[0] as Row).n);
   }
 
-  async queuedOfKinds(kinds: readonly string[], now: Date, limit: number): Promise<CommandRecord[]> {
+  async queuedOfKinds(kinds: readonly string[], now: Date, limit: number, afterId = 0): Promise<CommandRecord[]> {
     if (kinds.length === 0) return [];
-    const req = (await this.request()).input('now', sql.DateTime2(3), now).input('limit', sql.Int, limit);
+    const req = (await this.request()).input('now', sql.DateTime2(3), now).input('limit', sql.Int, limit).input('after', sql.BigInt, afterId);
     const r = await req.query(`SELECT TOP (@limit) ${COLS} FROM ${FROM}
-      WHERE c.kind IN (${this.kindsIn(req, kinds)}) AND c.state = 'queued' AND c.expires_at > @now AND (b.id IS NULL OR b.state IN ('running', 'done'))
-      ORDER BY c.created_at, c.id`);
+      WHERE c.kind IN (${this.kindsIn(req, kinds)}) AND c.state = 'queued' AND c.expires_at > @now AND c.id > @after
+        AND (b.id IS NULL OR b.state IN ('running', 'done'))
+      ORDER BY c.id`);
     return (r.recordset as Row[]).map(toCommand);
   }
 

@@ -440,8 +440,8 @@ export interface CommandStore {
   finishBatchIfDone(batchRef: number): Promise<void>;
   /** 這些類型 sent / acked / running 的總數(全域並行上限) */
   activeOfKinds(kinds: readonly string[]): Promise<number>;
-  /** 這些類型未逾期的 queued(不屬於批次、或批次 running),依建立順序 */
-  queuedOfKinds(kinds: readonly string[], now: Date, limit: number): Promise<CommandRecord[]>;
+  /** 這些類型未逾期的 queued(不屬於批次、或批次 running),內部 id 大於 afterId,依 id(建立順序) */
+  queuedOfKinds(kinds: readonly string[], now: Date, limit: number, afterId?: number): Promise<CommandRecord[]>;
 }
 
 // ---------- 指令附檔(logs.collect;PLATFORM-PLAN A4、B5;migration 0003 ita.command_file) ----------

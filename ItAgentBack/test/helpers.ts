@@ -841,10 +841,10 @@ export class MemoryCommandStore extends Failable implements CommandStore, Comman
     this.hit('activeOfKinds');
     return this.commands.filter((c) => kinds.includes(c.kind) && ['sent', 'acked', 'running'].includes(c.state)).length;
   }
-  async queuedOfKinds(kinds: readonly string[], now: Date, limit: number) {
+  async queuedOfKinds(kinds: readonly string[], now: Date, limit: number, afterId = 0) {
     this.hit('queuedOfKinds');
     return this.commands
-      .filter((c) => kinds.includes(c.kind) && c.state === 'queued' && c.expiresAt > now)
+      .filter((c) => kinds.includes(c.kind) && c.state === 'queued' && c.expiresAt > now && c.id > afterId)
       .filter((c) => {
         const b = this.batches.find((x) => x.id === c.batchRef);
         return !b || b.state === 'running' || b.state === 'done';

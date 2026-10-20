@@ -2,6 +2,7 @@
 
 > 草案 2026-10-20,分支 `docs/p7-software-design`(從 develop `948adf1` 開,P6-2 已合併)。依據:PLATFORM-PLAN §4.4、§4.6、§4.10 A6、§5、§8 P7 列、§8 B1;[ADR 0002](decisions/0002-software-deployment.md)(採方案 B)、[ADR 0003](decisions/0003-code-signing-pki.md);`P4-COMMAND-DESIGN.md`(指令通道、批次);`P6-UPGRADE-DESIGN.md`(`authenticode`、本機信任清單、版本檔目錄、下載 API 模式);`contracts/command-kinds.md`。
 > **狀態**:2026-10-20 需求方確認 §9 全部:第 2 項依建議(未簽章套件由公司憑證加簽),第 11 項先用需求方自己的本機電腦(開發機)加 VM `RUSTIT-P34`,另一台 IT 同意的電腦之後再補;其餘照建議。可開工 P7-1。
+> **進度(2026-10-20 收工,P7-1 未完成)**:分支 `feature/p7-1-software-catalog`(從本設計分支開,worktree `../RustIt-p7-1`)已推到 gitlab / origin,**MR 尚未開**。P7-1 後端實作完成:migration 0008(**只套用整合測試庫 `_poc_test`**)、軟體目錄與兩人覆核、`software.*` / `system.reboot` 指令與參數快照、套件下載、批次第二人核可、全域並行上限;`npm test` 200/200、`test:int` 13/13、typecheck / build 通過。code-reviewer 審查已處理(§8.1);**security-auditor 的報告未完整取得,明天先重跑並處理**(見 §8.1「明天接手」)。
 > 設計當時的現況:Agent 0.7.0、Watchdog 0.2.0(P6-2 已合併 develop);`rustit-common::authenticode`(WinVerifyTrust + 簽章者指紋)與 `agent.toml` `[upgrade] trusted_signers` 已有;`ita.command_batch` 已有 `requires_approval` / `approved_by_*` 欄位(P4 預留、無邏輯);`kindHooks`、批次 `max_concurrent` 補送(`refillBatch`)已有;`ita.device_software`(P3)有每台最新軟體清單;**NAS `RustIT\` 未掛載、軟體目錄與 `software.*` 指令都還沒有**。`RustAgent/crates/demo/src/deploy.rs`(536 行,Firefox / WinRAR 單機版)是移植來源。
 
 ## 0. 分批
@@ -287,6 +288,25 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
 - **ItAgentBack**:契約測試(新 kind 的 params、`result`、錯誤代碼範例);`software-service` 單元測試(狀態機與兩人覆核、`draft` 只能派 pilot、`mark-tested` 簽章者需等於回報值、字元白名單、授權數、批次核可閘門、核可人≠建立人、過期);下載 API(非指派 404、停用 403、`draft` 非 pilot 404、Range / 416、檔案被換掉 503、路徑穿越);`test:int` SQL store(`giganexus_It_Agent_poc_test`:套件登錄重複、狀態條件更新、批次核可條件更新)。
 - **Agent**:`software` 以假實作測試——成功(MSI / Inno / NSIS)、`3010` 標記重開機、`1638` 已安裝、`1618` 重試後成功 / 失敗、逾時、`HASH_MISMATCH`(沒有啟動安裝程式)、`SIGNATURE_INVALID`、`SIGNER_NOT_TRUSTED`、已安裝時跳過、偵測失敗、移除輪詢(NSIS 自我複製)、A6 延後與恢復 / 逾時、斷線補送、重複 `command_id` 不重跑、參數字元白名單、`system.reboot` 排程與取消;`power.rs` 以注入測試。
 - **契約**:`command-kinds.md` 對應範例檔,兩端吃同一份。
+
+### 8.1.1 P7-1 實作與審查(2026-10-20,未完成)
+
+- **與設計的差異(實作時決定,待需求方確認)**:
+  - 批次派送 `POST /v1/software/{id}/deploy` 的 `x-permission` 為 `endpoint.command.admin`(BFF 一個 operation 只能一個權限,與單台 admin-commands 一致);核可 / 駁回為 `endpoint.software.manage`,另檢查核可人的資料範圍涵蓋批次全部電腦。
+  - 核可路由沿用 P4 路徑:`POST /v1/batches/{id}/approve`、`/reject`、`GET /v1/batches/{id}`(設計寫 `/command-batches`)。
+  - 路徑段白名單多允許 `+`(範例 `Notepad++`);安裝檔只接受 `.msi`(installer_type msi)與 `.exe`(其他)。
+  - MSI 產品代碼由 IT 填(主機不解析 MSI);授權數不計尚未完成的派送(軟上限)。
+  - `uninstall` 可對已撤回的套件執行;`draft` / `tested` 的移除同樣只限 pilot。
+  - `system.reboot` 類型已可建立,Agent 0.7 回 `UNSUPPORTED_COMMAND`(Agent 端在 P7-3)。
+  - 主機取消指令時寫 `error_code`:`PACKAGE_REVOKED`、`BATCH_REJECTED`、`APPROVAL_EXPIRED`。
+  - 告警規則 `software_install_failed`、`reboot_pending`(§3.1)**尚未做**;套件被換掉只記 error 日誌、回 503,未開告警。
+- **code-reviewer(無必修,已處理)**:全域補送分頁掃描(避免最舊 200 筆都是離線電腦時餓死);LIKE 樣式參數 800 字;`markTested` 服務層擋空簽章者、實際簽章者不截斷;`rooted-files` 只有不存在回 null,權限 / 掛載錯誤回 503 `ITA_FILES_UNAVAILABLE`(P6 版本檔目錄同樣受惠);`params LIKE` 以 `created_at` 收斂(撤回 7 天、測試結果 180 天);重讀批次失敗記 warn;補測試(核可人範圍 404、空簽章者)。另自行修正:同一個 Idempotency-Key 用在另一個套件回 422(批次與單台)。
+- **security-auditor(報告未完整取得)**:只收到摘要——H1 安裝參數白名單可能擋不住「讓 msiexec / 安裝程式讀外部檔案」(需在 VM 驗證);兩人覆核與批次核可可由同一人以合法 API 繞過(例如:以單台 admin-commands 逐台派送避開 > 20 台核可;登錄後改參數再由他人發佈等路徑待確認);deploy 實際只檢查 `endpoint.command.admin`。
+- **明天接手**:
+  1. 在 worktree `D:\檔案分享\程式碼\GigaNexusAI\RustIt-p7-1` 重跑 security-auditor(diff `d345dda..HEAD`),取得完整報告後修正高 / 中項目,結果補進本節。
+  2. 重跑 `npm run typecheck`、`npm test`、`npm run test:int`(`npx tsx --env-file=../../RustIt/ItAgentBack/.env --test test/int/*.int.test.ts`,只讀原檢出的 `.env`、不複製;Mongo / Redis 為 127.0.0.1,DB 守門只允許 `*_poc_test`)。
+  3. 用 `GITLAB_TOKEN` 開 MR → develop(只開不合併),描述註明:依賴 MR !39 先合併;**部署前必須先套用 migration 0008**(新版所有指令查詢讀 `command_batch.state`);migration 0008 內容請需求方先看,再經同意套用 `giganexus_It_Agent_test`;測試區 compose 已加 `SOFTWARE_DIR=/srv/software`。
+  4. 需求方正在測試區測 P6:不部署、不動主機 2 / VM / `giganexus_It_Agent_test`,不推送或合併 develop / main。
 
 ### 8.2 風險與已知限制(實作前先看)
 

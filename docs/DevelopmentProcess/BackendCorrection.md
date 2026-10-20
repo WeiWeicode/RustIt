@@ -10,6 +10,6 @@
   - `release-files.ts` 的 realpath 檢查、SHA-256 快取與 `parseRange` 搬到 `rooted-files.ts`(行為不變,`release.test.ts` 照常通過)。
   - `system.reboot` 由「不認得的類型」變成 admin 類型:basic 路徑送它改回 `400 ENDPOINT_COMMAND_LEVEL_MISMATCH`(`commands.test.ts` 兩處預期隨之更新)。
   - 未設定 `SOFTWARE_DIR` 時 `software.*` 指令建立一律回 `404 ITA_PACKAGE_NOT_FOUND`(沒有目錄快照的軟體指令不可送到 Agent)。
-- 部署注意:**必須先套用 migration 0008,再部署新版 endpoint-server**(新版所有指令查詢都讀 `command_batch.state`)。測試區 compose 已加 `SOFTWARE_DIR=/srv/software`(主機 2 `/srv/giganexus/ita-software` 唯讀掛載,目錄需事先建立)。
+- 部署注意:**必須先套用 migration 0008,再部署新版 endpoint-server**(新版所有指令查詢都讀 `command_batch.state`)。測試區 compose 已加 `SOFTWARE_DIR=/srv/software`(主機 2 `/srv/giganexus/ita-software` 唯讀掛載;不存在時 Docker 建立空目錄,軟體 API 照常運作、清單為空;放入安裝檔由需求方處理或經同意後經 `ssh host2` 複製,設計 §4)。
 - 檔案:`ItAgentBack/src/services/command-dispatcher.ts`、`src/stores/{types,sql-command-store}.ts`、`src/routes/commands.ts`、`src/services/{release-files,rooted-files}.ts`、`src/server.ts`、`deploy/docker-compose.yml`、`test/{helpers,commands.test,scope.test}.ts`
 - 驗證:`npm run typecheck`、`npm test` 199/199、`npm run test:int` 13/13、`npm run build`。

@@ -179,7 +179,8 @@ export class SqlSoftwareStore implements SoftwareStore {
     )
       .input('pid', sql.UniqueIdentifier, packageId)
       .input('signers', sql.VarChar(400), signers.join(','))
-      .input('observed', sql.VarChar(400), cut(observed.join(','), 400))
+      // 測試結果最多 200 筆,實際簽章者通常 1–2 個;超過 9 個(40 字 + 逗號)才會被截斷,截斷時只保留完整的指紋
+      .input('observed', sql.VarChar(400), observed.slice(0, 9).join(','))
       .input('emp', sql.NVarChar(64), cut(actor.emp, 64))
       .input('at', sql.DateTime2(3), at)
       .input('req', sql.VarChar(64), cut(requestId, 64)).query(`
@@ -223,7 +224,8 @@ export class SqlSoftwareStore implements SoftwareStore {
         BEGIN
           -- 撤回後不能再被派送:尚未送出的安裝取消;已送出的指令不受影響(下載會被拒,設計 §3.2、§3.3)
           UPDATE ita.command SET state = 'canceled', error_code = 'PACKAGE_REVOKED', finished_at = @at, updated_at = SYSUTCDATETIME()
-          WHERE kind = 'software.install' AND state = 'queued' AND params LIKE @pat ESCAPE '\\';
+          -- queued 最長存活 48 小時(有效期限 24 小時 + 待核可 24 小時):只掃最近 7 天,避免全表掃描
+          WHERE created_at >= DATEADD(DAY, -7, @at) AND kind = 'software.install' AND state = 'queued' AND params LIKE @pat ESCAPE '\\';
           SET @n = @@ROWCOUNT;
         END
         COMMIT;
@@ -236,7 +238,8 @@ export class SqlSoftwareStore implements SoftwareStore {
     const r = await (await this.request()).input('pat', sql.NVarChar(100), packageParamLike(packageId)).input('limit', sql.Int, limit).query(`
       SELECT TOP (@limit) c.command_id, d.device_id, d.computer_name, d.company, d.ring, c.state, c.params, c.result_summary, c.error_code, c.created_by_emp, c.finished_at
       FROM ita.command c JOIN ita.device d ON d.id = c.device_ref
-      WHERE c.kind = 'software.install' AND c.params LIKE @pat ESCAPE '\\'
+      -- 測試依據只看最近 180 天(前置萬用字元的 LIKE 無法用索引,以 created_at 收斂掃描範圍)
+      WHERE c.created_at >= DATEADD(DAY, -180, SYSUTCDATETIME()) AND c.kind = 'software.install' AND c.params LIKE @pat ESCAPE '\\'
       ORDER BY c.id DESC`);
     return (r.recordset as Row[]).map((x) => ({
       commandId: String(x.command_id).toLowerCase(),
@@ -283,7 +286,8 @@ export class SqlSoftwareStore implements SoftwareStore {
     // 每批 200 個樣式(參數上限 2100)
     for (let i = 0; i < patterns.length; i += 200) {
       const req = await this.request();
-      const values = patterns.slice(i, i + 200).map((p, k) => (req.input(`p${k}`, sql.NVarChar(400), p), `(${i + k}, @p${k})`));
+      // 跳脫後最長 800 字(detect_value 400 字,每字最多加一個 \)
+      const values = patterns.slice(i, i + 200).map((p, k) => (req.input(`p${k}`, sql.NVarChar(800), p), `(${i + k}, @p${k})`));
       const scope = companies ? ` AND ${companyIn(req, companies)}` : '';
       const r = await req.query(`
         SELECT p.k, COUNT(DISTINCT s.device_ref) AS n
@@ -298,7 +302,7 @@ export class SqlSoftwareStore implements SoftwareStore {
   }
 
   async installedDevices(pattern: string, opts: { companies?: string[]; onlyRefs?: number[]; limit: number }) {
-    const req = (await this.request()).input('pat', sql.NVarChar(400), pattern).input('limit', sql.Int, opts.limit);
+    const req = (await this.request()).input('pat', sql.NVarChar(800), pattern).input('limit', sql.Int, opts.limit);
     let where = `s.name LIKE @pat ESCAPE '\\' AND d.status = 'active' AND d.merged_into IS NULL`;
     if (opts.companies) where += ` AND ${companyIn(req, opts.companies)}`;
     if (opts.onlyRefs) {

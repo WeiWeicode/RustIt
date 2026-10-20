@@ -273,6 +273,7 @@ describe('軟體目錄、覆核與派送(SoftwareService + CommandDispatcher)', 
     const cmd = await install(pilot, r.packageId);
     await succeed(pilot, cmd.commandId, PKG_SIGNER.toUpperCase());
     await assert.rejects(env.software.markTested(ctx, IT, r.packageId, ['c'.repeat(40)]), { code: 'ITA_SIGNER_NOT_OBSERVED' });
+    await assert.rejects(env.software.markTested(ctx, IT, r.packageId, []), { code: 'VALIDATION_FAILED' });
     const tested = await env.software.markTested(ctx, IT, r.packageId, [PKG_SIGNER.toUpperCase()]);
     assert.deepEqual([tested.status, tested.signerThumbprints, tested.observedSigners, tested.testedByEmp], ['tested', [PKG_SIGNER], [PKG_SIGNER], 'S000001']);
     await assert.rejects(env.software.markTested(ctx, IT, r.packageId, [PKG_SIGNER]), { code: 'ITA_PACKAGE_STATUS' });
@@ -392,6 +393,14 @@ describe('軟體目錄、覆核與派送(SoftwareService + CommandDispatcher)', 
     assert.equal(b.state, 'pending_approval');
     // 同一個 Idempotency-Key 回傳同一批
     assert.equal((await env.software.deploy(ctx, IT, id, { action: 'install', deviceIds: [pilot.deviceId, other.deviceId] }, 'k-1')).batchId, b.batchId);
+    // 同一個 key 用在另一個套件:422(不可回傳舊的那批)
+    env.dir.put('7-Zip/24.10/7z2410-x64.msi', 'MSI-7zip-24.10');
+    const other2 = await register({ version: '24.10', fileName: '7-Zip/24.10/7z2410-x64.msi' });
+    await assert.rejects(env.software.deploy(ctx, IT, other2.packageId, { action: 'install', deviceIds: [pilot.deviceId, other.deviceId] }, 'k-1'), {
+      code: 'ITA_IDEMPOTENCY_KEY_REUSED',
+    });
+    // 核可人的資料範圍需涵蓋批次全部電腦(這兩台未指定公司:只有全部公司看得到)
+    await assert.rejects(env.commands.approveBatch({ ...ctx, scope: only('甲公司') }, REVIEWER, b.batchId), { code: 'ITA_BATCH_NOT_FOUND' });
     const rejected = await env.commands.rejectBatch(ctx, IT, b.batchId, '目標有誤');
     assert.deepEqual([rejected.state, rejected.rejectReason, rejected.counts], ['rejected', '目標有誤', { canceled: 2 }]);
     env.clock.advance(APPROVAL_WINDOW_MS / 1000 - 60);
@@ -426,6 +435,21 @@ describe('軟體目錄、覆核與派送(SoftwareService + CommandDispatcher)', 
     assert.equal((await env.commands.getBatch(ctx, b.batchId)).state, 'done');
     assert.equal(env.commandStore.batches.find((x) => x.batchId === b.batchId)!.state, 'done');
     void c1;
+  });
+
+  it('全域並行上限補送:最舊的 200 筆以上都是離線電腦時,後面在線的仍補送得到', async () => {
+    const id = await published();
+    for (let i = 0; i < 70; i++) {
+      const d = await addDevice(`PC-OFF-${i}`, 100 + i);
+      for (let k = 0; k < 3; k++) await install(d, id);
+    }
+    const late = await addDevice('PC-LATE', 999);
+    const cmd = await install(late, id);
+    assert.equal(cmd.state, 'queued');
+    assert.ok(env.commandStore.commands.filter((c) => c.state === 'queued').length > 200);
+    const conn = await online(late);
+    await env.commands.sweep(ctx);
+    assert.equal(conn.sent.filter((m) => m.type === 'command' && m.id === cmd.commandId).length, 1);
   });
 });
 
