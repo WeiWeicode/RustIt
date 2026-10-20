@@ -21,6 +21,9 @@
  *   ENDPOINT_SCOPE_ALL_ROLES  可管理所有公司的角色代碼(逗號分隔;內部 Token 的 roles 有任一個即全部公司;E6)。test / prod 必須設定,
  *                             要沒有人能看全部時明確設為空字串;dev 預設空
  *   ENDPOINT_COMPANY_DOMAINS  網域 → 公司(`公司=網域,網域;公司=網域`,公司名稱同 Gateway comp_name);省略 = 不自動判定(E6 §3.2)
+ *   RELEASES_DIR              Agent / Watchdog 版本檔目錄(唯讀;{component}/{version}/{檔名},P6-UPGRADE-DESIGN §4);省略 = 不啟用升級
+ *                             (版本 API 不註冊、Watchdog 的 target 一律 null)。容器 /srv/releases
+ *   RELEASE_MAX_CONCURRENT    同時升級中的裝置上限,預設 20(P6-UPGRADE-DESIGN §2.1)
  */
 import { readFileSync } from 'node:fs';
 import { isGatewayPort, loadGatewayEnv, loadMonitorEnv, type GatewayEnv, type MonitorEnv } from '@giganexus/backend-sdk';
@@ -79,6 +82,10 @@ export interface Config {
   companyDomains: Map<string, string>;
   /** 告警門檻(P5-MONITOR-DESIGN §4) */
   alertThresholds: AlertThresholds;
+  /** 版本檔目錄(P6);null = 不啟用升級 */
+  releasesDir: string | null;
+  /** 同時升級中的裝置上限(P6) */
+  releaseMaxConcurrent: number;
 }
 
 export class ConfigError extends Error {
@@ -203,6 +210,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd?: string): 
     scopeAllRoles,
     companyDomains,
     alertThresholds: alertThresholds(env),
+    releasesDir: env.RELEASES_DIR?.trim() || null,
+    releaseMaxConcurrent: int('RELEASE_MAX_CONCURRENT', env.RELEASE_MAX_CONCURRENT, 20, 1, 1000),
   };
 }
 

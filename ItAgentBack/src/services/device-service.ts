@@ -27,6 +27,7 @@ import {
   type EventsResponse,
   type WatchdogReportRequest,
   type WatchdogReportResponse,
+  type WatchdogTargets,
   type HeartbeatHealth,
   type HelloAckBody,
   type HelloBody,
@@ -206,6 +207,8 @@ export interface DeviceServiceOptions {
   onHostEvents?: (ctx: Ctx, deviceRef: number, events: SavedHostEvent[]) => Promise<void>;
   /** 端點事件寫入後(Agent /events、Watchdog report;P5-2 告警服務的 onAgentEvents) */
   onAgentEvents?: (ctx: Ctx, deviceRef: number, events: { type: string; data?: Record<string, unknown> }[]) => Promise<void>;
+  /** Watchdog 上報的升級進度與目標版本(P6 ReleaseService;省略 = 不啟用升級,target 一律 null) */
+  upgrades?: { onWatchdogReport(ctx: Ctx, device: DeviceRecord, req: WatchdogReportRequest): Promise<WatchdogTargets> };
   now?: () => Date;
 }
 
@@ -249,6 +252,18 @@ export const WATCHDOG_EVENT_TYPES: readonly string[] = [
   'agent_start_failed',
   'agent_pipe_impersonation',
 ];
+/**
+ * 升級事件(P6,event.schema.json Upgrade):兩條路徑都收,但元件要對得上 —— Watchdog 升級 Agent(component = agent)只經 Watchdog 上報,
+ * Agent 替換 Watchdog(component = watchdog)只經 /agent/v1/events(P6-UPGRADE-DESIGN §2.3)
+ */
+export const UPGRADE_EVENT_TYPES: readonly string[] = ['upgrade_started', 'upgrade_succeeded', 'upgrade_failed'];
+
+/** 端點事件是否屬於這條路徑(資安稽核 L1 的路徑白名單,P6 加升級事件) */
+export function eventAllowedOn(e: { type: string; data?: Record<string, unknown> }, source: 'agent' | 'watchdog'): boolean {
+  if (UPGRADE_EVENT_TYPES.includes(e.type)) return e.data?.component === (source === 'watchdog' ? 'agent' : 'watchdog');
+  return WATCHDOG_EVENT_TYPES.includes(e.type) === (source === 'watchdog');
+}
+
 /** Watchdog 定期上報間隔(秒;指南 §7.3 每 5 分鐘) */
 export const WATCHDOG_REPORT_SEC = 300;
 /** 健康走勢分桶(毫秒) */
@@ -325,6 +340,7 @@ export class DeviceService implements CommandChannel {
   private readonly monitor: MonitorStore | undefined;
   private readonly onHostEvents: DeviceServiceOptions['onHostEvents'];
   private readonly onAgentEvents: DeviceServiceOptions['onAgentEvents'];
+  private readonly upgrades: DeviceServiceOptions['upgrades'];
 
   /** 目前在線的 WebSocket 連線數(本行程;監控心跳回報) */
   get onlineCount(): number {
@@ -345,6 +361,7 @@ export class DeviceService implements CommandChannel {
     this.monitor = opts.monitor;
     this.onHostEvents = opts.onHostEvents;
     this.onAgentEvents = opts.onAgentEvents;
+    this.upgrades = opts.upgrades;
     this.now = opts.now ?? (() => new Date());
   }
 
@@ -623,7 +640,7 @@ export class DeviceService implements CommandChannel {
    */
   private async storeEndpointEvents(ctx: Ctx, device: DeviceRecord, req: EventsRequest, source: 'agent' | 'watchdog'): Promise<EventsResponse> {
     const receivedAt = this.now();
-    const allowed = req.events.filter((e) => WATCHDOG_EVENT_TYPES.includes(e.type) === (source === 'watchdog'));
+    const allowed = req.events.filter((e) => eventAllowedOn(e, source));
     if (allowed.length !== req.events.length)
       ctx.log.warn({ deviceId: device.deviceId, source, rejected: req.events.filter((e) => !allowed.includes(e)).map((e) => e.type) }, '端點事件類型不屬於此路徑,略過');
     const events: AgentEvent[] = allowed.map((e) => {
@@ -665,7 +682,10 @@ export class DeviceService implements CommandChannel {
     }
     const accepted = req.events?.length ? (await this.storeEndpointEvents(ctx, device, { events: req.events }, 'watchdog')).accepted : [];
     ctx.log.info({ deviceId: device.deviceId, watchdog: req.watchdog_version, agent: req.agent.service_state, events: accepted.length }, 'Watchdog 上報');
-    return { server_time: at.toISOString(), accepted, report_interval_sec: WATCHDOG_REPORT_SEC, target: null };
+    // 升級(P6):失敗只記 warn、這次不下發目標(上報本身已保存,Watchdog 下次上報再取)
+    const upgrades = this.upgrades;
+    const target = upgrades ? ((await this.soft(ctx, 'release.onWatchdogReport', () => upgrades.onWatchdogReport(ctx, device, req))) ?? null) : null;
+    return { server_time: at.toISOString(), accepted, report_interval_sec: WATCHDOG_REPORT_SEC, target };
   }
 
   async heartbeat(ctx: Ctx, device: DeviceRecord, body: Record<string, unknown>): Promise<{ server_time: string }> {

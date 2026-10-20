@@ -63,8 +63,12 @@ services:
       # 資料範圍(E6,docs/E6-COMPANY-SCOPE-DESIGN.md):可管理所有公司的角色代碼(必須設定,可為空字串)、網域 → 公司對應
       ENDPOINT_SCOPE_ALL_ROLES: ${ENDPOINT_SCOPE_ALL_ROLES?ENDPOINT_SCOPE_ALL_ROLES 必須設定(可管理所有公司的角色代碼;沒有則設為空字串)}
       ENDPOINT_COMPANY_DOMAINS: ${ENDPOINT_COMPANY_DOMAINS:-}
+      # 升級(P6,docs/P6-UPGRADE-DESIGN.md §4):版本檔目錄唯讀掛載;測試區在 NAS 帳密到位前用主機 2 本機目錄
+      RELEASES_DIR: /srv/releases
+      RELEASE_MAX_CONCURRENT: ${RELEASE_MAX_CONCURRENT:-20}
     volumes:
       - ita_command_files:/data/command-files
+      - ${ITA_RELEASES_HOST_DIR:-/srv/giganexus/ita-releases}:/srv/releases:ro
     secrets: [gw_api_key, ita_db_password, mongo_url, redis_url, endpoint_server_crt, endpoint_server_key, monitor_api_key, agent_monitor_api_key]
     depends_on: [ita-mongo, ita-redis]
     networks:

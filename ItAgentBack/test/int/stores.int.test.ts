@@ -19,6 +19,7 @@ import { SqlCommandStore } from '../../src/stores/sql-command-store.js';
 import { CommandFileService } from '../../src/services/command-files.js';
 import { SqlDeviceStore } from '../../src/stores/sql-store.js';
 import { SqlMonitorStore } from '../../src/stores/sql-monitor-store.js';
+import { SqlReleaseStore } from '../../src/stores/sql-release-store.js';
 import { AlertService } from '../../src/services/alert-service.js';
 import { CommandDispatcher } from '../../src/services/command-dispatcher.js';
 import { parseCompanyDomains } from '../../src/services/company.js';
@@ -464,5 +465,91 @@ describe('SQL Server + Mongo + Redis', () => {
     await svc.ingestEvents(ctx, e, { events: [started(1, 'unexpected'), started(2, 'stop'), started(3, 'unexpected')] });
     const t = (await monitor.monitorTargets(new Date(Date.now() - 86_400_000))).find((x) => x.deviceRef === e.id)!;
     assert.equal(t.unexpectedRestarts24h, 2);
+  });
+
+  it('P6(0007):版本登錄與重複、狀態條件更新、撤回清除環目標與強制版本、環目標生效時間、裝置環、升級進度 upsert、進行中台數、升級目標列', async () => {
+    const rel = new SqlReleaseStore(() => sql.connection());
+    const svc = new DeviceService(sql, mongo, redis, { heartbeatIntervalSec: 30 });
+    const d = await svc.identify(ctx, 'O=GigaNexus Dev,CN=PC-P6-01', '7'.repeat(40));
+    const actor = { emp: 'S000001', name: '測試人員' };
+    const at = new Date('2026-10-21T00:00:00Z');
+    // migration 預設:3 環 × 2 元件,裝置預設 all
+    assert.equal((await rel.listRings()).length, 6);
+    assert.equal(await rel.deviceRing(d.id), 'all');
+
+    const r = await rel.addRelease({
+      component: 'agent',
+      version: '0.7.1',
+      fileName: 'rustit-agent.exe',
+      sha256: 'a'.repeat(64),
+      sizeBytes: 14,
+      signerThumbprints: ['b'.repeat(40), 'c'.repeat(40)],
+      notes: '整合測試',
+      actor,
+      at,
+      requestId: 'int-p6',
+    });
+    assert.deepEqual([r.status, r.signerThumbprints.length, r.createdByEmp], ['draft', 2, 'S000001']);
+    await assert.rejects(
+      rel.addRelease({
+        component: 'agent',
+        version: '0.7.1',
+        fileName: 'x',
+        sha256: 'a'.repeat(64),
+        sizeBytes: 1,
+        signerThumbprints: ['b'.repeat(40)],
+        notes: null,
+        actor,
+        at,
+        requestId: 'int-p6',
+      }),
+      { code: 'ITA_RELEASE_EXISTS' },
+    );
+    assert.equal((await rel.findRelease('agent', '0.7.1'))?.releaseId, r.releaseId);
+    assert.equal((await rel.listReleases({ component: 'watchdog' })).length, 0);
+
+    // 環目標:版本改變才更新 target_set_at
+    await rel.setRingTarget('pilot', 'agent', '0.7.1', actor, at, 'int-p6');
+    const later = new Date(at.getTime() + 60_000);
+    await rel.setRingTarget('pilot', 'agent', '0.7.1', actor, later, 'int-p6');
+    const pilot = (await rel.listRings()).find((x) => x.ring === 'pilot' && x.component === 'agent')!;
+    assert.deepEqual([pilot.targetVersion, pilot.targetSetAt?.toISOString(), pilot.updatedAt.toISOString()], ['0.7.1', at.toISOString(), later.toISOString()]);
+    await rel.setRingTarget('it', 'agent', '0.7.1', actor, at, 'int-p6');
+
+    // 發佈:只從 draft;重複發佈不更新
+    assert.equal((await rel.setReleaseStatus(r.releaseId, ['draft'], 'published', actor, at, 'int-p6')).ok, true);
+    assert.equal((await rel.setReleaseStatus(r.releaseId, ['draft'], 'published', actor, at, 'int-p6')).ok, false);
+    assert.equal((await rel.getRelease(r.releaseId))?.publishedByEmp, 'S000001');
+
+    // 裝置環與升級進度
+    await rel.setDeviceRing(d.id, 'pilot');
+    assert.equal(await rel.deviceRing(d.id), 'pilot');
+    const patch = {
+      targetVersion: '0.7.1',
+      fromVersion: '0.7.0',
+      state: 'downloading' as const,
+      attempts: 0,
+      errorCode: null,
+      errorMessage: null,
+      forcedVersion: '0.7.1',
+      forcedByEmp: 'S000001',
+      forcedAt: at,
+      startedAt: at,
+    };
+    await rel.saveUpgrade(d.id, 'agent', patch, new Date());
+    await rel.saveUpgrade(d.id, 'agent', { ...patch, state: 'installing' }, new Date());
+    const ups = await rel.deviceUpgrades(d.id);
+    assert.deepEqual([ups.length, ups[0]!.state, ups[0]!.forcedVersion], [1, 'installing', '0.7.1']);
+    assert.ok((await rel.activeUpgrades(new Date(Date.now() - 60_000), new Date(Date.now() - 60_000))) >= 1);
+    const row = (await rel.upgradeTargets()).find((x) => x.deviceRef === d.id)!;
+    assert.deepEqual([row.ring, row.upgrades.length, row.openRules], ['pilot', 1, []]);
+    assert.equal((await rel.upgradeTargets([])).length, 0, 'IN 空清單不回任何列');
+
+    // 撤回:清除以此為目標的環(pilot、it)與強制版本(同一交易)
+    const revoked = await rel.setReleaseStatus(r.releaseId, ['draft', 'published'], 'revoked', actor, later, 'int-p6');
+    assert.deepEqual([revoked.ok, revoked.clearedRings.sort()], [true, ['it', 'pilot']]);
+    assert.equal((await rel.listRings()).filter((x) => x.targetVersion === '0.7.1').length, 0);
+    assert.equal((await rel.deviceUpgrades(d.id))[0]!.forcedVersion, null);
+    assert.equal((await rel.getRelease(r.releaseId))?.status, 'revoked');
   });
 });

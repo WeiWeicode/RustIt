@@ -340,6 +340,20 @@ describe('指令管理 API(:51240)', () => {
     assert.equal(post['x-audit-level'], 'meta');
     assert.equal(doc.paths['/v1/commands/{commandId}']!.get!['x-permission'], 'endpoint.device.read');
     assert.equal(doc.paths['/v1/batches/basic-commands']!.post!['x-permission'], 'endpoint.command.basic');
+    const admin = doc.paths['/v1/devices/{deviceId}/admin-commands']!.post!;
+    assert.deepEqual([admin['x-permission'], admin['x-audit-level']], ['endpoint.command.admin', 'meta']);
+  });
+
+  it('admin 路徑(P6):agent.upgrade 202;一般指令 400 ENDPOINT_COMMAND_LEVEL_MISMATCH', async () => {
+    const admin = (kind: string, params: Record<string, unknown>) =>
+      mgmt.inject({ method: 'POST', url: `/v1/devices/${device.deviceId}/admin-commands`, payload: { kind, params } });
+    const ok = await admin('agent.upgrade', { component: 'agent' });
+    assert.equal(ok.statusCode, 202, ok.body);
+    assert.deepEqual([ok.json().kind, ok.json().level], ['agent.upgrade', 'admin']);
+    const wrong = await admin('inventory.collect', {});
+    assert.deepEqual([wrong.statusCode, wrong.json().code], [400, 'ENDPOINT_COMMAND_LEVEL_MISMATCH']);
+    const fromBasic = await create('agent.upgrade', { params: { component: 'agent' } });
+    assert.deepEqual([fromBasic.statusCode, fromBasic.json().code], [400, 'ENDPOINT_COMMAND_LEVEL_MISMATCH']);
   });
 });
 

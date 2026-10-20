@@ -16,7 +16,10 @@ import { buildMgmtApp } from '../src/mgmt-app.js';
 import { companyOfDomain, parseCompanyDomains, resolveCompany } from '../src/services/company.js';
 import { inScope, scopeOf } from '../src/services/scope.js';
 import type { DeviceRecord } from '../src/stores/types.js';
+import { ReleaseFiles } from '../src/services/release-files.js';
+import { ReleaseService } from '../src/services/release-service.js';
 import { ALL, inventoryRequest, only, setupCommands } from './helpers.js';
+import { MemoryReleaseStore, releasesDir } from './release-helpers.js';
 
 const log = Fastify({ logger: { level: 'silent' } }).log;
 const agentCtx = { log, requestId: 'agent' };
@@ -67,6 +70,14 @@ describe('範圍與公司判定(純函式)', () => {
 
 describe('管理 API 的資料範圍(:51240)', () => {
   const env = setupCommands({ companyDomains: DOMAINS });
+  const releases = new ReleaseService(
+    new MemoryReleaseStore(env.sql, env.monitor),
+    new ReleaseFiles(releasesDir().root),
+    env.monitor,
+    env.sql,
+    (id) => env.service.lookup(id),
+    { now: env.clock.now },
+  );
   let app: FastifyInstance;
   let jwks: http.Server;
   const tokens: Record<string, string> = {};
@@ -103,6 +114,7 @@ describe('管理 API 的資料範圍(:51240)', () => {
       commands: env.commands,
       files: env.files,
       alerts: env.alerts,
+      releases,
     });
 
     // 甲:憑證 FQDN;乙:憑證判不出、回報網域 b.example;未指定:工作群組
@@ -187,6 +199,9 @@ describe('管理 API 的資料範圍(:51240)', () => {
       ['PUT', '/status', { status: 'disabled' }],
       ['GET', '/commands', undefined],
       ['POST', '/basic-commands', { kind: 'inventory.collect' }],
+      ['POST', '/admin-commands', { kind: 'agent.upgrade', params: { component: 'agent' } }],
+      ['GET', '/upgrade', undefined],
+      ['PUT', '/ring', { ring: 'it' }],
     ] as const) {
       const body = await sameAsMissing(tokens.a!, method, `/v1/devices/${devB.deviceId}${suffix}`, `/v1/devices/${NONE}${suffix}`, payload);
       assert.equal(body.code, 'ITA_DEVICE_NOT_FOUND');
@@ -346,6 +361,32 @@ describe('管理 API 的資料範圍(:51240)', () => {
     env.sql.setCompanyRaw(devU.id, ...saved[1]!);
   });
 
+  it('升級(P6):版本與環的維護只有全部公司角色;環進度只計範圍內;查詢不分公司', async () => {
+    for (const [method, url, payload] of [
+      ['POST', '/v1/releases', { component: 'agent', version: '0.7.1', fileName: 'rustit-agent.exe', signerThumbprints: ['a'.repeat(40)] }],
+      ['POST', `/v1/releases/${NONE}/publish`, undefined],
+      ['POST', `/v1/releases/${NONE}/revoke`, undefined],
+      ['PUT', '/v1/release-rings/pilot/agent', { targetVersion: null }],
+    ] as const) {
+      const res = await call(tokens.a!, method, url, payload);
+      assert.deepEqual([res.statusCode, res.json().code], [403, 'ITA_SCOPE_ALL_REQUIRED'], `${method} ${url}`);
+    }
+    assert.equal((await call(tokens.all!, 'PUT', '/v1/release-rings/pilot/agent', { targetVersion: null })).statusCode, 200);
+    // 範圍內的電腦放進 pilot 也需全部公司角色
+    // (前面的測試會改裝置的公司:以當下 token 甲看得到的那台測)
+    const mine = [devA, devB, devU].find((d) => env.sql.byId(d.id).company === '甲公司')!;
+    const pilot = await call(tokens.a!, 'PUT', `/v1/devices/${mine.deviceId}/ring`, { ring: 'pilot' });
+    assert.deepEqual([pilot.statusCode, pilot.json().code], [403, 'ITA_SCOPE_ALL_REQUIRED']);
+    const total = async (token: string) =>
+      ((await call(token, 'GET', '/v1/release-rings')).json() as { items: { ring: string; component: string; progress: { total: number } }[] }).items;
+    assert.ok(
+      (await total(tokens.a!)).every((r) => r.progress.total === 0),
+      '沒有設定目標時不計',
+    );
+    assert.equal((await call(tokens.none!, 'GET', '/v1/releases')).statusCode, 200);
+    assert.equal((await call(tokens.none!, 'GET', '/v1/releases/files')).statusCode, 200);
+  });
+
   it('路由清單:OpenAPI 的每個 operation 都已在本檔驗證資料範圍', async () => {
     const doc = (await app.inject('/openapi.json')).json() as { paths: Record<string, Record<string, { operationId: string }>> };
     const ops = Object.values(doc.paths)
@@ -355,6 +396,7 @@ describe('管理 API 的資料範圍(:51240)', () => {
     const VERIFIED = [
       'endpoint.alert.list',
       'endpoint.alert.resolve',
+      'endpoint.command.admin.create',
       'endpoint.command.basic.batch',
       'endpoint.command.basic.create',
       'endpoint.command.batch.get',
@@ -370,7 +412,16 @@ describe('管理 API 的資料範圍(:51240)', () => {
       'endpoint.device.inventory-download',
       'endpoint.device.list',
       'endpoint.device.merge',
+      'endpoint.device.set-ring',
       'endpoint.device.status',
+      'endpoint.device.upgrade',
+      'endpoint.release-ring.list',
+      'endpoint.release-ring.set',
+      'endpoint.release.files',
+      'endpoint.release.list',
+      'endpoint.release.publish',
+      'endpoint.release.register',
+      'endpoint.release.revoke',
     ];
     assert.deepEqual(ops, VERIFIED);
   });

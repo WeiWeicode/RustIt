@@ -7,6 +7,7 @@
  *   - WS command / command_update / command_update_ack / prepare_shutdown(指令通道,P4;邏輯在 CommandDispatcher)
  *   - POST /agent/v1/watchdog/report(Watchdog 上報,watchdog.schema.json,P5-2):同一張裝置憑證,只更新 Watchdog 欄位與寫 Watchdog 事件
  *   - POST /agent/v1/commands/{commandId}/files(指令附檔,logs.collect 日誌 zip,上限 20 MB;command-file.schema.json,P4-2)
+ *   - GET /agent/v1/releases/{component}/{version}/{file}(版本檔下載,支援 Range;只給這台被指派的目標版本,P6-UPGRADE-DESIGN §3.1)
  *   - HTTPS 回報同時處理中的請求超過 AGENT_MAX_INFLIGHT 時回 429 ITA_BUSY + Retry-After,在驗證身分前就擋下(A3)
  *   - 與 :51240 是不同的 Fastify 實例,不共用 hook(§5.2);日誌帶 x-request-id、DN、指紋(§5.7)
  *   - 告警評估(P5):每 5 分鐘由這裡的計時器呼叫 AlertService.sweep(與心跳逾時、指令逾期掃描同一處管理)
@@ -36,6 +37,7 @@ import { AppError } from './errors.js';
 import type { AlertService } from './services/alert-service.js';
 import type { CommandDispatcher, CommandUpdateBody } from './services/command-dispatcher.js';
 import type { CommandFileService } from './services/command-files.js';
+import type { ReleaseService } from './services/release-service.js';
 import type { AgentConnection, Ctx, DeviceService } from './services/device-service.js';
 import type { DeviceRecord } from './stores/types.js';
 
@@ -69,6 +71,8 @@ export interface AgentAppOptions {
   alerts?: AlertService;
   /** 告警評估間隔(毫秒) */
   alertSweepIntervalMs?: number;
+  /** 升級(P6;省略 = 不開放下載、不評估升級告警) */
+  releases?: ReleaseService;
   /** giga-observe 監控(loadMonitorEnv;省略 = 不監控) */
   monitor?: MonitorEnv;
   /** 監控心跳附帶的相依服務狀態(SQL Server / Mongo / Redis) */
@@ -236,6 +240,32 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
     service.watchdogReport(ctxOf(req), req.device!, req.body),
   );
 
+  // 版本檔下載(P6):Watchdog 中斷後以 Range 續傳
+  const releases = opts.releases;
+  if (releases)
+    app.get<{ Params: { component: string; version: string; file: string } }>(
+      '/agent/v1/releases/:component/:version/:file',
+      {
+        schema: {
+          params: {
+            type: 'object',
+            required: ['component', 'version', 'file'],
+            properties: {
+              component: { type: 'string', maxLength: 16 },
+              version: { type: 'string', maxLength: 32 },
+              file: { type: 'string', pattern: '^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$' },
+            },
+          },
+        },
+      },
+      async (req, reply) => {
+        const range = req.headers.range;
+        const d = await releases.download(ctxOf(req), req.device!, req.params.component, req.params.version, req.params.file, typeof range === 'string' ? range : undefined);
+        // 416 帶 Content-Range: bytes */大小,Watchdog 依此從頭重新下載
+        return reply.status(d.status).headers(d.headers).send(d.stream ?? undefined);
+      },
+    );
+
   // 指令附檔:本體為 zip 原始位元組,串流交給 CommandFileService(大小與 SHA-256 在寫檔時檢查);只在這個範圍接受 application/zip
   if (files)
     await app.register(async (scope) => {
@@ -356,6 +386,7 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
   let commandTimer: NodeJS.Timeout | undefined;
   let fileTimer: NodeJS.Timeout | undefined;
   let alertTimer: NodeJS.Timeout | undefined;
+  let releaseTimer: NodeJS.Timeout | undefined;
   app.addHook('onReady', async () => {
     timer = setInterval(() => void service.sweep({ log: app.log, requestId: 'sweep' }), opts.sweepIntervalMs ?? 10_000);
     timer.unref();
@@ -375,12 +406,18 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
       alertTimer = setInterval(() => void alerts.sweep({ log: app.log, requestId: 'alert-sweep' }), opts.alertSweepIntervalMs ?? 300_000);
       alertTimer.unref();
     }
+    // 升級告警(upgrade_failed 關閉、version_mismatch),與告警評估同一間隔(P6-UPGRADE-DESIGN §3.1)
+    if (releases) {
+      releaseTimer = setInterval(() => void releases.sweep({ log: app.log, requestId: 'release-sweep' }), opts.alertSweepIntervalMs ?? 300_000);
+      releaseTimer.unref();
+    }
   });
   app.addHook('preClose', async () => {
     clearInterval(timer);
     clearInterval(commandTimer);
     clearInterval(fileTimer);
     clearInterval(alertTimer);
+    clearInterval(releaseTimer);
     await service.closeAll();
   });
   return app;

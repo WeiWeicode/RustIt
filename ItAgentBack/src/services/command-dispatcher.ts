@@ -87,10 +87,20 @@ export interface BatchView {
   counts: Partial<Record<CommandState, number>>;
 }
 
+/** 指令類型的建立前檢查與建立後處理(P6 agent.upgrade:ReleaseService 檢查版本、記錄強制版本) */
+export interface KindHook {
+  /** 不符時丟 AppError,整筆(批次為整批)不建立 */
+  check(ctx: Ctx, deviceRef: number, params: Record<string, unknown>): Promise<void>;
+  /** 檢查通過後、寫入指令前(失敗則不建立指令;批次為全部檢查通過後逐台套用) */
+  apply(ctx: Ctx, deviceRef: number, params: Record<string, unknown>, actor: { emp: string; name: string | null }): Promise<void>;
+}
+
 export interface CommandDispatcherOptions {
   now?: () => Date;
   /** 批次同時執行上限(指南 §8.4) */
   batchMaxConcurrent?: number;
+  /** 依指令類型的建立前後處理 */
+  kindHooks?: Record<string, KindHook>;
 }
 
 /** 狀態先後;終態同為 4,不可再變 */
@@ -159,6 +169,7 @@ const isDuplicateKey = (err: unknown) => [2627, 2601].includes((err as { number?
 export class CommandDispatcher {
   private readonly now: () => Date;
   private readonly batchMaxConcurrent: number;
+  private readonly kindHooks: Record<string, KindHook>;
   /** 進行中的批次補送(同一批次串行) */
   private readonly refilling = new Map<number, Promise<void>>();
 
@@ -170,6 +181,7 @@ export class CommandDispatcher {
   ) {
     this.now = opts.now ?? (() => new Date());
     this.batchMaxConcurrent = opts.batchMaxConcurrent ?? 20;
+    this.kindHooks = opts.kindHooks ?? {};
   }
 
   private async sqlDo<T>(ctx: Ctx, what: string, fn: () => Promise<T>): Promise<T> {
@@ -252,6 +264,11 @@ export class CommandDispatcher {
     const { def, params, expiresSec } = this.validate(level, input);
     const device = await this.activeDevice(ctx, deviceId);
     await this.checkPending(ctx, def, device.id, device.computerName);
+    const hook = this.kindHooks[def.kind];
+    if (hook) {
+      await hook.check(ctx, device.id, params);
+      await hook.apply(ctx, device.id, params, { emp, name: who.name ?? null });
+    }
     const at = this.now();
     const commandId = randomUUID();
     try {
@@ -320,8 +337,11 @@ export class CommandDispatcher {
     for (const id of unique) {
       const d = await this.activeDevice(ctx, id);
       await this.checkPending(ctx, def, d.id, d.computerName);
+      await this.kindHooks[def.kind]?.check(ctx, d.id, params);
       targets.push(d);
     }
+    const batchHook = this.kindHooks[def.kind];
+    if (batchHook) for (const d of targets) await batchHook.apply(ctx, d.id, params, { emp, name: who.name ?? null });
     const at = this.now();
     const batchId = randomUUID();
     const paramsJson = JSON.stringify(params);

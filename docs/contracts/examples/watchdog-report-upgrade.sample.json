@@ -1,0 +1,40 @@
+{
+  "watchdog_version": "0.2.0",
+  "reported_at": "2026-10-21T02:10:00.000Z",
+  "agent": {
+    "service_state": "running",
+    "start_type": "auto",
+    "pid": 5120,
+    "exe_present": true,
+    "status_ok": true,
+    "status_at": "2026-10-21T02:09:50.000Z",
+    "version": "0.7.0",
+    "ws_connected": true,
+    "last_heartbeat_ack": "2026-10-21T02:09:45.000Z"
+  },
+  "agent_restarts_24h": 0,
+  "upgrade": {
+    "component": "agent",
+    "target_version": "0.7.2-broken",
+    "from_version": "0.7.0",
+    "state": "rolled_back",
+    "attempts": 1,
+    "error_code": "HEALTH_CHECK_FAILED",
+    "error_message": "新版 2 分鐘內 get_status 不正常(WebSocket 未連線),已還原 0.7.0"
+  },
+  "events": [
+    {
+      "event_id": "5b1e7c2d-3f4a-4b5c-8d6e-7f8091a2b3c4",
+      "type": "upgrade_failed",
+      "occurred_at": "2026-10-21T02:09:40.000Z",
+      "data": {
+        "component": "agent",
+        "from": "0.7.0",
+        "to": "0.7.2-broken",
+        "duration_ms": 151000,
+        "error_code": "HEALTH_CHECK_FAILED",
+        "rolled_back": true
+      }
+    }
+  ]
+}

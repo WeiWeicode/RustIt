@@ -35,7 +35,8 @@
         { "if": { "properties": { "type": { "const": "agent_start_failed" } } }, "then": { "required": ["data"], "properties": { "data": { "$ref": "#/definitions/StartFailed" } } } },
         { "if": { "properties": { "type": { "const": "watchdog_stopped" } } }, "then": { "required": ["data"], "properties": { "data": { "$ref": "#/definitions/ServiceStopped" } } } },
         { "if": { "properties": { "type": { "enum": ["agent_binary_changed", "watchdog_binary_changed"] } } }, "then": { "required": ["data"], "properties": { "data": { "$ref": "#/definitions/BinaryChanged" } } } },
-        { "if": { "properties": { "type": { "const": "agent_pipe_impersonation" } } }, "then": { "required": ["data"], "properties": { "data": { "$ref": "#/definitions/PipeImpersonation" } } } }
+        { "if": { "properties": { "type": { "const": "agent_pipe_impersonation" } } }, "then": { "required": ["data"], "properties": { "data": { "$ref": "#/definitions/PipeImpersonation" } } } },
+        { "if": { "properties": { "type": { "enum": ["upgrade_started", "upgrade_succeeded", "upgrade_failed"] } } }, "then": { "required": ["data"], "properties": { "data": { "$ref": "#/definitions/Upgrade" } } } }
       ]
     },
     "BinaryChanged": {
@@ -154,6 +155,35 @@
         "store": { "type": "string", "enum": ["outbox_inventory", "outbox_event"] },
         "dropped": { "type": "integer", "minimum": 1 }
       }
+    },
+    "Upgrade": {
+      "description": "升級事件(P6,P6-UPGRADE-DESIGN §2.3):Watchdog 升級 Agent 經 watchdog/report 上報(component = agent),Agent 替換 Watchdog 經 /agent/v1/events 上報(component = watchdog);主機依路徑檢查 component,不符略過",
+      "type": "object",
+      "required": ["component", "to"],
+      "properties": {
+        "component": { "type": "string", "enum": ["agent", "watchdog"] },
+        "from": { "type": "string", "maxLength": 32, "description": "升級前版本" },
+        "to": { "type": "string", "maxLength": 32, "description": "目標版本" },
+        "duration_ms": { "type": "integer", "minimum": 0, "description": "upgrade_succeeded / upgrade_failed:從開始替換到結束" },
+        "error_code": { "$ref": "#/definitions/UpgradeErrorCode" },
+        "error_message": { "type": "string", "maxLength": 300 },
+        "rolled_back": { "type": "boolean", "description": "upgrade_failed:已還原為舊版並確認正常" }
+      }
+    },
+    "UpgradeErrorCode": {
+      "type": "string",
+      "enum": [
+        "DOWNLOAD_FAILED",
+        "HASH_MISMATCH",
+        "SIGNATURE_INVALID",
+        "SIGNER_NOT_TRUSTED",
+        "PREPARE_TIMEOUT",
+        "STOP_TIMEOUT",
+        "REPLACE_FAILED",
+        "HEALTH_CHECK_FAILED",
+        "ROLLBACK_FAILED",
+        "DISK_FULL"
+      ]
     },
     "EventsResponse": {
       "title": "POST /agent/v1/events 回應(200)",

@@ -1,6 +1,6 @@
 # ItAgentBack 資料結構
 
-> 對應 `db/migrations/0001_init.sql`、`0002_sync_event.sql`(PLATFORM-PLAN P2)、`0003_command.sql`(P4)、`0004`(P3 軟體)、`0005`(E6 公司)、`0006_monitor.sql`(P5 監測)。原則(INTEGRATION-PLAN §3.1):**SQL Server 是唯一真相**;MongoDB 與 Redis 只放可重建的資料。
+> 對應 `db/migrations/0001_init.sql`、`0002_sync_event.sql`(PLATFORM-PLAN P2)、`0003_command.sql`(P4)、`0004`(P3 軟體)、`0005`(E6 公司)、`0006_monitor.sql`(P5 監測)、`0007_release.sql`(P6 升級)。原則(INTEGRATION-PLAN §3.1):**SQL Server 是唯一真相**;MongoDB 與 Redis 只放可重建的資料。
 > SQL Server 2012(`DATABASE.md` §0):無 JSON 函式、無 `CREATE OR ALTER`;JSON 由 ItAgentBack 組 / 解,需要查詢的值拆成獨立欄位。時間一律 UTC。
 
 ## 1. SQL Server(schema `ita`)
@@ -85,6 +85,15 @@ Agent 回報(0002,`POST /agent/v1/events`;`event.schema.json`):`offline_period`�
 - 非正常重啟次數:24 小時內 `event_type = 'agent_started'` 且 `data LIKE '%"previous_exit":"unexpected"%'` 的筆數(`ix_device_event_device`)。
 - 門檻見 `ita.env` 的 `ALERT_*`(`src/config.ts`);保存期限 1 年,清除工作在上線前與其他保存期限一起做(B5)。
 - **部署順序:先套用 0006,再部署新版 endpoint-server**(新版心跳、hello、清單與告警掃描都會讀寫這兩張表)。
+- P6 加兩條規則(`ReleaseService.sweep` 與 Watchdog 上報時評估,不在 `AlertService` 的自動類清單內):`upgrade_failed`(同一目標版本失敗 2 次或 `ROLLBACK_FAILED`;升級成功或目標改變時自動關閉)、`version_mismatch`(目標生效超過 24 小時、1 小時內有回報仍未到目標;已有 `upgrade_failed` 時不開)。
+
+### `ita.agent_release` / `ita.release_ring` / `ita.device_upgrade`、`ita.device.ring` — 升級(0007,P6;`docs/P6-UPGRADE-DESIGN.md` §1)
+
+- `ita.agent_release`:`release_id`(對外)、`component`(`agent` / `watchdog` / `desktop`)、`version`(`UNIQUE (component, version)`)、`file_name`(版本檔目錄 `{component}/{version}/` 下的檔名)、`sha256` / `size_bytes`(**登錄時由主機讀檔計算**)、`signer_thumbprints`(預期簽章者 SHA-1 指紋,逗號分隔)、`status`(`draft` → `published` → `revoked`)、`notes`、登錄 / 發佈 / 撤回的工號與時間、`request_id`。撤回時同一交易把以此版本為目標的環改為 NULL、清除指定此版本的強制升級。
+- `ita.release_ring`:PK `(ring, component)`,migration 建好 `pilot` / `it` / `all` × `agent` / `watchdog` 六列(目標 NULL)。`target_version` NULL = 不升級;`target_set_at` 只在版本改變時更新(推進限制「pilot 觀察滿 24 小時」與 `version_mismatch` 的起算點)。
+- `ita.device.ring`(預設 `all`,CHECK `pilot` / `it` / `all`)。
+- `ita.device_upgrade`:PK `(device_ref, component)`;`target_version`、`from_version`、`state`(`pending` / `downloading` / `verifying` / `installing` / `succeeded` / `failed` / `rolled_back`)、`attempts`(同一目標的失敗次數,換目標歸零;達 2 不再自動下發)、`error_code` / `error_message`、`forced_version` / `forced_by_emp` / `forced_at`(`agent.upgrade` 指定版本,優先於所屬環;到達後清除)、`started_at`、`updated_at`。同時升級上限計算 `pending` ~ `installing` 且 30 分鐘內有更新的台數(`ix_device_upgrade_state`)。
+- **部署順序:先套用 0007,再部署新版 endpoint-server**;`RELEASES_DIR` 未設定時新版不讀寫這些表(版本 API 不註冊、Watchdog 的 `target` 一律 null)。
 
 ### 離線補傳比對(`DeviceService.sync`,`POST /agent/v1/sync`)
 
