@@ -3,17 +3,22 @@
 //! - `\\.\pipe\giganexus-agent-v1`,ACL 只允許 SYSTEM、Administrators;隨時保留一個等待中的執行個體,
 //!   沒有存活的執行個體時以 `first_pipe_instance` 建立(別的行程先建立同名管道時失敗並每分鐘重試,不加入別人的管道)
 //! - 每條連線一則請求、一則回應(回覆後等用戶端關閉再釋放,不直接中斷以免丟掉未讀的回應);請求 5 秒內沒送完就中斷;同時最多 [`MAX_CLIENTS`] 條,超過直接關閉
-//! - 只回狀態摘要,不接受任何管理操作;`prepare_shutdown` 在 P6 才實作(現在回 unsupported)
+//! - `get_status`:狀態摘要(含 agent.upgrade 的 `upgrade_requested`,P6-2)
+//! - `prepare_shutdown`(P6-2,Watchdog 升級 Agent 前;P6-UPGRADE-DESIGN §2.2、§9-6):只接受 Watchdog 服務的行程(用戶端 PID 比對 SCM)。
+//!   停止接新指令 → 執行中的指令等最多 60 秒(逾時記 failed AGENT_UPGRADING)→ 送完待送的 command_update 與事件(上限 20 秒)、
+//!   WebSocket 以 1000 關閉 → 回 `prepare_shutdown_ack`。5 分鐘內沒有被停止就恢復(Watchdog 中途失敗時不會一直斷線)
 
 use crate::Shared;
+use crate::command;
 use crate::protocol::{AGENT_VERSION, Envelope};
-use log::{debug, warn};
-use rustit_common::pipe::{create_server, read_line, write_line};
+use log::{debug, info, warn};
+use rustit_common::pipe::{client_pid, create_server, read_line, write_line};
+use rustit_common::scm::{self, WATCHDOG_SERVICE};
 use rustit_common::stop::wait;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::net::windows::named_pipe::NamedPipeServer;
 use tokio::sync::{Semaphore, watch};
@@ -23,6 +28,12 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY: Duration = Duration::from_secs(60);
 /// 回覆後等用戶端關閉的上限
 const CLIENT_CLOSE_WAIT: Duration = Duration::from_secs(2);
+/// prepare_shutdown:執行中的指令最多等多久(§9-6)
+const COMMAND_WAIT: Duration = Duration::from_secs(60);
+/// prepare_shutdown:送完待送資料、關閉 WebSocket 的上限
+const FLUSH_WAIT: Duration = Duration::from_secs(20);
+/// prepare_shutdown 後多久沒被停止就恢復
+const HOLD_LIMIT: Duration = Duration::from_secs(300);
 
 pub async fn run(shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
     let slots = Arc::new(Semaphore::new(MAX_CLIENTS));
@@ -74,10 +85,22 @@ pub async fn run(shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
 }
 
 async fn handle(shared: Arc<Shared>, mut server: NamedPipeServer) {
+    // 請求 5 秒內要送完
+    let req = match tokio::time::timeout(REQUEST_TIMEOUT, read_line(&mut server)).await {
+        Ok(Ok(line)) => match serde_json::from_str::<Envelope>(&line) {
+            Ok(r) => r,
+            Err(e) => return warn!("管道請求格式錯誤:{e}"),
+        },
+        Ok(Err(e)) => return warn!("{e}"),
+        Err(_) => return warn!("本機管道請求逾時,中斷連線"),
+    };
+    // prepare_shutdown 要等指令與送出(最多 60 + 20 秒);其他請求 5 秒
+    let limit = if req.kind == "prepare_shutdown" {
+        COMMAND_WAIT + FLUSH_WAIT + REQUEST_TIMEOUT
+    } else {
+        REQUEST_TIMEOUT
+    };
     let work = async {
-        let line = read_line(&mut server).await?;
-        let req: Envelope =
-            serde_json::from_str(&line).map_err(|e| format!("管道請求格式錯誤:{e}"))?;
         let reply = match req.kind.as_str() {
             "get_status" => {
                 // 狀態要讀本機暫存(同步鎖):放到阻塞執行緒,逾時才管得到,也不卡住 tokio 工作執行緒
@@ -87,6 +110,17 @@ async fn handle(shared: Arc<Shared>, mut server: NamedPipeServer) {
                     .map_err(|e| format!("無法取得狀態:{e}"))?;
                 Envelope::reply(&req, "status", body)
             }
+            "prepare_shutdown" => match from_watchdog(&server).await {
+                Ok(()) => prepare_shutdown(&shared, &req).await,
+                Err(e) => {
+                    warn!("拒絕 prepare_shutdown:{e}");
+                    Envelope::reply(
+                        &req,
+                        "unsupported",
+                        json!({ "type": "prepare_shutdown", "reason": "not_watchdog" }),
+                    )
+                }
+            },
             other => Envelope::reply(&req, "unsupported", json!({ "type": other })),
         };
         write_line(&mut server, &reply).await?;
@@ -95,11 +129,93 @@ async fn handle(shared: Arc<Shared>, mut server: NamedPipeServer) {
         let _ = tokio::time::timeout(CLIENT_CLOSE_WAIT, server.read(&mut rest)).await;
         Ok::<(), String>(())
     };
-    match tokio::time::timeout(REQUEST_TIMEOUT, work).await {
-        Ok(Ok(())) => debug!("本機管道 get_status 已回覆"),
+    match tokio::time::timeout(limit, work).await {
+        Ok(Ok(())) => debug!("本機管道 {} 已回覆", req.kind),
         Ok(Err(e)) => warn!("{e}"),
         Err(_) => warn!("本機管道請求逾時,中斷連線"),
     }
+}
+
+/// prepare_shutdown 的用戶端必須是 Watchdog 服務的行程
+async fn from_watchdog(server: &NamedPipeServer) -> Result<(), String> {
+    let client = client_pid(server)?;
+    let watchdog = tokio::task::spawn_blocking(|| scm::query(WATCHDOG_SERVICE))
+        .await
+        .map_err(|e| e.to_string())??
+        .pid;
+    if watchdog == Some(client) {
+        Ok(())
+    } else {
+        Err(format!(
+            "用戶端 PID {client} 不是 Watchdog 服務({watchdog:?})"
+        ))
+    }
+}
+
+/// Watchdog 升級 Agent 前的收尾(pipe.schema.json PrepareShutdown / PrepareShutdownAck)
+async fn prepare_shutdown(shared: &Arc<Shared>, req: &Envelope) -> Envelope {
+    let reason = req
+        .body
+        .as_ref()
+        .and_then(|b| b["reason"].as_str())
+        .unwrap_or("-")
+        .to_string();
+    info!("Watchdog 要求停止前收尾({reason}):停止接新指令");
+    shared.upgrading.store(true, Ordering::SeqCst);
+    let generation = shared.prepare_gen.fetch_add(1, Ordering::SeqCst) + 1;
+    let deadline = Instant::now() + COMMAND_WAIT;
+    while command::running_count(shared) > 0 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let aborted = if command::running_count(shared) > 0 {
+        let n = command::abort_running(shared);
+        warn!(
+            "執行中的指令等待 {} 秒仍未結束,{n} 筆記為 AGENT_UPGRADING",
+            COMMAND_WAIT.as_secs()
+        );
+        n
+    } else {
+        0
+    };
+    // WebSocket 送完待送的 command_update(等主機確認)後以 1000 關閉;事件立即送
+    shared.ws_hold.send_replace(true);
+    shared.events.kick();
+    let deadline = Instant::now() + FLUSH_WAIT;
+    let pending = |s: &Shared| {
+        let store = s.store.lock();
+        let updates = store.command_unreported().map(|v| v.len()).unwrap_or(0);
+        let (inv, ev) = store.counts().unwrap_or_default();
+        (updates, inv, ev)
+    };
+    let (mut updates, mut inv, mut ev) = pending(shared);
+    while (shared.ws_connected.load(Ordering::Relaxed) || ev > 0 || updates > 0)
+        && Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        (updates, inv, ev) = pending(shared);
+    }
+    let flushed = updates == 0 && ev == 0 && !shared.ws_connected.load(Ordering::Relaxed);
+    info!("停止前收尾完成:待送指令狀態 {updates}、事件 {ev}、資產 {inv}(中斷指令 {aborted} 筆)");
+    // Watchdog 沒有接著停止 Agent(升級中途失敗):過一段時間恢復,不一直斷線
+    let s = shared.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(HOLD_LIMIT).await;
+        // 之後又收到新的 prepare_shutdown:交給那一次的計時
+        if s.prepare_gen.load(Ordering::SeqCst) == generation
+            && s.upgrading.swap(false, Ordering::SeqCst)
+        {
+            warn!(
+                "prepare_shutdown 後 {} 秒沒有被停止,恢復連線與指令",
+                HOLD_LIMIT.as_secs()
+            );
+            s.ws_hold.send_replace(false);
+        }
+    });
+    Envelope::reply(
+        req,
+        "prepare_shutdown_ack",
+        crate::protocol::prepare_shutdown_ack(flushed, inv, ev, aborted),
+    )
 }
 
 /// 狀態摘要(pipe.schema.json StatusBody);沒有值的欄位省略
@@ -134,6 +250,16 @@ pub(crate) fn status_body(shared: &Shared) -> Value {
     if let Ok((inv, ev)) = shared.store.lock().counts() {
         body["outbox_pending"] = json!(inv);
         body["events_pending"] = json!(ev);
+    }
+    if let Some(req) = shared
+        .upgrade_requested
+        .lock()
+        .ok()
+        .and_then(|r| r.clone())
+        .filter(|(_, at)| at.elapsed() < command::UPGRADE_REQUEST_TTL)
+        .map(|(v, _)| v)
+    {
+        body["upgrade_requested"] = req;
     }
     body
 }

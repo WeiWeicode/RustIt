@@ -12,6 +12,7 @@
     "device_status": "active",
     "outbox_pending": 0,
     "events_pending": 0,
-    "previous_exit": "unexpected"
+    "previous_exit": "unexpected",
+    "upgrade_requested": { "id": "9f8e7d6c-5b4a-4c3d-8e2f-1a0b9c8d7e61", "component": "agent", "version": "0.7.1" }
   }
 }

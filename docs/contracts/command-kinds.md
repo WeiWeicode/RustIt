@@ -30,6 +30,7 @@
 | `NO_LOGS` | Agent | `logs.collect`:指定天數內沒有日誌檔 |
 | `UPLOAD_FAILED` | Agent | `logs.collect`:附檔上傳重試後仍失敗,`error_message` 帶 HTTP 狀態或錯誤 |
 | `EXECUTION_FAILED` | Agent | 其他執行錯誤,`error_message` 說明 |
+| `AGENT_UPGRADING` | Agent | P6-2 起:Watchdog 升級 Agent 中(已送 `prepare_shutdown`)收到的新指令,或執行中等 60 秒仍未結束的指令;升級完成後可重新下達 |
 
 ## 類型
 
@@ -121,7 +122,7 @@
 - 省略 `version`:重設這台該元件的失敗次數,依所屬環的目標立即檢查。
 - 指定 `version`:這台強制升級 / 降版到該版本(優先於所屬環,到達後清除)。版本必須已登錄且 `published`(`draft` 只能經 pilot 環目標下發,改環目標需 `endpoint.software.manage` 與全部公司角色),否則建立時回 `404 ITA_RELEASE_NOT_FOUND` / `409 ITA_RELEASE_NOT_PUBLISHED` / `409 ITA_RELEASE_REVOKED`,不建立指令。
 - Agent(0.7.0 起)收到後在本機管道 `status.upgrade_requested` 通知 Watchdog 立即上報;`succeeded` 只代表已交給 Watchdog,實際結果看 `GET /v1/devices/{id}/upgrade` 與 `upgrade_*` 事件。0.6.0 以前的 Agent 回 `UNSUPPORTED_COMMAND`(強制版本仍已記錄,Watchdog 下次定期上報會取得)。
-- `result`:`{ "handed_to_watchdog": true }`。
+- `result`:`{ "handed_to_watchdog": true }`。前景模式(開發)回 `failed NOT_RUNNING_AS_SERVICE`;`component` / `version` 格式不符回 `INVALID_PARAMS`。
 
 ## 指令附檔(P4-2)
 

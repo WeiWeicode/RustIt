@@ -33,6 +33,7 @@ tokio = { version = "1.53", features = ["test-util", "rt-multi-thread"] }
 [target."cfg(windows)".dependencies]
 # Windows 憑證存放區:私鑰留在 CNG 內簽章(不可匯出也能用,指南 §3.4);用 ring 以免建置需要 CMake / NASM
 rustls-cng = { version = "0.7.1", default-features = false, features = ["ring", "tls12", "logging"] }
-# Agent 與 Watchdog 互相看守:查詢 / 啟動 / 停止對方服務、失敗復原、服務 ACL、本機具名管道(P5-2,指南 §7)
+# Agent 與 Watchdog 互相看守:查詢 / 啟動 / 停止對方服務、失敗復原、服務 ACL、本機具名管道(P5-2,指南 §7);
+# 升級:Authenticode(WinTrust)、磁碟剩餘空間與 exe 版本資源(FileSystem)(P6-2)
 windows-service = "0.8.1"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Pipes", "Win32_System_Services", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Security_Cryptography_Catalog", "Win32_Security_Cryptography_Sip", "Win32_Security_WinTrust", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_Services", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }

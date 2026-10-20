@@ -140,7 +140,7 @@
         "error_code": {
           "type": "string",
           "maxLength": 64,
-          "description": "UNSUPPORTED_COMMAND、EXPIRED、INVALID_PARAMS、NO_ACTIVE_SESSION、NOT_RUNNING_AS_SERVICE、EXECUTION_FAILED;P4-2 起 NO_LOGS、UPLOAD_FAILED(command-kinds.md)"
+          "description": "UNSUPPORTED_COMMAND、EXPIRED、INVALID_PARAMS、NO_ACTIVE_SESSION、NOT_RUNNING_AS_SERVICE、EXECUTION_FAILED;P4-2 起 NO_LOGS、UPLOAD_FAILED;P6-2 起 AGENT_UPGRADING(command-kinds.md)"
         },
         "error_message": { "type": "string", "maxLength": 1000 },
         "occurred_at": { "type": "string", "format": "date-time", "description": "端點時間" }

@@ -4,6 +4,8 @@
 //! 心跳附上本機暫存數量;連線成功 / 失敗記入連線紀錄(PLATFORM-PLAN §4.2)。
 //! P4:`command` 交給執行器([`crate::command`]);本機尚未被確認的 `command_update` 在 hello_ack 後與有新狀態時送出,
 //! 收到 `command_update_ack` 才標記已回報;`prepare_shutdown`:送完待送狀態、以 1000 關閉、隨機 0–30 秒後重連。
+//! P6-2:本機管道 `prepare_shutdown`(Watchdog 升級 Agent)設定 `ws_hold`:送完待送的 `command_update`(等主機確認,最多 20 秒)、
+//! 以 1000 關閉,之後不重連直到 Agent 被停止(或 5 分鐘後恢復)。
 //! P5:心跳附健康摘要 `health`(主機設定 health_enabled,預設開;取樣在背景執行緒,逾時就省略);hello 帶裝置憑證到期日。
 
 use crate::Shared;
@@ -37,6 +39,8 @@ const CLOSE_DEVICE_DISABLED: u16 = 4403;
 const CLOCK_SKEW_WARN_MS: i64 = 5 * 60_000;
 /// prepare_shutdown 沒有指定時,重連前隨機等待的上限(避免全部 Agent 同時湧入)
 const PREPARE_SHUTDOWN_JITTER: Duration = Duration::from_secs(30);
+/// prepare_shutdown(升級)時等主機確認待送狀態的上限
+const HOLD_FLUSH: Duration = Duration::from_secs(20);
 /// 健康取樣最多等這麼久(磁碟列舉異常時不拖住心跳)
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -95,6 +99,8 @@ enum End {
     Closed(String),
     /// 主機要求先斷線(prepare_shutdown),等這麼久再重連
     Prepared(Duration),
+    /// Watchdog 升級 Agent(本機管道 prepare_shutdown):已關閉,等 ws_hold 解除才重連
+    Held,
 }
 
 pub async fn run(
@@ -103,6 +109,12 @@ pub async fn run(
     settings: watch::Sender<AgentSettings>,
     mut shutdown: watch::Receiver<bool>,
 ) {
+    // 測試用壞版本:管道正常但不連 WebSocket(P6-2 VM 驗收「2 分鐘內不正常 → 還原」)
+    if cfg!(feature = "broken-no-ws") {
+        warn!("broken-no-ws 測試版:不連 WebSocket");
+        let _ = shutdown.wait_for(|s| *s).await;
+        return;
+    }
     // hello 需要電腦名稱與 IP:等第一份蒐集結果
     tokio::select! {
         r = hello.wait_for(Option::is_some) => if r.is_err() { return },
@@ -110,7 +122,16 @@ pub async fn run(
     }
     let mut backoff = Backoff::new();
     let sampler: Sampler = Arc::new(Mutex::new(HealthSampler::new()));
+    let mut hold = shared.ws_hold.subscribe();
     loop {
+        // 升級停止前收尾中:不連線
+        if *hold.borrow() {
+            tokio::select! {
+                ok = async { hold.wait_for(|h| !*h).await.is_ok() } => if !ok { return },
+                _ = shutdown.changed() => return,
+            }
+            info!("升級收尾已解除,重新連線");
+        }
         let delay = match session(
             &shared,
             &hello,
@@ -127,6 +148,7 @@ pub async fn run(
                 warn!("WebSocket 中斷:{reason};{} 秒後重連", d.as_secs());
                 d
             }
+            Ok(End::Held) => Duration::ZERO,
             Ok(End::Prepared(d)) => {
                 info!(
                     "主機要求暫時斷線(prepare_shutdown);{} 秒後重連",
@@ -225,6 +247,49 @@ async fn flush_updates(
     Ok(())
 }
 
+/// command_update_ack:標記已回報(accepted = false 也視為送達,契約;不再重送)
+fn on_update_ack(shared: &Shared, env: Envelope, sent: &mut SentUpdates) {
+    if let Some(ack) = env
+        .body
+        .and_then(|b| serde_json::from_value::<CommandUpdateAck>(b).ok())
+    {
+        if !ack.accepted {
+            warn!(
+                "主機不採用指令 {} 的狀態(已結束或不屬於此裝置)",
+                ack.command_id
+            );
+        }
+        if let Some((id, state)) = sent.by_envelope.remove(&env.id)
+            && let Err(e) = shared.store.lock().command_reported(&id, &state)
+        {
+            warn!("無法標記指令狀態已回報:{e}");
+        }
+    }
+}
+
+/// 升級收尾:等主機確認剛送出的指令狀態(最多 HOLD_FLUSH),其他訊息略過(未確認的指令主機會在重連後重送)
+async fn drain_acks(shared: &Shared, ws: &mut WsStream, sent: &mut SentUpdates) {
+    let deadline = Instant::now() + HOLD_FLUSH;
+    while !sent.by_envelope.is_empty() {
+        let msg = match tokio::time::timeout_at(deadline, ws.next()).await {
+            Ok(Some(Ok(m))) => m,
+            _ => break,
+        };
+        if let Message::Text(text) = msg
+            && let Ok(env) = serde_json::from_str::<Envelope>(text.as_str())
+            && env.kind == "command_update_ack"
+        {
+            on_update_ack(shared, env, sent);
+        }
+    }
+    if !sent.by_envelope.is_empty() {
+        warn!(
+            "升級收尾:{} 則指令狀態未獲主機確認,重新啟動後再送",
+            sent.by_envelope.len()
+        );
+    }
+}
+
 async fn session(
     shared: &Arc<Shared>,
     hello: &watch::Receiver<Option<HelloBody>>,
@@ -251,8 +316,21 @@ async fn session(
     // 收到 hello_ack(裝置未被停用)後才送指令狀態;本連線已送出、等 ack 的 (command_id → state)
     let mut ready = false;
     let mut sent_updates = SentUpdates::default();
+    let mut hold = shared.ws_hold.subscribe();
     loop {
         tokio::select! {
+            held = async { hold.wait_for(|h| *h).await.is_ok() } => {
+                if !held {
+                    continue;
+                }
+                info!("升級停止前收尾:送出待送的指令狀態後關閉 WebSocket");
+                if ready {
+                    flush_updates(shared, &mut ws, &mut sent_updates).await?;
+                    drain_acks(shared, &mut ws, &mut sent_updates).await;
+                }
+                let _ = ws.close(Some(CloseFrame { code: CloseCode::Normal, reason: "agent upgrading".into() })).await;
+                return Ok(End::Held);
+            }
             _ = shared.command_notify.notified() => {
                 if ready {
                     flush_updates(shared, &mut ws, &mut sent_updates).await?;
@@ -311,19 +389,7 @@ async fn session(
                                 Some(cmd) => command::dispatch(shared.clone(), cmd),
                                 None => warn!("command 訊息格式不符,忽略({})", env.id),
                             },
-                            "command_update_ack" => {
-                                if let Some(ack) = env.body.and_then(|b| serde_json::from_value::<CommandUpdateAck>(b).ok()) {
-                                    if !ack.accepted {
-                                        warn!("主機不採用指令 {} 的狀態(已結束或不屬於此裝置)", ack.command_id);
-                                    }
-                                    // accepted = false 也視為送達(契約),不再重送
-                                    if let Some((id, state)) = sent_updates.by_envelope.remove(&env.id)
-                                        && let Err(e) = shared.store.lock().command_reported(&id, &state)
-                                    {
-                                        warn!("無法標記指令狀態已回報:{e}");
-                                    }
-                                }
-                            }
+                            "command_update_ack" => on_update_ack(shared, env, &mut sent_updates),
                             "prepare_shutdown" => {
                                 let p = env.body.and_then(|b| serde_json::from_value::<PrepareShutdown>(b).ok());
                                 info!("主機即將關閉連線:{}", p.as_ref().map(|p| p.reason.as_str()).unwrap_or("-"));

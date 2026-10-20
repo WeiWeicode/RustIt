@@ -345,3 +345,58 @@ fn p5_monitor_messages() {
         "沒收過主機設定時預設開"
     );
 }
+
+/// P6-2:本機管道 prepare_shutdown / ack、status.upgrade_requested;agent.upgrade 與 AGENT_UPGRADING 的 command_update
+#[test]
+fn p6_upgrade_messages() {
+    use rustit_agent::protocol::{prepare_shutdown_ack, upgrade_requested};
+    for name in [
+        "examples/pipe-prepare-shutdown.sample.json",
+        "examples/pipe-prepare-shutdown-ack.sample.json",
+        "examples/pipe-status.sample.json",
+    ] {
+        assert_valid("pipe.schema.json", &read(name));
+    }
+    let req: Envelope =
+        serde_json::from_value(read("examples/pipe-prepare-shutdown.sample.json")).unwrap();
+    let ack = Envelope::reply(
+        &req,
+        "prepare_shutdown_ack",
+        prepare_shutdown_ack(true, 0, 2, 1),
+    );
+    let v = serde_json::to_value(&ack).unwrap();
+    assert_valid("pipe.schema.json", &v);
+    assert_eq!(v["id"], json!(req.id), "回應沿用請求 id");
+    let mut st = read("examples/pipe-status.sample.json");
+    for version in [None, Some("0.7.2-broken")] {
+        st["body"]["upgrade_requested"] =
+            upgrade_requested("9f8e7d6c-5b4a-4c3d-8e2f-1a0b9c8d7e61", "watchdog", version);
+        assert_valid("pipe.schema.json", &st);
+    }
+    for (state, result, code) in [
+        (
+            "succeeded",
+            Some(json!({ "handed_to_watchdog": true })),
+            None,
+        ),
+        ("failed", None, Some("AGENT_UPGRADING")),
+    ] {
+        let u = CommandUpdate {
+            command_id: "9f8e7d6c-5b4a-4c3d-8e2f-1a0b9c8d7e61".into(),
+            state: state.into(),
+            progress: None,
+            result,
+            error_code: code.map(str::to_string),
+            error_message: None,
+            occurred_at: "2026-10-21T02:00:00.000Z".into(),
+        };
+        assert_valid(
+            "ws-envelope.schema.json",
+            &serde_json::to_value(Envelope::new(
+                "command_update",
+                serde_json::to_value(&u).unwrap(),
+            ))
+            .unwrap(),
+        );
+    }
+}

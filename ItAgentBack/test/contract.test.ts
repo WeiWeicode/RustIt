@@ -38,6 +38,8 @@ describe('資料契約範例', () => {
       'inventory-response.sample.json',
       'inventory.sample.json',
       'pipe-get-status.sample.json',
+      'pipe-prepare-shutdown-ack.sample.json',
+      'pipe-prepare-shutdown.sample.json',
       'pipe-status.sample.json',
       'sync-response.sample.json',
       'sync.sample.json',
@@ -94,6 +96,18 @@ describe('資料契約範例', () => {
     const st = example<Record<string, any>>('pipe-status.sample.json');
     const { pid: _p, ...noPid } = st.body;
     assert.equal(pipe({ ...st, body: noPid }), false);
+  });
+
+  it('P6-2:本機管道 prepare_shutdown / ack、status.upgrade_requested', () => {
+    check(PIPE_ID, 'pipe-prepare-shutdown.sample.json');
+    check(PIPE_ID, 'pipe-prepare-shutdown-ack.sample.json');
+    const pipe = ajv.getSchema(PIPE_ID)!;
+    const req = example<Record<string, any>>('pipe-prepare-shutdown.sample.json');
+    assert.equal(pipe({ ...req, body: { reason: 'whatever' } }), false);
+    const ack = example<Record<string, any>>('pipe-prepare-shutdown-ack.sample.json');
+    assert.equal(pipe({ ...ack, body: {} }), false, 'ack 缺 flushed');
+    const st = example<Record<string, any>>('pipe-status.sample.json');
+    assert.equal(pipe({ ...st, body: { ...st.body, upgrade_requested: { id: 'x', component: 'desktop' } } }), false);
   });
 
   it('P6:Watchdog 上報帶 upgrade、回應 target;升級事件依類型檢查 data', () => {

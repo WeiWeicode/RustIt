@@ -164,7 +164,7 @@
         "component": { "type": "string", "enum": ["agent", "watchdog"] },
         "from": { "type": "string", "maxLength": 32, "description": "升級前版本" },
         "to": { "type": "string", "maxLength": 32, "description": "目標版本" },
-        "duration_ms": { "type": "integer", "minimum": 0, "description": "upgrade_succeeded / upgrade_failed:從開始替換到結束" },
+        "duration_ms": { "type": "integer", "minimum": 0, "description": "upgrade_succeeded / upgrade_failed:從開始(下載)到結束" },
         "error_code": { "$ref": "#/definitions/UpgradeErrorCode" },
         "error_message": { "type": "string", "maxLength": 300 },
         "rolled_back": { "type": "boolean", "description": "upgrade_failed:已還原為舊版並確認正常" }
