@@ -1,0 +1,204 @@
+# P6 升級設計
+
+> 草案 2026-10-20,分支 `docs/p6-upgrade-design`(從 develop `56d2263` 開)。依據:PLATFORM-PLAN §4.5、§4.9、§5、§6、§7、§8 P6 列、§8 B1 / B2;指南 ENDPOINT-AGENT-GUIDE §7.1–§7.4、§8.3、§10.2 E4;ADR 0002、0003;`P5-MONITOR-DESIGN.md`(Watchdog、本機管道、`watchdog/report`)。
+> **2026-10-20 需求方確認**:§9 全部照建議(測試簽章憑證、本機信任清單 P6 就做、測試區先用主機 2 本機目錄、`pilot` 未滿 24 小時回 409 + `force`、改環與版本需 `endpoint.software.manage` 且全部公司角色、執行中指令等最多 60 秒、版本號 Agent 0.7.0 / Watchdog 0.2.0、Windows Runner 在 P6-1~3 驗收後、migration 0007 先給需求方看再由 Claude 套用)。
+> 設計當時的現況:Agent 0.6.0、Watchdog 0.1.0(P5-2,VM `RUSTIT-P34` 驗收通過);`watchdog/report` 回應已有 `target` 欄位(一律 `null`);管道 `prepare_shutdown` 只定義、回 `unsupported`;`ita.device.agent_version`、`ita.device_health.watchdog_version` 已有;**程式碼簽章憑證未簽發(ADR 0003 建議中)、NAS `RustIT\` 未掛載、主機 2 沒有 Windows Runner**。
+
+## 0. 分批
+
+| 批 | 內容 | 版本 | 需要同意 |
+| --- | --- | --- | --- |
+| **P6-1 版本登錄與發佈環(後端)** | migration `0007_release.sql`;管理 API(版本登錄、發佈環目標版本、裝置所屬環、升級進度);Agent 下載 API(Range);`watchdog/report` 回應帶 `target`、請求帶 `upgrade` 進度;並行上限;`upgrade_failed`、`version_mismatch` 告警;`agent.upgrade` 指令(admin) | — | migration 套用 `giganexus_It_Agent_test`;版本檔目錄(§9-3);合併 develop |
+| **P6-2 Watchdog 升級 Agent** | Watchdog 下載(續傳)→ 驗 SHA-256 與 Authenticode 簽章者 → 管道 `prepare_shutdown` → 停服務、舊版放 `previous\`、替換、啟動 → 2 分鐘內 `get_status` 驗證 → 失敗還原並回報;Agent 實作 `prepare_shutdown` | Agent **0.7.0**、Watchdog **0.2.0**(MSI 首次安裝到 VM) | VM 驗收;測試簽章憑證(§9-1) |
+| **P6-3 Agent 升級 Watchdog、`agent.upgrade` 立即觸發** | Watchdog 下載驗證後經管道 `replace_watchdog` 交給 Agent 替換(互相升級、不覆寫自己);`agent.upgrade` 讓 Watchdog 立即上報 | 同上 | VM 驗收 |
+| **P6-4 Windows Runner + 人工簽章流程** | 主機 2 Windows 本機 GitLab Runner(shell、PowerShell、tag `windows`、`concurrent = 1`);CI 手動 / tag job 產出未簽章 exe、MSI 與 SHA-256;簽章腳本、上架腳本 | — | Runner 註冊 Token 由需求方執行;`.gitlab-ci.yml` |
+| **P6-5 GigaItApp「Agent 版本」頁** | 版本清單 / 登錄 / 發佈 / 撤回、發佈環目標版本與進度、裝置詳情「所屬環」與升級狀態;`gateway-rbac.yaml` | — | **GigaItApp、`gateway-rbac.yaml`:動手前另外確認**(OpenAPI 註冊、IT 發佈後才綁 `includes`) |
+| P6-6 收尾 | 指南回寫(§7.3、§7.4、§8.3、E4)、`command-kinds.md`、根目錄 `workspace.json` / `PROJECT-MAP.md`、甘特圖 W6-19、測試報告、RUNBOOK 版本回滾一節(B10 先寫這段) | — | Gateway / 根目錄 repo 修改前確認 |
+
+P6-1 先做(後端可單獨用 API 與 curl 驗證);P6-2 依賴 P6-1 的 API;P6-3 依賴 P6-2 的下載與驗證程式;P6-4 與 P6-1~3 互不依賴,**Runner 建好前用開發機建置 + 人工簽章**(PLATFORM-PLAN §4.9 選項 A,只限測試期);P6-5 在 P6-1 API 上線後可開始。
+
+**完成標準對應**(PLATFORM-PLAN §8 P6):
+
+| 完成標準 | 由哪一批達成 | 驗證方式 |
+| --- | --- | --- |
+| `pilot` 環設新版 → 10 分鐘內升級成功 | P6-1、P6-2 | VM 設為 `pilot`,登錄 0.7.1 並設為 `pilot` 目標 → Watchdog 下一次上報(≤ 5 分鐘)取得目標 → 下載、替換 → 新版 hello 上線;GigaItApp 顯示 0.7.1。Watchdog 0.2.0 → 0.2.1 同樣測一次(P6-3) |
+| 故意放壞的版本 → 自動還原並回報 | P6-2 | 以 `broken-for-test` feature 建置 0.7.2(啟動即結束 / 不連 WebSocket 兩種)→ 2 分鐘內 `get_status` 不正常 → 還原 0.7.1、事件 `upgrade_failed`(`rolled_back`)、告警;同版本失敗 2 次後不再自動重試 |
+| 發版檔案皆經人工簽章 | P6-2、P6-4 | 未簽章 / 簽章者不符 / SHA-256 不符的檔案都拒絕安裝並回報(三個反向測試);測試期用測試簽章憑證(§9-1) |
+
+## 1. 資料表(`0007_release.sql`,SQL Server 2012)
+
+> PLATFORM-PLAN §5.2 原訂 `0005_release.sql`;0005、0006 已用於 E6 公司與 P5 監測,本階段為 **0007**(§5.2 一併更正)。`desktop` 元件到 P8 才用,欄位先允許。
+
+### `ita.agent_release` — 版本登錄
+
+| 欄位 | 型別 | 說明 |
+| --- | --- | --- |
+| `release_id` | `UNIQUEIDENTIFIER` PK | |
+| `component` | `VARCHAR(16)` | `agent` / `watchdog` / `desktop` |
+| `version` | `VARCHAR(32)` | semver;`UNIQUE (component, version)` |
+| `file_name` | `NVARCHAR(128)` | 版本檔目錄下 `{component}\{version}\` 的檔名(只允許 `[A-Za-z0-9._-]`) |
+| `sha256`、`size_bytes` | `CHAR(64)`、`BIGINT` | **登錄時由 Server 讀檔計算**,不接受人工輸入;下載時再比對一次,檔案被換掉就拒絕下發並記錯 |
+| `signer_thumbprints` | `VARCHAR(400)` | 預期簽章者憑證 SHA-1 指紋(逗號分隔,換憑證時可同時列新舊) |
+| `status` | `VARCHAR(16)` | `draft` → `published` → `revoked`;`revoked` 不可再設為目標 |
+| `notes` | `NVARCHAR(1000)` | 變更說明 |
+| `created_by` / `created_at`、`published_by` / `published_at`、`revoked_by` / `revoked_at` | | 工號取自內部 Token |
+
+### `ita.release_ring` — 發佈環目標版本
+
+| 欄位 | 說明 |
+| --- | --- |
+| `ring` + `component` | PK;`ring` 為 `pilot` / `it` / `all` |
+| `target_version` | NULL = 不升級(維持現況);可設比目前舊的版本(降版走同一流程) |
+| `updated_by` / `updated_at` | |
+
+規則:`pilot` 可設 `draft` 或 `published`;`it`、`all` 只能設 `published`。往下一環設定時,若 `pilot` 環的同一版本設定未滿 24 小時,API 回 `409 ITA_RING_TOO_EARLY`,可帶 `force: true` 略過(寫入稽核)(§9-4)。
+
+### `ita.device` 加欄位、`ita.device_upgrade`
+
+- `ita.device.ring VARCHAR(16) NOT NULL DEFAULT 'all'`。
+- `ita.device_upgrade`(device × component,1:1):`target_version`、`state`(`pending` / `downloading` / `verifying` / `installing` / `succeeded` / `failed` / `rolled_back`)、`attempts`(同一目標版本的失敗次數)、`error_code`、`error_message`、`started_at`、`updated_at`、`forced_by`(`agent.upgrade` 指定版本時的操作人)。
+- `ita.device_health.watchdog_version` 沿用 P5;`desktop_version` 到 P8 再加。
+
+## 2. 契約變更(只新增欄位,舊版照常運作)
+
+### 2.1 `watchdog.schema.json`
+
+**請求加 `upgrade`**(選填;沒有進行中的升級時省略):
+
+| 欄位 | 說明 |
+| --- | --- |
+| `component`、`target_version`、`from_version` | |
+| `state` | 同 `ita.device_upgrade.state` |
+| `attempts`、`error_code`、`error_message` | 錯誤代碼:`DOWNLOAD_FAILED`、`HASH_MISMATCH`、`SIGNATURE_INVALID`、`SIGNER_NOT_TRUSTED`、`PREPARE_TIMEOUT`、`STOP_TIMEOUT`、`REPLACE_FAILED`、`HEALTH_CHECK_FAILED`、`ROLLBACK_FAILED`、`DISK_FULL` |
+
+**回應 `target`**(0.1.0 忽略,不影響):
+
+```json
+{ "target": {
+    "agent":    { "version": "0.7.1", "url": "/agent/v1/releases/agent/0.7.1/rustit-agent.exe",
+                  "sha256": "…", "size_bytes": 7340032, "signer_thumbprints": ["…"] },
+    "watchdog": null } }
+```
+
+- 某元件已是目標版本、或同版本已失敗 2 次(且沒有 `agent.upgrade` 強制)、或超過並行上限時,該元件為 `null`。
+- **並行上限** `RELEASE_MAX_CONCURRENT`(預設 20):`device_upgrade.state` 在 `downloading`~`installing` 且 30 分鐘內有更新的台數達上限時,新的裝置先拿 `null`,下次上報再排。
+
+### 2.2 `pipe.schema.json`
+
+| type | 方向 | body | 說明 |
+| --- | --- | --- | --- |
+| `prepare_shutdown` / `prepare_shutdown_ack` | Watchdog → Agent | `reason: "upgrade"`、`timeout_sec` / `flushed`、`outbox_pending` | **實作**:Agent 停止接新指令、送完待送的 `command_update` 與事件(上限 20 秒)、以 1000 關閉 WebSocket 後回 ack;執行中的指令先等最多 60 秒,逾時才記 `failed` / `AGENT_UPGRADING`(§9-6;Watchdog 的 `prepare_shutdown` 等待因此為 90 秒) |
+| `status`(加欄位) | Agent → Watchdog | `upgrade_requested: { component, version? }` | `agent.upgrade` 指令設定;Watchdog 看到後立即上報(不等 5 分鐘) |
+| `replace_watchdog` / `replace_watchdog_ack` | Watchdog → Agent | `version`、`path`(`cache\` 內已驗證的檔案)、`sha256`、`signer_thumbprints` / `accepted` | P6-3:Agent **自行再驗一次**雜湊與簽章後才替換;Watchdog 被停止前收到 `accepted` |
+
+管道仍只允許 SYSTEM、Administrators,並沿用 P5 的伺服端 PID 比對;`replace_watchdog` 只接受 `path` 位於 `ProgramData\GigaNexus\Agent\cache\watchdog\` 底下的檔案。
+
+### 2.3 事件與指令
+
+- 新事件(Watchdog 上報):`upgrade_started`、`upgrade_succeeded`(`component`、`from`、`to`、耗時)、`upgrade_failed`(`component`、`to`、`error_code`、`rolled_back`)。Agent 替換 Watchdog 的結果由 Agent 經 `/agent/v1/events` 上報(同樣三種,`component = watchdog`);路徑白名單依元件區分(P5 L1 規則延伸)。
+- `agent.upgrade`(admin,`command-kinds.md`):`params: { component: "agent" | "watchdog", version?: string }`。省略 `version` = 依所屬環目標立即檢查;指定版本 = 這台強制升級 / 降版到該版本(必須 `published`,`pilot` 環裝置可用 `draft`),並重設失敗次數。Agent 回 `succeeded` 只代表「已交給 Watchdog」,實際結果看 `device_upgrade` 與事件。有效期限 1 小時。
+
+## 3. ItAgentBack
+
+### 3.1 模組
+
+| 模組 | 內容 |
+| --- | --- |
+| `services/release-service.ts` | 版本檔目錄讀取(防路徑穿越:只允許 `{component}/{version}/{file}` 三層、正規化後必須在根目錄下)、SHA-256 計算、目標版本選擇(裝置環 → 環目標 → 強制版本 → 失敗次數 → 並行上限)、`upgrade` 進度落盤 |
+| `routes/releases.ts` | 管理 API(§3.2) |
+| `agent-app.ts` | `GET /agent/v1/releases/:component/:version/:file`:裝置憑證、裝置必須 `active`、該版本必須是**這台目前被指派的目標**(否則 404,不讓端點任意下載);支援 `Range` / `206`;每次下載寫一筆稽核(裝置、版本、位元組範圍彙總) |
+| `services/alert-service.ts` | 新規則 `upgrade_failed`(事件類,同版本失敗 2 次開,升級成功或目標改變時自動關)、`version_mismatch`(在線且 Watchdog 正常,但環目標設定超過 24 小時仍未到目標版本) |
+| `commands/kinds.ts` | `agent.upgrade`(admin) |
+
+設定(`ita.env`):`RELEASES_DIR`(容器內唯讀掛載點,預設 `/srv/releases`)、`RELEASE_MAX_CONCURRENT=20`。
+
+### 3.2 管理 API(`:51240`,對外 `/api/endpoint/*`)
+
+| 方法 | 路徑 | `x-permission` | 說明 |
+| --- | --- | --- | --- |
+| `GET` | `/releases` | `endpoint.device.read` | 版本清單(篩選 `component`、`status`) |
+| `GET` | `/releases/files` | `endpoint.device.read` | 版本檔目錄內尚未登錄的檔案(給登錄畫面挑選) |
+| `POST` | `/releases` | `endpoint.software.manage` | 登錄:`component`、`version`、`fileName`、`signerThumbprints`、`notes`;Server 計算雜湊;`x-audit-level: meta` |
+| `POST` | `/releases/{releaseId}/publish`、`/revoke` | `endpoint.software.manage` | 發佈 / 撤回;撤回的版本若是某環目標,該環目標改為 NULL 並回傳受影響的環;`x-audit-level: meta` |
+| `GET` | `/release-rings` | `endpoint.device.read` | 各環 × 元件目標版本與進度(已到目標 / 進行中 / 失敗 / 未回報台數) |
+| `PUT` | `/release-rings/{ring}/{component}` | `endpoint.software.manage` | `{ targetVersion: string \| null, force?: boolean }`;`x-audit-level: meta` |
+| `PUT` | `/devices/{deviceId}/ring` | `endpoint.command.admin` | 調整裝置所屬環(PLATFORM-PLAN §5.3);`x-audit-level: meta` |
+| `GET` | `/devices/{deviceId}/upgrade` | `endpoint.device.read` | 這台各元件的升級狀態(詳情頁也一併帶) |
+
+全部依 E6 資料範圍過濾裝置;版本與環是全公司共用設定,只有 `ENDPOINT_SCOPE_ALL_ROLES` 角色能改環目標(其他回 `403 ITA_SCOPE_ALL_REQUIRED`)(§9-5)。
+
+## 4. 版本檔目錄
+
+- 結構:`releases\{agent|watchdog|desktop}\{version}\rustit-agent.exe`(只放**已簽章**的 exe;MSI 給首次安裝,放同層 `msi\{version}\`,Server 不下發)。
+- 正式:NAS `\\10.10.130.31\docker-folder\RustIT\releases\`,`endpoint-server` 以 CIFS 唯讀掛載(帳密由需求方以機密腳本寫入主機 2,P7 軟體庫共用同一個掛載)。
+- 測試區在 NAS 帳密到位前:主機 2 `/srv/giganexus/ita-releases/`(唯讀 bind mount 到 `RELEASES_DIR`),上架由需求方或 Claude 經 `ssh host2` 複製(§9-3)。
+
+## 5. Watchdog(0.2.0)
+
+### 5.1 新模組
+
+| 模組 | 內容 |
+| --- | --- |
+| `upgrade/mod.rs` | 升級狀態機(§5.2),核心邏輯以 trait 注入 SCM / 管道 / 檔案系統 / 下載 / 簽章驗證,單元測試用假實作 |
+| `upgrade/download.rs` | 下載到 `cache\{component}\{version}\*.part`,中斷後以 `Range` 續傳;完成後比對大小與 SHA-256 才改名;磁碟剩餘 < 500 MB 不下載(`DISK_FULL`);`cache\` 每個元件只保留最新 2 個版本 |
+| `rustit-common::authenticode` | `WinVerifyTrust`(`WINTRUST_ACTION_GENERIC_VERIFY_V2`,鏈要到受信任的根)+ 取簽章者憑證 SHA-1 指紋;簽章者必須**同時**在主機下發的 `signer_thumbprints` 與本機信任清單內(§9-2)。Agent 的 `replace_watchdog` 與 P7 軟體派送共用 |
+| `upgrade/swap.rs` | 停服務、備份、替換、啟動、還原(§5.3) |
+
+### 5.2 升級 Agent 流程
+
+1. 上報取得 `target.agent` → 本機記錄目標(`watchdog.db` 新表 `upgrade`:元件、目標版本、狀態、失敗次數),上報 `upgrade.state = downloading`。
+2. 下載完成 → 驗 SHA-256、Authenticode、簽章者;任一失敗 → `failed`(不還原,因為還沒動),刪除檔案。
+3. **維護中**(看守暫停,不把接下來的停止當成竄改)→ 管道 `prepare_shutdown`(等 90 秒;逾時照樣繼續,記 `PREPARE_TIMEOUT` 警告)。
+4. 停止 `GigaNexusAgent`(沿用 P5 M2:握住行程控制代碼、等 50 秒、逾時才結束行程)。
+5. `Program Files\GigaNexus\Agent\rustit-agent.exe` → `previous\rustit-agent.exe`(覆蓋上一份 previous);新檔先複製為同目錄 `rustit-agent.exe.new`、**在目的地再驗一次雜湊**,再以 `MoveFileEx(REPLACE_EXISTING)` 換上。
+6. 啟動服務 → 2 分鐘內每 10 秒 `get_status`:`version` = 目標、`ws_connected = true`、PID 穩定 → `succeeded`,結束維護中,立即上報。
+7. 失敗(啟動失敗、2 分鐘內不正常、版本不符)→ 停止 → `previous\` 換回 → 啟動 → 確認舊版 `get_status` 正常 → `rolled_back`;還原也失敗 → `ROLLBACK_FAILED`(critical 告警,看守恢復照常拉起)。同一目標版本失敗 2 次不再自動嘗試。
+8. Watchdog 在步驟 3–7 期間自己被重啟(當機、關機):重啟後讀本機 `upgrade` 狀態,若停在 `installing` → 檢查目前 exe 版本與服務狀態,依步驟 6 / 7 收尾,不會停在半套。
+
+### 5.3 Agent 替換 Watchdog(P6-3,Agent 0.7.0 `upgrade_watchdog.rs`)
+
+Watchdog 完成下載與驗證後送 `replace_watchdog` → Agent 再驗一次 → 回 `accepted` → Agent 的 Watchdog 看守進入維護中 → 停止 `GigaNexusWatchdog` → 備份 / 替換(同 §5.2 步驟 5)→ 啟動 → 2 分鐘內新 Watchdog 以 SCM 的 PID 連上管道並送出 `get_status` → 成功;否則還原。結果由 Agent 經 `/agent/v1/events` 上報,新 Watchdog 的上報版本也會反映在 `watchdog_version`。
+
+### 5.4 不做的事
+
+- 不升級 MSI 本身(ARP 顯示的版本會停在首次安裝的版本;服務名稱、目錄變更等大改版才重派 MSI,PLATFORM-PLAN §4.5)。GigaItApp 以回報的 exe 版本為準。
+- 不做差分更新、不做 P2P 分享下載(1,000 台以內、exe 約 7–10 MB,並行上限即可)。
+
+## 6. 建置與簽章(P6-4)
+
+| 步驟 | 誰 | 內容 |
+| --- | --- | --- |
+| 建置 | CI(主機 2 Windows Runner,手動 / tag `rustit-v*`) | `cargo build --release`(crt-static)、WiX 5 MSI;產出**未簽章** exe / MSI 與 `SHA256SUMS.txt`(artifact 保存 30 天);`cargo audit`(B8 先做這項) |
+| 簽章 | 簽章人員(自己的電腦) | `RustAgent/installer/sign-release.ps1`:核對 `SHA256SUMS.txt` → `signtool sign /fd SHA256 /tr <時間戳記>`(時間戳記伺服器另確認,內網可能連不到)→ 驗證 → 產出已簽章檔的新 SHA-256 |
+| 上架 | 簽章人員 | `publish-release.ps1`:複製到版本檔目錄 `{component}\{version}\` → GigaItApp 登錄(或 API)→ 設 `pilot` 目標 |
+
+Runner 建好前(P6-1~3 開發期):開發機 `build-agent-msi.ps1` 建置 + 測試簽章憑證簽章(選項 A,只限測試期)。
+
+## 7. GigaItApp(P6-5,動手前另外確認)
+
+| 位置 | 內容 | 權限 |
+| --- | --- | --- |
+| 新 Tab「Agent 版本」(`it.endpoint-release.list`,電腦清單選單下) | 版本清單(元件、版本、狀態、SHA-256、簽章者、登錄 / 發佈人);登錄(從未登錄檔案挑選)、發佈、撤回按鈕 | read;按鈕 `it.endpoint-release.manage` → `endpoint.software.manage` |
+| 同頁「發佈環」區塊 | 三環 × 兩元件目標版本、各環進度(到目標 / 進行中 / 失敗 / 未回報),設定目標(`pilot` 未滿 24 小時的確認對話框) | 同上 |
+| 電腦詳情「健康與 Agent」Tab | 所屬環(可改,`endpoint.command.admin`)、各元件升級狀態與最後錯誤;指令「升級 Agent」(admin) | read;admin |
+| 電腦清單 | 「所屬環」欄與篩選 | read |
+
+## 8. 測試與驗證
+
+- **ItAgentBack**:契約測試(`watchdog-report` 加 `upgrade`、回應 `target`);`release-service` 單元測試(環 → 目標、`draft` 只限 pilot、強制版本、失敗 2 次、並行上限、撤回連動、路徑穿越);下載 API(Range、非指派版本 404、停用 403、檔案被換掉);`test:int` SQL store(`giganexus_It_Agent_poc_test`)。
+- **Watchdog / Agent**:升級狀態機以假實作測試(成功、下載中斷續傳、雜湊不符、簽章不符、prepare 逾時、啟動失敗還原、2 分鐘不正常還原、還原失敗、Watchdog 中途重啟收尾、同版本失敗 2 次);`authenticode` 以測試簽章檔與未簽章檔測試(只在 Windows 跑)。
+- **測試區 VM**(`RUSTIT-P34`;先建檢查點「P6 前(0.6.0)」):MSI 0.7.0 首次升級 → 完成標準三項 + Watchdog 0.2.0 → 0.2.1 + 降版 0.7.1 → 0.7.0 + 升級中重開機。
+
+## 9. 要你決定的事
+
+1. **簽章憑證**:IT 的 AD CS 程式碼簽章憑證(ADR 0003)尚未簽發。測試期用自簽測試憑證(`New-SelfSignedCertificate -Type CodeSigningCert`,私鑰只在你的電腦;公鑰匯入 VM 的 `LocalMachine\Root` 與 `TrustedPublisher`),正式憑證到位後換指紋即可。(建議:同意;另請 IT 開始申請正式憑證,這是上線前必要項目)
+2. **本機信任簽章者清單**(B1 第二道防線):P6 先做「主機下發的指紋 ∩ 本機清單」,本機清單由 MSI 寫入 `agent.toml` 的 `[upgrade] trusted_signers`(ACL 只有 SYSTEM、Administrators),上線前改由 GPO 寫 `HKLM\SOFTWARE\Policies\GigaNexus\Agent`(兩處都讀,原則優先)。/ P6 只比對主機下發的指紋,本機清單延到 B1。(建議:P6 就做,主機被入侵也不能推任意程式)
+3. **版本檔目錄**:NAS 帳密到位前,測試區先用主機 2 本機目錄 `/srv/giganexus/ita-releases/`;NAS 掛載等你提供帳密後與 P7 一起做。(建議:同意)
+4. **環的推進限制**:`pilot` 未滿 24 小時就設 `it` / `all` → API 回 409、可帶 `force` 略過並記稽核。/ 不限制,只在畫面提示。(建議:409 + force)
+5. **誰能改發佈環與版本**:`endpoint.software.manage` **且**全部公司角色(`ENDPOINT_SCOPE_ALL_ROLES`),因為環是全公司共用。/ 只要 `endpoint.software.manage`。(建議:兩者都要)
+6. **升級時執行中的指令**:`prepare_shutdown` 時執行中的指令記 `failed` / `AGENT_UPGRADING`(IT 可重下)。/ 等執行中的指令結束(最多 5 分鐘)再升級。(建議:等 `logs.collect` 這類短指令最多 60 秒,逾時才記 `AGENT_UPGRADING`)
+7. **版本號**:Agent 0.7.0、Watchdog 0.2.0(P6-2 / P6-3 一起發);測試用 0.7.1 / 0.7.2(壞版)/ Watchdog 0.2.1。(建議:同意)
+8. **Windows Runner(P6-4)時程**:與 P6-1~3 並行,現在就在主機 2 裝(需要你執行 Runner 註冊,並在主機 2 安裝 VS Build Tools、Rust、WiX 5)。/ P6-1~3 驗收後再做。(建議:P6-1~3 驗收後再做,避免同時改主機 2 影響測試區)
+9. migration 0007 寫好後先給你看,由 Claude 經同意套用 `giganexus_It_Agent_test`(同 P5)。
+
+PLATFORM-PLAN 要配合修正的地方(確認後與 P6-1 一起改):§5.2 `0005_release.sql` → `0007_release.sql`(加 `device_upgrade`);§4.5 補「並行上限」「24 小時推進限制」「本機信任清單」;§6 `pipe.schema.json` 加 `replace_watchdog`。

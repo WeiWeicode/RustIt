@@ -226,6 +226,7 @@ Demo(Tauri)改造為使用者端程式 `desktop`:使用者會用的頁面保留(
 | 驗證與還原 | SHA-256 + Authenticode 簽章者相符才安裝;新版 2 分鐘內 `get_status` 不正常就還原 `previous\` 並回報失敗;同一版本失敗 2 次不再自動重試 |
 | 遠端停用開關 | 環的目標版本可設回舊版(降版走同一流程);裝置可停用(既有 `status = disabled`) |
 | 首次安裝 | MSI(GPO);之後一律經 Watchdog 升級。MSI 只在大改版(例如服務名稱、目錄變更)時重派 |
+| 推進與並行(2026-10-20 定案) | `pilot` 同一版本未滿 24 小時就設 `it` / `all` 回 409(可 `force`,記稽核);同時升級台數上限 `RELEASE_MAX_CONCURRENT`(預設 20);簽章者必須同時符合主機下發與端點本機信任清單(B1 的一部分提前到 P6);細節見 `P6-UPGRADE-DESIGN.md` |
 
 ### 4.6 軟體派送 — P7
 
@@ -361,7 +362,7 @@ Demo(Tauri)改造為使用者端程式 `desktop`:使用者會用的頁面保留(
 | `0002_sync_event.sql` | `ita.device_event` 加 `occurred_at`(端點發生時間)、`received_at`、索引與新 `event_type`(含 `offline_period`、`usb_*`、`local_overflow`、`merged`);`ita.device_setting`(主機下發設定與版本號);`ita.device` 加 `hw_fingerprint`、`clock_skew_ms`、`merged_into`、`retired_at`(A1、A2) | P2 |
 | `0003_command.sql` | `ita.command`、`ita.command_batch`(含第二人核可欄位,B1);診斷檔案索引(`logs.collect`,A4) | P4 |
 | `0006_monitor.sql` | `ita.device_health`(最近健康、Watchdog 最近回報、憑證到期、重啟次數;1:1)、`ita.device_alert`(告警);原訂 0004,0004 / 0005 已用於 P3 軟體清單與 E6 公司 | P5 |
-| `0005_release.sql` | `ita.agent_release`、`ita.release_ring`、`ita.device` 加 `ring`、`watchdog_version`、`desktop_version` | P6 |
+| `0007_release.sql` | `ita.agent_release`、`ita.release_ring`、`ita.device_upgrade`、`ita.device` 加 `ring`(`watchdog_version` 已在 0006 `device_health`;`desktop_version` 到 P8);原訂 0005,0005 / 0006 已用於 E6 與 P5(`P6-UPGRADE-DESIGN.md` §1) | P6 |
 | `0006_software.sql` | `ita.software_package` | P7 |
 
 同步更新 `ItAgentBack/docs/DB_SCHEMA.md` 與 `../GigaNexusAIPlan/architecture/projects/`(若建立 RustIt 專案檔)。
@@ -388,7 +389,7 @@ Demo(Tauri)改造為使用者端程式 `desktop`:使用者會用的頁面保留(
 | `ws-envelope.schema.json` | 加 `command`、`command_update`、`prepare_shutdown`(P4;實作時另加 `command_update_ack`:Agent 的結果先寫本機、主機確認才刪,需求方 2026-10-15 同意,設計見 `P4-COMMAND-DESIGN.md`);`heartbeat.body.health`(選填,P5) | P4、P5 |
 | ~~`settings.schema.json`(新)~~ | 主機下發設定;**P2 實作時併入 `ws-envelope.schema.json` 的 `AgentSettings`**(只在 `hello_ack` 使用,先有回報間隔、USB 事件開關,其餘隨階段新增) | P2 |
 | `watchdog.schema.json`(新) | `POST /agent/v1/watchdog/report` 請求與回應(目標版本、下載路徑、SHA-256) | P5、P6 |
-| `pipe.schema.json`(新) | 本機管道 `get_status` / `status` / `prepare_shutdown`(指南 §7.2) | P5 |
+| `pipe.schema.json`(新) | 本機管道 `get_status` / `status` / `prepare_shutdown`(指南 §7.2);P6 實作 `prepare_shutdown`,加 `replace_watchdog`(Agent 替換 Watchdog)與 `status.upgrade_requested` | P5、P6 |
 | `user-pipe.schema.json`(新) | 使用者唯讀管道:`agent_status`(連線狀態、未連線起始時間與原因、版本、裝置代碼)、Agent → 使用者端的 `prompt`(訊息、重開機提示)與使用者回覆 | P8 |
 | `command-kinds.md`(新) | 每個指令類型的 `params`、`result`、等級、有效期限、錯誤代碼 | P4 起逐步補 |
 
@@ -413,7 +414,7 @@ Demo(Tauri)改造為使用者端程式 `desktop`:使用者會用的頁面保留(
 
 ## 8. 階段與完成標準
 
-> 進度(細節以甘特圖為準):P0–P4 已在測試區完成(P3 於 2026-10-19 完成合併驗證;P4 含 GigaItApp 指令畫面，見 `HANDOFF.md`);**P5 測試區完成(2026-10-20)**(設計 `P5-MONITOR-DESIGN.md`:P5-1 健康 / 變更事件 / 告警已上測試區;P5-2 Watchdog 已合併並於 2026-10-19 VM 驗收通過;P5-3 GigaItApp 畫面 2026-10-20 上測試區並驗證通過;P5-4 指南 v0.10 回寫);P6–P8 未開始。
+> 進度(細節以甘特圖為準):P0–P4 已在測試區完成(P3 於 2026-10-19 完成合併驗證;P4 含 GigaItApp 指令畫面，見 `HANDOFF.md`);**P5 測試區完成(2026-10-20)**(設計 `P5-MONITOR-DESIGN.md`:P5-1 健康 / 變更事件 / 告警已上測試區;P5-2 Watchdog 已合併並於 2026-10-19 VM 驗收通過;P5-3 GigaItApp 畫面 2026-10-20 上測試區並驗證通過;P5-4 指南 v0.10 回寫);P6 設計 2026-10-20 確認(`P6-UPGRADE-DESIGN.md`),P6-1 進行中;P7、P8 未開始。
 
 | 階段 | 內容 | 主要 repo | 完成標準 | 依賴 |
 | --- | --- | --- | --- | --- |
