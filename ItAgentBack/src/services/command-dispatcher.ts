@@ -16,7 +16,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { GatewayIdentity } from '@giganexus/backend-sdk';
-import { EXPIRES_MAX_SEC, EXPIRES_MIN_SEC, kindOf, paramErrors, type CommandKind } from '../commands/kinds.js';
+import { EXPIRES_MAX_SEC, EXPIRES_MIN_SEC, kindOf, paramErrors, SOFTWARE_KINDS, type CommandKind } from '../commands/kinds.js';
 import { AppError, storageUnavailable } from '../errors.js';
 import type {
   BatchRecord,
@@ -166,6 +166,11 @@ const SWEEP_LIMIT = 500;
 export const APPROVAL_WINDOW_MS = 24 * 3_600_000;
 /** D2-1:累計核可門檻的時間窗 */
 export const GATE_WINDOW_MS = 24 * 3_600_000;
+/**
+ * 核可路由(需求方 2026-10-21 決定):軟體派送批次由 /approve、/reject(endpoint.software.manage)核可;
+ * 其他類型(system.reboot 等)由 /approve-command、/reject-command(endpoint.command.admin)核可;路由與類型不符回 403
+ */
+export type ApprovalRoute = 'software' | 'command';
 /**
  * D2-1:同一人 24 小時內累計台數超過門檻需第二人核可的類型;同一組共用計數。
  * 軟體安裝 / 移除(以 SYSTEM 執行程式)一組,重開機(可用性)另一組
@@ -590,9 +595,21 @@ export class CommandDispatcher {
   }
 
   /** 核可人不可是建立人;核可後指令有效期限自核可時起算並開始補送 */
-  async approveBatch(ctx: MgmtCtx, who: GatewayIdentity, batchId: string): Promise<BatchView> {
+  /** 核可 / 駁回的路由要與批次類型相符(核可人的權限依類型而定) */
+  private assertRoute(b: BatchRecord, route: ApprovalRoute): void {
+    const software = SOFTWARE_KINDS.includes(b.kind);
+    if (software !== (route === 'software'))
+      throw new AppError(
+        403,
+        'ITA_APPROVAL_ROUTE_MISMATCH',
+        software ? '軟體派送批次請由 /batches/{id}/approve、/reject 核可' : `${b.kind} 批次請由 /batches/{id}/approve-command、/reject-command 核可`,
+      );
+  }
+
+  async approveBatch(ctx: MgmtCtx, who: GatewayIdentity, batchId: string, route: ApprovalRoute): Promise<BatchView> {
     const emp = who.emp ?? who.sub;
     const b = await this.scopedBatch(ctx, batchId);
+    this.assertRoute(b, route);
     const at = this.now();
     this.assertPending(b, at);
     if (b.createdByEmp === emp) throw new AppError(403, 'ITA_APPROVER_SAME_AS_CREATOR', '核可人不可是批次建立人,請由另一位 IT 核可');
@@ -607,9 +624,10 @@ export class CommandDispatcher {
   }
 
   /** 駁回(建立人也可撤回自己的批次):指令全部 canceled */
-  async rejectBatch(ctx: MgmtCtx, who: GatewayIdentity, batchId: string, reason: string): Promise<BatchView> {
+  async rejectBatch(ctx: MgmtCtx, who: GatewayIdentity, batchId: string, reason: string, route: ApprovalRoute): Promise<BatchView> {
     const emp = who.emp ?? who.sub;
     const b = await this.scopedBatch(ctx, batchId);
+    this.assertRoute(b, route);
     const at = this.now();
     this.assertPending(b, at);
     const ok = await this.sqlDo(ctx, 'batch.reject', () => this.store.rejectBatch(b.id, { emp, name: who.name ?? null }, at, reason));

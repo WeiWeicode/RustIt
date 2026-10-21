@@ -465,9 +465,9 @@ describe('軟體目錄、覆核與派送(SoftwareService + CommandDispatcher)', 
     assert.ok(!conns[0]!.sent.some((m) => m.type === 'command' && m.body.kind === 'software.uninstall'));
     const view = await env.commands.getBatch(ctx, big.batchId);
     assert.equal(view.approvalExpiresAt, new Date(env.clock.t + APPROVAL_WINDOW_MS).toISOString());
-    await assert.rejects(env.commands.approveBatch(ctx, IT, big.batchId), { code: 'ITA_APPROVER_SAME_AS_CREATOR' });
+    await assert.rejects(env.commands.approveBatch(ctx, IT, big.batchId, 'software'), { code: 'ITA_APPROVER_SAME_AS_CREATOR' });
     env.clock.advance(3600);
-    const ok = await env.commands.approveBatch(ctx, REVIEWER, big.batchId);
+    const ok = await env.commands.approveBatch(ctx, REVIEWER, big.batchId, 'software');
     assert.deepEqual([ok.state, ok.approvedBy?.emp], ['running', 'S000002']);
     assert.ok(
       conns.every((c) => c.sent.some((m) => m.type === 'command' && m.body.kind === 'software.uninstall')),
@@ -475,7 +475,7 @@ describe('軟體目錄、覆核與派送(SoftwareService + CommandDispatcher)', 
     );
     const cmd = env.commandStore.commands.find((c) => c.kind === 'software.uninstall' && c.deviceRef === pilot.id)!;
     assert.equal(cmd.expiresAt.getTime(), env.clock.t + 86400 * 1000, '有效期限自核可時起算');
-    await assert.rejects(env.commands.approveBatch(ctx, REVIEWER, big.batchId), { code: 'ITA_BATCH_NOT_PENDING' });
+    await assert.rejects(env.commands.approveBatch(ctx, REVIEWER, big.batchId, 'software'), { code: 'ITA_BATCH_NOT_PENDING' });
   });
 
   it('批次核可:24 小時無人核可 → expired 指令取消;駁回 → rejected 指令取消', async () => {
@@ -497,13 +497,13 @@ describe('軟體目錄、覆核與派送(SoftwareService + CommandDispatcher)', 
       code: 'ITA_IDEMPOTENCY_KEY_REUSED',
     });
     // 核可人的資料範圍需涵蓋批次全部電腦(這兩台未指定公司:只有全部公司看得到)
-    await assert.rejects(env.commands.approveBatch({ ...ctx, scope: only('甲公司') }, REVIEWER, b.batchId), { code: 'ITA_BATCH_NOT_FOUND' });
-    const rejected = await env.commands.rejectBatch(ctx, IT, b.batchId, '目標有誤');
+    await assert.rejects(env.commands.approveBatch({ ...ctx, scope: only('甲公司') }, REVIEWER, b.batchId, 'software'), { code: 'ITA_BATCH_NOT_FOUND' });
+    const rejected = await env.commands.rejectBatch(ctx, IT, b.batchId, '目標有誤', 'software');
     assert.deepEqual([rejected.state, rejected.rejectReason, rejected.counts], ['rejected', '目標有誤', { canceled: 2 }]);
     env.clock.advance(APPROVAL_WINDOW_MS / 1000 - 60);
-    await assert.rejects(env.commands.approveBatch(ctx, REVIEWER, b.batchId), { code: 'ITA_BATCH_NOT_PENDING' });
+    await assert.rejects(env.commands.approveBatch(ctx, REVIEWER, b.batchId, 'software'), { code: 'ITA_BATCH_NOT_PENDING' });
     env.clock.advance(60);
-    await assert.rejects(env.commands.approveBatch(ctx, REVIEWER, a.batchId), { code: 'ITA_BATCH_NOT_PENDING' }, '已超過 24 小時');
+    await assert.rejects(env.commands.approveBatch(ctx, REVIEWER, a.batchId, 'software'), { code: 'ITA_BATCH_NOT_PENDING' }, '已超過 24 小時');
     await env.commands.sweep(ctx);
     const expired = await env.commands.getBatch(ctx, a.batchId);
     assert.deepEqual([expired.state, expired.counts], ['expired', { canceled: 2 }]);
@@ -552,8 +552,8 @@ describe('軟體目錄、覆核與派送(SoftwareService + CommandDispatcher)', 
     assert.equal(un.batchState, 'pending_approval');
     assert.equal((await env.commands.create(ctx, REVIEWER, 'admin', c.deviceId, { kind: 'software.install', params: { packageId: id } })).batchState, null);
     // 第二人核可後送出
-    await assert.rejects(env.commands.approveBatch(ctx, IT, gated.batchId!), { code: 'ITA_APPROVER_SAME_AS_CREATOR' });
-    assert.equal((await env.commands.approveBatch(ctx, REVIEWER, gated.batchId!)).state, 'running');
+    await assert.rejects(env.commands.approveBatch(ctx, IT, gated.batchId!, 'software'), { code: 'ITA_APPROVER_SAME_AS_CREATOR' });
+    assert.equal((await env.commands.approveBatch(ctx, REVIEWER, gated.batchId!, 'software')).state, 'running');
     // 24 小時後重新計算
     env.clock.advance(25 * 3600);
     assert.equal((await install(a, id)).batchState, null);
@@ -570,6 +570,31 @@ describe('軟體目錄、覆核與派送(SoftwareService + CommandDispatcher)', 
     const views = await Promise.all(devices.map((d) => install(d, id)));
     assert.equal(views.filter((v) => v.batchState === null).length, 1, '累計 2 台以內只有 1 台不需核可');
     assert.equal(views.filter((v) => v.batchState === 'pending_approval').length, 4);
+  });
+
+  it('核可路由:重開機批次只能由 /approve-command 核可,軟體派送批次只能由 /approve', async () => {
+    env = setupSoftware({ approvalThreshold: 2 });
+    pilot = await addDevice('PC-PILOT', 1);
+    env.store.ringOf.set(pilot.id, 'pilot');
+    env.dir.put(FILE, CONTENT);
+    const id = await published();
+    const ds = [];
+    for (let i = 0; i < 3; i++) ds.push(await addDevice(`PC-RB-${i}`, 400 + i));
+    const reboot = await env.commands.createBatch(
+      ctx,
+      IT,
+      'admin',
+      ds.map((d) => d.deviceId),
+      { kind: 'system.reboot', params: { delay_sec: 300, message: '安裝更新後需重新開機', force: false } },
+    );
+    assert.equal(reboot.state, 'pending_approval');
+    await assert.rejects(env.commands.approveBatch(ctx, REVIEWER, reboot.batchId, 'software'), { code: 'ITA_APPROVAL_ROUTE_MISMATCH' });
+    await assert.rejects(env.commands.rejectBatch(ctx, REVIEWER, reboot.batchId, 'x', 'software'), { code: 'ITA_APPROVAL_ROUTE_MISMATCH' });
+    assert.equal((await env.commands.approveBatch(ctx, REVIEWER, reboot.batchId, 'command')).state, 'running');
+    const sw = await env.software.deploy(ctx, IT, id, { action: 'install', deviceIds: ds.map((d) => d.deviceId) });
+    assert.equal(sw.state, 'pending_approval');
+    await assert.rejects(env.commands.approveBatch(ctx, REVIEWER, sw.batchId, 'command'), { code: 'ITA_APPROVAL_ROUTE_MISMATCH' });
+    assert.equal((await env.commands.rejectBatch(ctx, IT, sw.batchId, '目標有誤', 'software')).state, 'rejected');
   });
 
   it('M3:大量電腦同時重連,全域並行上限不會被超過', async () => {

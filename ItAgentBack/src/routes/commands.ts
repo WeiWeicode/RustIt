@@ -12,7 +12,7 @@
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { COMMAND_KINDS, EXPIRES_MAX_SEC, EXPIRES_MIN_SEC } from '../commands/kinds.js';
 import { AppError } from '../errors.js';
-import { BATCH_MAX_DEVICES, type CommandDispatcher } from '../services/command-dispatcher.js';
+import { BATCH_MAX_DEVICES, type ApprovalRoute, type CommandDispatcher } from '../services/command-dispatcher.js';
 import type { CommandFileService } from '../services/command-files.js';
 import type { CommandState } from '../stores/types.js';
 import { mgmtCtx } from './mgmt-ctx.js';
@@ -425,60 +425,71 @@ export function commandRoutes(commands: CommandDispatcher, files?: CommandFileSe
       async (req) => commands.getBatch(ctx(req), req.params.batchId.toLowerCase()),
     );
 
-    // 第二人核可(PLATFORM-PLAN B1;P7-SOFTWARE-DESIGN §6):核可人需資料範圍涵蓋批次全部電腦(否則 404,同不存在)
-    app.post<{ Params: { batchId: string } }>(
-      '/v1/batches/:batchId/approve',
-      {
-        schema: {
-          operationId: 'endpoint.command.batch.approve',
-          summary: '核可批次',
-          description:
-            '待核可(pending_approval)的批次由建立人以外的 IT 核可後開始送出,指令有效期限自核可時起算。核可人是建立人回 403 ITA_APPROVER_SAME_AS_CREATOR;不是待核可或已超過 24 小時回 409 ITA_BATCH_NOT_PENDING。核可前應確認套件、安裝參數、簽章者、雜湊、目標台數與並行數。',
-          tags: ['端點指令'],
-          'x-permission': 'endpoint.software.manage',
-          'x-audit-level': 'meta',
-          'x-gherkin': [
-            '場景: 建立人自己核可',
-            '  假如 S000001 建立了 21 台的軟體派送批次',
-            '  當 S000001 呼叫 POST /api/endpoint/batches/{batchId}/approve',
-            '  那麼 回應 403',
-            '  而且 回應的 code 為 "ITA_APPROVER_SAME_AS_CREATOR"',
-          ].join('\n'),
-          params: { type: 'object', properties: { batchId: uuid }, required: ['batchId'] },
-          response: { 200: batchSchema },
-        },
-      },
-      async (req) => commands.approveBatch(ctx(req), who(req), req.params.batchId.toLowerCase()),
-    );
-
-    app.post<{ Params: { batchId: string }; Body: { reason: string } }>(
-      '/v1/batches/:batchId/reject',
-      {
-        schema: {
-          operationId: 'endpoint.command.batch.reject',
-          summary: '駁回批次',
-          description: '駁回待核可的批次(建立人也可撤回自己的批次),批次內指令全部取消。不是待核可回 409 ITA_BATCH_NOT_PENDING。',
-          tags: ['端點指令'],
-          'x-permission': 'endpoint.software.manage',
-          'x-audit-level': 'meta',
-          'x-gherkin': [
-            '場景: 駁回待核可的批次',
-            '  假如 批次為 pending_approval',
-            '  當 呼叫 POST /api/endpoint/batches/{batchId}/reject,reason 為 "目標電腦有誤"',
-            '  那麼 回應 200',
-            '  而且 state 為 "rejected"',
-          ].join('\n'),
-          params: { type: 'object', properties: { batchId: uuid }, required: ['batchId'] },
-          body: {
-            type: 'object',
-            required: ['reason'],
-            additionalProperties: false,
-            properties: { reason: { type: 'string', minLength: 1, maxLength: 500, pattern: '^[^\\u0000-\\u001F\\u007F]+$' } },
+    // 第二人核可(PLATFORM-PLAN B1;P7-SOFTWARE-DESIGN §6):核可人需資料範圍涵蓋批次全部電腦(否則 404,同不存在)。
+    // 軟體派送批次:/approve、/reject(endpoint.software.manage);其他類型(system.reboot):/approve-command、/reject-command(endpoint.command.admin)
+    const approval = (route: ApprovalRoute) => {
+      const software = route === 'software';
+      const suffix = software ? '' : '-command';
+      const opSuffix = software ? '' : '-command';
+      const permission = software ? 'endpoint.software.manage' : 'endpoint.command.admin';
+      const scope = software ? '軟體派送(software.install / software.uninstall)' : '軟體派送以外(system.reboot 等)';
+      app.post<{ Params: { batchId: string } }>(
+        `/v1/batches/:batchId/approve${suffix}`,
+        {
+          schema: {
+            operationId: `endpoint.command.batch.approve${opSuffix}`,
+            summary: software ? '核可軟體派送批次' : '核可指令批次(重開機等)',
+            description:
+              `核可${scope}的待核可(pending_approval)批次;由建立人以外的 IT 核可後開始送出,指令有效期限自核可時起算。核可人是建立人回 403 ITA_APPROVER_SAME_AS_CREATOR;批次類型不屬於此路由回 403 ITA_APPROVAL_ROUTE_MISMATCH;不是待核可或已超過 24 小時回 409 ITA_BATCH_NOT_PENDING。` +
+              (software ? '核可前應確認套件、安裝參數、簽章者、雜湊、目標台數與並行數。' : '核可前應確認目標電腦、倒數時間與是否強制。'),
+            tags: ['端點指令'],
+            'x-permission': permission,
+            'x-audit-level': 'meta',
+            'x-gherkin': [
+              '場景: 建立人自己核可',
+              `  假如 S000001 建立了 21 台的${software ? '軟體派送' : '重開機'}批次`,
+              `  當 S000001 呼叫 POST /api/endpoint/batches/{batchId}/approve${suffix}`,
+              '  那麼 回應 403',
+              '  而且 回應的 code 為 "ITA_APPROVER_SAME_AS_CREATOR"',
+            ].join('\n'),
+            params: { type: 'object', properties: { batchId: uuid }, required: ['batchId'] },
+            response: { 200: batchSchema },
           },
-          response: { 200: batchSchema },
         },
-      },
-      async (req) => commands.rejectBatch(ctx(req), who(req), req.params.batchId.toLowerCase(), req.body.reason.trim()),
-    );
+        async (req) => commands.approveBatch(ctx(req), who(req), req.params.batchId.toLowerCase(), route),
+      );
+
+      app.post<{ Params: { batchId: string }; Body: { reason: string } }>(
+        `/v1/batches/:batchId/reject${suffix}`,
+        {
+          schema: {
+            operationId: `endpoint.command.batch.reject${opSuffix}`,
+            summary: software ? '駁回軟體派送批次' : '駁回指令批次(重開機等)',
+            description: `駁回${scope}的待核可批次(建立人也可撤回自己的批次),批次內指令全部取消。批次類型不屬於此路由回 403 ITA_APPROVAL_ROUTE_MISMATCH;不是待核可回 409 ITA_BATCH_NOT_PENDING。`,
+            tags: ['端點指令'],
+            'x-permission': permission,
+            'x-audit-level': 'meta',
+            'x-gherkin': [
+              '場景: 駁回待核可的批次',
+              '  假如 批次為 pending_approval',
+              `  當 呼叫 POST /api/endpoint/batches/{batchId}/reject${suffix},reason 為 "目標電腦有誤"`,
+              '  那麼 回應 200',
+              '  而且 state 為 "rejected"',
+            ].join('\n'),
+            params: { type: 'object', properties: { batchId: uuid }, required: ['batchId'] },
+            body: {
+              type: 'object',
+              required: ['reason'],
+              additionalProperties: false,
+              properties: { reason: { type: 'string', minLength: 1, maxLength: 500, pattern: '^[^\\u0000-\\u001F\\u007F]+$' } },
+            },
+            response: { 200: batchSchema },
+          },
+        },
+        async (req) => commands.rejectBatch(ctx(req), who(req), req.params.batchId.toLowerCase(), req.body.reason.trim(), route),
+      );
+    };
+    approval('software');
+    approval('command');
   };
 }

@@ -438,13 +438,13 @@ describe('管理 API 的資料範圍(:51240)', () => {
     assert.equal(denied.statusCode, 404);
     assert.deepEqual(denied.json(), missing.json());
     assert.equal(env.store.commands.length, before);
-    // 核可 / 駁回:批次含範圍外裝置與不存在相同;範圍內但不是待核可 409
-    assert.equal((await sameAsMissing(tokens.a!, 'POST', `/v1/batches/${batchB}/approve`, `/v1/batches/${NONE}/approve`)).code, 'ITA_BATCH_NOT_FOUND');
+    // 核可 / 駁回:批次含範圍外裝置與不存在相同;範圍內但不是待核可 409(一般指令批次走 -command 路由)
+    assert.equal((await sameAsMissing(tokens.a!, 'POST', `/v1/batches/${batchB}/approve-command`, `/v1/batches/${NONE}/approve-command`)).code, 'ITA_BATCH_NOT_FOUND');
     assert.equal(
-      (await sameAsMissing(tokens.a!, 'POST', `/v1/batches/${batchB}/reject`, `/v1/batches/${NONE}/reject`, { reason: '測試' })).code,
+      (await sameAsMissing(tokens.a!, 'POST', `/v1/batches/${batchB}/reject-command`, `/v1/batches/${NONE}/reject-command`, { reason: '測試' })).code,
       'ITA_BATCH_NOT_FOUND',
     );
-    const notPending = await call(tokens.all!, 'POST', `/v1/batches/${batchB}/approve`);
+    const notPending = await call(tokens.all!, 'POST', `/v1/batches/${batchB}/approve-command`);
     assert.deepEqual([notPending.statusCode, notPending.json().code], [409, 'ITA_BATCH_NOT_PENDING']);
   });
 
@@ -461,8 +461,10 @@ describe('管理 API 的資料範圍(:51240)', () => {
       'endpoint.command.basic.batch',
       'endpoint.command.basic.create',
       'endpoint.command.batch.approve',
+      'endpoint.command.batch.approve-command',
       'endpoint.command.batch.get',
       'endpoint.command.batch.reject',
+      'endpoint.command.batch.reject-command',
       'endpoint.command.cancel',
       'endpoint.command.file.download',
       'endpoint.command.get',
