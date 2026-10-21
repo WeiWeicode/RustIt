@@ -29,6 +29,11 @@ const commandSchema = {
   properties: {
     commandId: uuid,
     batchId: { type: ['string', 'null'], format: 'uuid' },
+    batchState: {
+      type: ['string', 'null'],
+      enum: ['pending_approval', 'running', 'done', 'rejected', 'expired', null],
+      description: '所屬批次狀態;軟體派送 / 重開機同一人 24 小時內累計超過門檻時,單台指令也會進入 pending_approval 的單台批次,需第二人核可',
+    },
     deviceId: uuid,
     computerName: { type: 'string' },
     kind: { type: 'string' },

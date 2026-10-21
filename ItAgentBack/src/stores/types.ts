@@ -440,6 +440,11 @@ export interface CommandStore {
   finishBatchIfDone(batchRef: number): Promise<void>;
   /** 這些類型 sent / acked / running 的總數(全域並行上限) */
   activeOfKinds(kinds: readonly string[]): Promise<number>;
+  /**
+   * 此人 since 之後建立的這些類型指令涉及的電腦台數(D2-1);
+   * 已由第二人核可的批次、待核可 / 駁回 / 逾期的批次不計;取消的單台照計(避免「建立 → 取消」循環)
+   */
+  recentGatedTargets(emp: string, kinds: readonly string[], since: Date): Promise<number>;
   /** 這些類型未逾期的 queued(不屬於批次、或批次 running),內部 id 大於 afterId,依 id(建立順序) */
   queuedOfKinds(kinds: readonly string[], now: Date, limit: number, afterId?: number): Promise<CommandRecord[]>;
 }

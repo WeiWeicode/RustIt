@@ -478,7 +478,8 @@ describe('軟體目錄、覆核與派送(SoftwareService + CommandDispatcher)', 
     const id = await published();
     const third = await addDevice('PC-THIRD', 3);
     const conns = [await online(other), await online(third)];
-    const small = await env.software.deploy(ctx, IT, id, { action: 'install', deviceIds: [other.deviceId, third.deviceId] });
+    // 覆核人自己 24 小時內沒有派送過:2 台在門檻內(IT 已在 pilot 測試機派過 1 台,累計會超過,D2-1)
+    const small = await env.software.deploy(ctx, REVIEWER, id, { action: 'install', deviceIds: [other.deviceId, third.deviceId] });
     assert.deepEqual([small.state, small.requiresApproval], ['running', false], '門檻內不需核可');
     const big = await env.software.deploy(ctx, IT, id, { action: 'uninstall', deviceIds: [pilot.deviceId, other.deviceId, third.deviceId] });
     assert.deepEqual([big.state, big.requiresApproval], ['pending_approval', true]);
@@ -557,7 +558,37 @@ describe('軟體目錄、覆核與派送(SoftwareService + CommandDispatcher)', 
     void c1;
   });
 
+  it('D2-1:同一人 24 小時內逐台派送累計超過門檻,之後的單台進入待核可;核可過的批次不計;24 小時後重新計算', async () => {
+    env = setupSoftware({ approvalThreshold: 2 });
+    pilot = await addDevice('PC-PILOT', 1);
+    env.store.ringOf.set(pilot.id, 'pilot');
+    env.dir.put(FILE, CONTENT);
+    const id = await published(); // IT 在 pilot 派過 1 台
+    const a = await addDevice('PC-A', 11);
+    const b = await addDevice('PC-B', 12);
+    const c = await addDevice('PC-C', 13);
+    const first = await install(a, id);
+    assert.equal(first.batchState, null, '累計 2 台,未超過');
+    const gated = await install(b, id);
+    assert.deepEqual([gated.batchState, gated.state], ['pending_approval', 'queued'], '累計第 3 台需核可');
+    // 移除與安裝共用計數;另一人不受影響
+    const un = await env.commands.create(ctx, IT, 'admin', c.deviceId, { kind: 'software.uninstall', params: { packageId: id } });
+    assert.equal(un.batchState, 'pending_approval');
+    assert.equal((await env.commands.create(ctx, REVIEWER, 'admin', c.deviceId, { kind: 'software.install', params: { packageId: id } })).batchState, null);
+    // 第二人核可後送出
+    await assert.rejects(env.commands.approveBatch(ctx, IT, gated.batchId!), { code: 'ITA_APPROVER_SAME_AS_CREATOR' });
+    assert.equal((await env.commands.approveBatch(ctx, REVIEWER, gated.batchId!)).state, 'running');
+    // 24 小時後重新計算
+    env.clock.advance(25 * 3600);
+    assert.equal((await install(a, id)).batchState, null);
+  });
+
   it('全域並行上限補送:最舊的 200 筆以上都是離線電腦時,後面在線的仍補送得到', async () => {
+    // 累計核可門檻(D2-1)放大,只測補送
+    env = setupSoftware({ approvalThreshold: 10_000 });
+    pilot = await addDevice('PC-PILOT', 1);
+    env.store.ringOf.set(pilot.id, 'pilot');
+    env.dir.put(FILE, CONTENT);
     const id = await published();
     for (let i = 0; i < 70; i++) {
       const d = await addDevice(`PC-OFF-${i}`, 100 + i);

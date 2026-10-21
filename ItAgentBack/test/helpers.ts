@@ -840,6 +840,17 @@ export class MemoryCommandStore extends Failable implements CommandStore, Comman
     const b = this.batches.find((x) => x.id === batchRef);
     if (b?.state === 'running' && !this.commands.some((c) => c.batchRef === batchRef && ['queued', 'sent', 'acked', 'running'].includes(c.state))) b.state = 'done';
   }
+  async recentGatedTargets(emp: string, kinds: readonly string[], since: Date) {
+    this.hit('recentGatedTargets');
+    const refs = new Set<number>();
+    for (const c of this.commands) {
+      if (c.createdByEmp !== emp || c.createdAt < since || !kinds.includes(c.kind)) continue;
+      const b = this.batches.find((x) => x.id === c.batchRef);
+      if (b && (b.approvedByEmp !== null || !['running', 'done'].includes(b.state))) continue;
+      refs.add(c.deviceRef);
+    }
+    return refs.size;
+  }
   async activeOfKinds(kinds: readonly string[]) {
     this.hit('activeOfKinds');
     return this.commands.filter((c) => kinds.includes(c.kind) && ['sent', 'acked', 'running'].includes(c.state)).length;

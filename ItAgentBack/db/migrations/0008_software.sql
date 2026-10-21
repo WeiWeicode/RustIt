@@ -82,3 +82,6 @@ GO
 -- 待核可逾期掃描
 CREATE INDEX ix_command_batch_state ON ita.command_batch (state, created_at);
 GO
+-- 同一人 24 小時內累計派送台數(D2-1:逐台或多批小批次累計超過門檻也要核可)
+CREATE INDEX ix_command_creator ON ita.command (created_by_emp, created_at) INCLUDE (kind, device_ref, batch_ref);
+GO

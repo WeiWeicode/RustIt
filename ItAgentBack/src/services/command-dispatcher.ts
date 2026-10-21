@@ -28,6 +28,7 @@ import type {
   CommandStore,
   DeviceRow,
   DeviceStore,
+  NewBatch,
 } from '../stores/types.js';
 import type { Ctx } from './device-service.js';
 import { inScope, scopeCompanies, type MgmtCtx } from './scope.js';
@@ -67,6 +68,8 @@ export interface CreateCommandInput {
 export interface CommandView {
   commandId: string;
   batchId: string | null;
+  /** 所屬批次的狀態(單台累計超過門檻時為 pending_approval,D2-1);不屬於批次為 null */
+  batchState: BatchState | null;
   deviceId: string;
   computerName: string;
   kind: string;
@@ -161,6 +164,17 @@ export const BATCH_MAX_DEVICES = 200;
 const SWEEP_LIMIT = 500;
 /** 待核可批次的核可期限(B1:24 小時無人核可 → expired) */
 export const APPROVAL_WINDOW_MS = 24 * 3_600_000;
+/** D2-1:累計核可門檻的時間窗 */
+export const GATE_WINDOW_MS = 24 * 3_600_000;
+/**
+ * D2-1:同一人 24 小時內累計台數超過門檻需第二人核可的類型;同一組共用計數。
+ * 軟體安裝 / 移除(以 SYSTEM 執行程式)一組,重開機(可用性)另一組
+ */
+export const GATED_GROUPS: Record<string, readonly string[]> = {
+  'software.install': ['software.install', 'software.uninstall'],
+  'software.uninstall': ['software.install', 'software.uninstall'],
+  'system.reboot': ['system.reboot'],
+};
 /** 全域並行上限補送一次最多掃幾頁(每頁 BATCH_MAX_DEVICES 筆) */
 const LIMITED_MAX_PAGES = 50;
 /** 會送出指令的批次狀態 */
@@ -180,6 +194,7 @@ export function toView(c: CommandRecord): CommandView {
   return {
     commandId: c.commandId,
     batchId: c.batchId,
+    batchState: c.batchState,
     deviceId: c.deviceId,
     computerName: c.computerName,
     kind: c.kind,
@@ -315,7 +330,37 @@ export class CommandDispatcher {
     return companies.every((c) => inScope(ctx.scope, c));
   }
 
+  /** 同一人同一組管控類型的「計數 → 建立」序列化(單一實例;D2-1 競態) */
+  private readonly gateLocks = new Map<string, Promise<unknown>>();
+
+  private serialized<T>(emp: string, kind: string, fn: () => Promise<T>): Promise<T> {
+    const group = GATED_GROUPS[kind];
+    if (!group) return fn();
+    const key = `${emp.toUpperCase()}|${group.join(',')}`;
+    const prev = this.gateLocks.get(key) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    const tail = run.catch(() => undefined);
+    this.gateLocks.set(key, tail);
+    void tail.then(() => {
+      if (this.gateLocks.get(key) === tail) this.gateLocks.delete(key);
+    });
+    return run;
+  }
+
+  /** D2-1:加上這次的台數後,此人 24 小時內累計是否超過門檻 */
+  private async overGate(ctx: Ctx, emp: string, kind: string, adding: number): Promise<{ over: boolean; recent: number }> {
+    const group = GATED_GROUPS[kind];
+    if (!group) return { over: false, recent: 0 };
+    const since = new Date(this.now().getTime() - GATE_WINDOW_MS);
+    const recent = await this.sqlDo(ctx, 'command.recentGated', () => this.store.recentGatedTargets(emp, group, since));
+    return { over: recent + adding > this.approvalThreshold, recent };
+  }
+
   async create(ctx: MgmtCtx, who: GatewayIdentity, level: CommandLevel, deviceId: string, input: CreateCommandInput): Promise<CommandView> {
+    return this.serialized(who.emp ?? who.sub, level === 'admin' ? input.kind : '', () => this.createOne(ctx, who, level, deviceId, input));
+  }
+
+  private async createOne(ctx: MgmtCtx, who: GatewayIdentity, level: CommandLevel, deviceId: string, input: CreateCommandInput): Promise<CommandView> {
     const emp = who.emp ?? who.sub;
     const key = input.idempotencyKey;
     const same = (c: CommandRecord) => {
@@ -342,9 +387,26 @@ export class CommandDispatcher {
     }
     const at = this.now();
     const commandId = randomUUID();
+    // D2-1:逐台派送也累計;超過門檻時這一台放進一個待核可的單台批次
+    const gate = level === 'admin' ? await this.overGate(ctx, emp, def.kind, 1) : { over: false, recent: 0 };
+    const gatedBatch: NewBatch | null = gate.over
+      ? {
+          batchId: randomUUID(),
+          kind: def.kind,
+          level,
+          params: JSON.stringify(stored),
+          maxConcurrent: 1,
+          requiresApproval: true,
+          idempotencyKey: null,
+          createdByEmp: emp,
+          createdByName: who.name ?? null,
+          requestId: ctx.requestId,
+          createdAt: at,
+        }
+      : null;
     try {
       await this.sqlDo(ctx, 'command.create', () =>
-        this.store.createCommands(null, [
+        this.store.createCommands(gatedBatch, [
           {
             commandId,
             deviceRef: device.id,
@@ -352,7 +414,7 @@ export class CommandDispatcher {
             kind: def.kind,
             level,
             params: JSON.stringify(stored),
-            expiresAt: new Date(at.getTime() + expiresSec * 1000),
+            expiresAt: new Date(at.getTime() + expiresSec * 1000 + (gatedBatch ? APPROVAL_WINDOW_MS : 0)),
             idempotencyKey: key ?? null,
             createdByEmp: emp,
             createdByName: who.name ?? null,
@@ -369,9 +431,13 @@ export class CommandDispatcher {
       }
       throw err;
     }
-    ctx.log.info({ commandId, deviceId, kind: def.kind, emp }, '建立指令');
+    ctx.log.info(
+      { commandId, deviceId, kind: def.kind, emp, ...(gatedBatch ? { batchId: gatedBatch.batchId, recentDevices: gate.recent } : {}) },
+      gatedBatch ? '建立指令(24 小時內累計超過門檻,待第二人核可)' : '建立指令',
+    );
     const cmd = await this.sqlDo(ctx, 'command.get', () => this.store.getCommand(commandId));
     if (!cmd) throw storageUnavailable();
+    if (gatedBatch) return toView(cmd);
     return toView((await this.trySend(ctx, cmd)) ?? cmd);
   }
 
@@ -383,6 +449,17 @@ export class CommandDispatcher {
     deviceIds: string[],
     input: CreateCommandInput,
     opts: { maxConcurrent?: number } = {},
+  ): Promise<CreateBatchResult> {
+    return this.serialized(who.emp ?? who.sub, level === 'admin' ? input.kind : '', () => this.createMany(ctx, who, level, deviceIds, input, opts));
+  }
+
+  private async createMany(
+    ctx: MgmtCtx,
+    who: GatewayIdentity,
+    level: CommandLevel,
+    deviceIds: string[],
+    input: CreateCommandInput,
+    opts: { maxConcurrent?: number },
   ): Promise<CreateBatchResult> {
     const emp = who.emp ?? who.sub;
     const key = input.idempotencyKey;
@@ -433,7 +510,9 @@ export class CommandDispatcher {
     const at = this.now();
     const batchId = randomUUID();
     // 第二人核可(B1):待核可期間的有效期限另加核可期限,核可時重設為核可時間 + 類型有效期限
-    const requiresApproval = level === 'admin' && targets.length > this.approvalThreshold;
+    // D2-1:同一人 24 小時內累計(含逐台、多批小批次)超過門檻也要核可
+    const requiresApproval =
+      level === 'admin' && (targets.length > this.approvalThreshold || (await this.overGate(ctx, emp, def.kind, targets.length)).over);
     const expiresAt = new Date(at.getTime() + expiresSec * 1000 + (requiresApproval ? APPROVAL_WINDOW_MS : 0));
     try {
       await this.sqlDo(ctx, 'batch.create', () =>

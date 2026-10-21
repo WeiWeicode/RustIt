@@ -405,6 +405,16 @@ export class SqlCommandStore implements CommandStore, CommandFileStore {
     return Number((r.recordset[0] as Row).n);
   }
 
+  async recentGatedTargets(emp: string, kinds: readonly string[], since: Date): Promise<number> {
+    if (kinds.length === 0) return 0;
+    const req = (await this.request()).input('emp', sql.NVarChar(64), cut(emp, 64)).input('since', sql.DateTime2(3), since);
+    const r = await req.query(`SELECT COUNT(DISTINCT c.device_ref) AS n FROM ita.command c
+      LEFT JOIN ita.command_batch b ON b.id = c.batch_ref
+      WHERE c.created_by_emp = @emp AND c.created_at >= @since AND c.kind IN (${this.kindsIn(req, kinds)})
+        AND (b.id IS NULL OR (b.approved_by_emp IS NULL AND b.state IN ('running', 'done')))`);
+    return Number((r.recordset[0] as Row).n);
+  }
+
   async queuedOfKinds(kinds: readonly string[], now: Date, limit: number, afterId = 0): Promise<CommandRecord[]> {
     if (kinds.length === 0) return [];
     const req = (await this.request()).input('now', sql.DateTime2(3), now).input('limit', sql.Int, limit).input('after', sql.BigInt, afterId);
