@@ -62,6 +62,7 @@ let commands: CommandDispatcher | undefined;
 const software = config.softwareDir
   ? new SoftwareService(new SqlSoftwareStore(() => sql.connection()), new SoftwareFiles(config.softwareDir, config.softwareMaxBytes), sql, {
       commands: () => commands,
+      onPackageTampered: (ctx, deviceRef, detail) => alerts!.onPackageTampered(ctx, deviceRef, detail),
     })
   : undefined;
 // 指令派送(P4):SQL 與裝置共用連線池,推送經 DeviceService 的 WebSocket 連線表;agent.upgrade 建立前後交給 ReleaseService(P6);
@@ -82,6 +83,10 @@ if (software) {
   kindHooks['software.install'] = {
     check: (ctx, ref, params) => software.checkCommand(ctx, ref, params, 'install'),
     checkBatch: (ctx, refs, params) => software.checkLicense(ctx, refs, params),
+    onFinal: (ctx, cmd, fin) =>
+      fin.state === 'succeeded' || fin.state === 'failed'
+        ? alerts!.onSoftwareFinal(ctx, { deviceRef: cmd.deviceRef, commandId: cmd.commandId, params: cmd.params, ...fin, state: fin.state })
+        : Promise.resolve(),
   };
   kindHooks['software.uninstall'] = { check: (ctx, ref, params) => software.checkCommand(ctx, ref, params, 'uninstall') };
 }

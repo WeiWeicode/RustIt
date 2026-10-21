@@ -460,6 +460,8 @@ type MemoryAlert = AlertOpen & {
 export class MemoryMonitorStore extends Failable implements MonitorStore {
   health = new Map<number, DeviceHealthRecord>();
   alerts: MemoryAlert[] = [];
+  /** P7 reboot_pending 測試用:裝置 → 需要重新開機的起始時間 */
+  rebootRequired = new Map<number, Date>();
   constructor(private readonly devices: MemoryDeviceStore) {
     super();
   }
@@ -521,6 +523,7 @@ export class MemoryMonitorStore extends Failable implements MonitorStore {
           (e) => e.deviceRef === d.id && e.type === 'agent_started' && e.occurredAt >= since && e.data.includes('"previous_exit":"unexpected"'),
         ).length,
         openRules: this.alerts.filter((a) => a.deviceRef === d.id && a.state === 'open').map((a) => a.rule),
+        rebootRequiredSince: this.rebootRequired.get(d.id) ?? null,
       }));
   }
   async openAlert(a: AlertOpen) {

@@ -208,13 +208,24 @@ export function setupSoftware(opts: { approvalThreshold?: number; maxConcurrent?
   const store = new MemorySoftwareStore(base.sql, commandStore);
   const dir = softwareDir();
   let commands: CommandDispatcher | undefined;
-  const software = new SoftwareService(store, new SoftwareFiles(dir.root, opts.maxBytes), base.sql, { now: base.clock.now, commands: () => commands });
+  const software = new SoftwareService(store, new SoftwareFiles(dir.root, opts.maxBytes), base.sql, {
+    now: base.clock.now,
+    commands: () => commands,
+    onPackageTampered: (c, ref, d) => base.alerts.onPackageTampered(c, ref, d),
+  });
   commands = new CommandDispatcher(commandStore, base.sql, base.service, {
     now: base.clock.now,
     approvalThreshold: opts.approvalThreshold,
     limitedKinds: { kinds: SOFTWARE_KINDS, max: opts.maxConcurrent ?? 20 },
     kindHooks: {
-      'software.install': { check: (c, ref, p) => software.checkCommand(c, ref, p, 'install'), checkBatch: (c, refs, p) => software.checkLicense(c, refs, p) },
+      'software.install': {
+        check: (c, ref, p) => software.checkCommand(c, ref, p, 'install'),
+        checkBatch: (c, refs, p) => software.checkLicense(c, refs, p),
+        onFinal: (c, cmd, fin) =>
+          fin.state === 'succeeded' || fin.state === 'failed'
+            ? base.alerts.onSoftwareFinal(c, { deviceRef: cmd.deviceRef, commandId: cmd.commandId, params: cmd.params, ...fin, state: fin.state })
+            : Promise.resolve(),
+      },
       'software.uninstall': { check: (c, ref, p) => software.checkCommand(c, ref, p, 'uninstall') },
     },
   });

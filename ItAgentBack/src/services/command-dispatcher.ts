@@ -118,6 +118,16 @@ export interface KindHook {
   checkBatch?(ctx: Ctx, deviceRefs: number[], params: Record<string, unknown>): Promise<void>;
   /** 檢查通過後、寫入指令前(失敗則不建立指令;批次為全部檢查通過後逐台套用);params 為管理 API 送來的原始參數 */
   apply?(ctx: Ctx, deviceRef: number, params: Record<string, unknown>, actor: { emp: string; name: string | null }): Promise<void>;
+  /** Agent 回報終態、不支援、執行逾時之後(P7 告警);例外只記 warn,不影響指令狀態 */
+  onFinal?(ctx: Ctx, cmd: CommandRecord, fin: FinalInfo): Promise<void>;
+}
+
+/** 指令進入終態的結果(kindHooks.onFinal) */
+export interface FinalInfo {
+  state: CommandState;
+  errorCode: string | null;
+  /** Agent 的 result(JSON 字串) */
+  resultSummary: string | null;
 }
 
 export interface CommandDispatcherOptions {
@@ -538,7 +548,7 @@ export class CommandDispatcher {
       (await this.sqlDo(ctx, 'command.cancel', () => this.store.transition(cmd.id, ['queued'], { state: 'canceled', at: this.now() })));
     if (!ok) throw new AppError(409, 'ITA_COMMAND_NOT_CANCELABLE', '指令已送出或已結束,無法取消');
     ctx.log.info({ commandId }, '取消指令');
-    await this.afterFinal(ctx, cmd);
+    await this.afterFinal(ctx, cmd, { state: 'canceled', errorCode: null, resultSummary: null });
     return toView((await this.store.getCommand(commandId)) ?? cmd);
   }
 
@@ -664,8 +674,20 @@ export class CommandDispatcher {
     return this.limitedRefill;
   }
 
-  /** 終態後的補送:批次與全域並行上限 */
-  private async afterFinal(ctx: Ctx, cmd: CommandRecord): Promise<void> {
+  /** 依指令類型的終態處理(P7 告警);失敗只記 warn */
+  private async finalHook(ctx: Ctx, cmd: CommandRecord, fin: FinalInfo): Promise<void> {
+    const hook = this.kindHooks[cmd.kind]?.onFinal;
+    if (!hook) return;
+    try {
+      await hook(ctx, cmd, fin);
+    } catch (err) {
+      ctx.log.warn({ err, commandId: cmd.commandId, kind: cmd.kind }, '指令終態處理失敗');
+    }
+  }
+
+  /** 終態後:依類型處理,再補送(批次與全域並行上限) */
+  private async afterFinal(ctx: Ctx, cmd: CommandRecord, fin: FinalInfo): Promise<void> {
+    await this.finalHook(ctx, cmd, fin);
     if (cmd.batchRef) await this.refillBatch(ctx, cmd.batchRef);
     if (this.limited?.kinds.includes(cmd.kind)) await this.refillLimited(ctx);
   }
@@ -753,7 +775,7 @@ export class CommandDispatcher {
       return { command_id: body.command_id, accepted: false, ...(now ? { state: now.state } : {}) };
     }
     ctx.log.info({ commandId, kind: cmd.kind, state: target, errorCode: patch.errorCode }, '指令狀態更新');
-    if (isFinal(target)) await this.afterFinal(ctx, cmd);
+    if (isFinal(target)) await this.afterFinal(ctx, cmd, { state: target, errorCode: patch.errorCode ?? null, resultSummary: patch.resultSummary ?? null });
     return { command_id: body.command_id, accepted: true, state: target };
   }
 
@@ -775,7 +797,7 @@ export class CommandDispatcher {
       });
     if (ok) {
       ctx.log.warn({ commandId: cmd.commandId }, 'Agent 不支援指令訊息(舊版),設為 failed UNSUPPORTED_COMMAND');
-      await this.afterFinal(ctx, cmd);
+      await this.afterFinal(ctx, cmd, { state: 'failed', errorCode: 'UNSUPPORTED_COMMAND', resultSummary: null });
     }
   }
 
@@ -806,8 +828,10 @@ export class CommandDispatcher {
           if (await this.store.transition(cmd.id, ['queued', 'sent'], { state: 'expired', at })) expired++;
         } else if (
           await this.store.transition(cmd.id, ['acked', 'running'], { state: 'failed', at, errorCode: 'TIMEOUT', errorMessage: 'Agent 未在執行逾時內回報結果' })
-        )
+        ) {
           timedOut++;
+          await this.finalHook(ctx, cmd, { state: 'failed', errorCode: 'TIMEOUT', resultSummary: null });
+        }
         if (cmd.batchRef) batches.add(cmd.batchRef);
       } catch (err) {
         ctx.log.warn({ err, commandId: cmd.commandId }, '指令逾期處理失敗');

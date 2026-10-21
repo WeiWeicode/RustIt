@@ -284,6 +284,8 @@ export interface SoftwareServiceOptions {
   now?: () => Date;
   /** 批次派送用的指令派送器(與 kindHooks 互相參照,建立後再接上) */
   commands?: () => CommandDispatcher | undefined;
+  /** 安裝檔與登錄雜湊不符時(D4 告警 software_file_tampered);例外由呼叫端自行處理 */
+  onPackageTampered?: (ctx: Ctx, deviceRef: number, detail: Record<string, unknown>) => Promise<void>;
 }
 
 const actorOf = (who: GatewayIdentity): Actor => ({ emp: who.emp ?? who.sub, name: who.name ?? null });
@@ -292,6 +294,7 @@ const trimOrNull = (s: string | undefined | null) => (s == null ? null : s.trim(
 export class SoftwareService {
   private readonly now: () => Date;
   private readonly commands: () => CommandDispatcher | undefined;
+  private readonly onPackageTampered: NonNullable<SoftwareServiceOptions['onPackageTampered']>;
   /** 下載稽核事件的最後記錄時間(裝置:套件 → 毫秒) */
   private readonly downloadLogged = new Map<string, number>();
 
@@ -303,6 +306,7 @@ export class SoftwareService {
   ) {
     this.now = opts.now ?? (() => new Date());
     this.commands = opts.commands ?? (() => undefined);
+    this.onPackageTampered = opts.onPackageTampered ?? (() => Promise.resolve());
   }
 
   private async sqlDo<T>(ctx: Ctx, what: string, fn: () => Promise<T>): Promise<T> {
@@ -626,6 +630,16 @@ export class SoftwareService {
     const sha = await this.files.sha256(f);
     if (sha !== pkg.sha256 || f.size !== pkg.sizeBytes) {
       ctx.log.error({ packageId: id, fileName: pkg.fileName, expected: pkg.sha256, actual: sha }, '安裝檔內容與登錄不符,拒絕下發(需重新登錄新版本)');
+      await this.onPackageTampered(ctx, device.id, {
+        packageId: id,
+        name: pkg.name,
+        version: pkg.version,
+        fileName: pkg.fileName,
+        expectedSha256: pkg.sha256,
+        actualSha256: sha,
+        expectedSize: pkg.sizeBytes,
+        actualSize: f.size,
+      });
       throw new AppError(503, 'ITA_PACKAGE_CHANGED', '安裝檔內容與登錄不符');
     }
     const r = parseRange(range, f.size);

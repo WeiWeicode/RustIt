@@ -356,6 +356,32 @@ describe('軟體目錄、覆核與派送(SoftwareService + CommandDispatcher)', 
     assert.equal((await env.software.publish(ctx, THIRD, r.packageId)).publishedBy?.emp, 'S000003');
   });
 
+  it('software_install_failed:安裝失敗開告警;同一套件再派送成功自動關閉;逾時也算失敗', async () => {
+    const r = await register();
+    await online(pilot);
+    const open = () => env.monitor.alerts.filter((a) => a.rule === 'software_install_failed' && a.state === 'open');
+    const c1 = await install(pilot, r.packageId);
+    await env.commands.onUpdate(ctx, pilot.id, { command_id: c1.commandId, state: 'failed', error_code: 'INSTALL_FAILED', result: { exit_code: 1603 } });
+    assert.equal(open().length, 1);
+    assert.deepEqual(JSON.parse(open()[0]!.detail ?? '{}'), {
+      packageId: r.packageId,
+      name: '7-Zip',
+      version: '24.09',
+      commandId: c1.commandId,
+      errorCode: 'INSTALL_FAILED',
+      exitCode: 1603,
+    });
+    const c2 = await install(pilot, r.packageId);
+    await succeed(pilot, c2.commandId);
+    assert.equal(open().length, 0, '同一套件成功後自動關閉');
+    // 執行逾時(sweep → failed TIMEOUT)
+    const c3 = await install(pilot, r.packageId);
+    await env.commands.onUpdate(ctx, pilot.id, { command_id: c3.commandId, state: 'acked' });
+    env.clock.advance(5 * 3600);
+    await env.commands.sweep(ctx);
+    assert.equal(JSON.parse(open()[0]?.detail ?? '{}').errorCode, 'TIMEOUT');
+  });
+
   it('撤回:尚未送出的安裝取消;不能再安裝,可移除;不能修改', async () => {
     const r = await register();
     const queued = await install(pilot, r.packageId);
@@ -610,6 +636,12 @@ describe('套件下載 API 與管理 API', () => {
     writeFileSync(path.join(env.dir.root, ...FILE.split('/')), 'MSI-tampered!!');
     res = await agent.inject({ url, headers });
     assert.deepEqual([res.statusCode, res.json().code], [503, 'ITA_PACKAGE_CHANGED']);
+    // D4:開 critical 告警在要求下載的裝置上
+    const tampered = env.monitor.alerts.filter((a) => a.rule === 'software_file_tampered');
+    assert.deepEqual(
+      tampered.map((a) => [a.deviceRef, a.severity, a.state, JSON.parse(a.detail ?? '{}').packageId]),
+      [[device.id, 'critical', 'open', r.packageId]],
+    );
     writeFileSync(path.join(env.dir.root, ...FILE.split('/')), CONTENT);
     assert.equal((await agent.inject({ url, headers })).statusCode, 200);
     // draft 套件:裝置移出 pilot 後不給

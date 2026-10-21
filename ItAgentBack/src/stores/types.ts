@@ -511,7 +511,13 @@ export type AlertRule =
   /** P6:同一目標版本升級失敗 2 次或還原失敗 */
   | 'upgrade_failed'
   /** P6:發佈環目標設定超過 24 小時仍未到目標版本 */
-  | 'version_mismatch';
+  | 'version_mismatch'
+  /** P7:software.install 失敗(同一台再派送同一套件成功時自動關閉) */
+  | 'software_install_failed'
+  /** P7:安裝回報需要重新開機(3010 / 1641)超過 7 天仍未重開機 */
+  | 'reboot_pending'
+  /** P7(D4):軟體庫的安裝檔與登錄的雜湊不符(檔案被換掉);開在要求下載的那台裝置 */
+  | 'software_file_tampered';
 export type AlertSeverity = 'warn' | 'critical';
 export type AlertState = 'open' | 'resolved';
 
@@ -570,6 +576,8 @@ export interface MonitorTarget {
   unexpectedRestarts24h: number;
   /** 目前未結束的告警規則 */
   openRules: AlertRule[];
+  /** P7:最早一筆「成功且 reboot_required」且晚於開機時間的 software.* 指令完成時間;沒有為 null */
+  rebootRequiredSince: Date | null;
 }
 
 /** Watchdog 回報的 Agent 狀態(P5-2;ita.device_health 的 Watchdog 欄位) */
