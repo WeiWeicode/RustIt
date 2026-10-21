@@ -32,6 +32,7 @@ const ctx = { log, requestId: 'req-sw-1', scope: ALL };
 const IT: GatewayIdentity = { sub: '1', emp: 'S000001', name: '登錄人' };
 const REVIEWER: GatewayIdentity = { sub: '2', emp: 'S000002', name: '覆核人' };
 const THIRD: GatewayIdentity = { sub: '3', emp: 'S000003', name: '第三人' };
+const FOURTH: GatewayIdentity = { sub: '4', emp: 'S000004', name: '第四人' };
 const FILE = '7-Zip/24.09/7z2409-x64.msi';
 const CONTENT = 'MSI-7zip-24.09';
 
@@ -59,7 +60,7 @@ const pkg = (p: Partial<PackageRecord> = {}): PackageRecord => ({
   createdAt: new Date(0),
   updatedByEmp: null,
   updatedAt: null,
-  argsChangedByEmp: null,
+  editors: [],
   testedByEmp: null,
   testedAt: null,
   publishedByEmp: null,
@@ -67,6 +68,7 @@ const pkg = (p: Partial<PackageRecord> = {}): PackageRecord => ({
   publishedAt: null,
   revokedByEmp: null,
   revokedAt: null,
+  revokedFrom: null,
   ...p,
 });
 
@@ -160,7 +162,10 @@ describe('參數白名單、偵測規則、軟體庫路徑(純函式)', () => {
     assert.equal(deployDenied(pkg({ status: 'tested' }), 'it', 'uninstall')?.code, 'ITA_PACKAGE_NOT_PUBLISHED');
     assert.equal(deployDenied(pkg({ status: 'draft' }), 'pilot', 'install'), null);
     assert.equal(deployDenied(pkg({ status: 'revoked' }), 'pilot', 'install')?.code, 'ITA_PACKAGE_REVOKED');
-    assert.equal(deployDenied(pkg({ status: 'revoked' }), 'all', 'uninstall'), null);
+    assert.equal(deployDenied(pkg({ status: 'revoked', revokedFrom: 'published' }), 'all', 'uninstall'), null);
+    // C1:未曾發佈就撤回,移除參數沒有經過覆核,只限 pilot
+    assert.equal(deployDenied(pkg({ status: 'revoked', revokedFrom: 'draft' }), 'all', 'uninstall')?.code, 'ITA_PACKAGE_NOT_PUBLISHED');
+    assert.equal(deployDenied(pkg({ status: 'revoked', revokedFrom: 'tested' }), 'pilot', 'uninstall'), null);
   });
 
   it('測試依據:pilot、succeeded、偵測通過、快照與目前目錄一致才算', () => {
@@ -344,16 +349,23 @@ describe('軟體目錄、覆核與派送(SoftwareService + CommandDispatcher)', 
     const r = await register();
     // 覆核人改了安裝參數 → 之後不能由他發佈(登錄人也不行),要第三人
     const edited = await env.software.update(ctx, REVIEWER, r.packageId, { installArgs: 'ALLUSERS=2' });
-    assert.equal(edited.argsChangedByEmp, 'S000002');
+    assert.deepEqual(edited.editors, ['S000002']);
     await env.software.update(ctx, THIRD, r.packageId, { notes: '只改說明' });
-    assert.equal((await env.software.get(ctx, r.packageId)).argsChangedByEmp, 'S000002', '改說明不記為參數修改人');
+    assert.deepEqual((await env.software.get(ctx, r.packageId)).editors, ['S000002'], '改說明不記為參數修改人');
+    // 多人修改:第三人改偵測規則後,覆核人(先前改過參數)仍不能發佈
+    assert.deepEqual((await env.software.update(ctx, THIRD, r.packageId, { detectValue: '7-Zip 2%' })).editors, ['S000002', 'S000003']);
+    await env.software.update(ctx, THIRD, r.packageId, { detectValue: '7-Zip%' });
     await online(pilot);
     const cmd = await install(pilot, r.packageId);
     await succeed(pilot, cmd.commandId, PKG_SIGNER);
     await env.software.markTested(ctx, IT, r.packageId, [PKG_SIGNER]);
     await assert.rejects(env.software.publish(ctx, REVIEWER, r.packageId), { code: 'ITA_REVIEWER_SAME_AS_EDITOR' });
     await assert.rejects(env.software.publish(ctx, IT, r.packageId), { code: 'ITA_REVIEWER_SAME_AS_CREATOR' });
-    assert.equal((await env.software.publish(ctx, THIRD, r.packageId)).publishedBy?.emp, 'S000003');
+    await assert.rejects(env.software.publish(ctx, THIRD, r.packageId), { code: 'ITA_REVIEWER_SAME_AS_EDITOR' });
+    await assert.rejects(env.software.publish(ctx, { sub: 'client:bot' } as GatewayIdentity, r.packageId), { code: 'ITA_REVIEWER_NOT_PERSON' });
+    assert.equal((await env.software.publish(ctx, FOURTH, r.packageId)).publishedBy?.emp, 'S000004');
+    // 已發佈後再修改:修改人重設為這一次的人
+    assert.deepEqual((await env.software.update(ctx, IT, r.packageId, { rebootPolicy: 'required' })).editors, ['S000001'], '改重開機政策也要重新覆核');
   });
 
   it('software_install_failed:安裝失敗開告警;同一套件再派送成功自動關閉;逾時也算失敗', async () => {
@@ -382,6 +394,25 @@ describe('軟體目錄、覆核與派送(SoftwareService + CommandDispatcher)', 
     assert.equal(JSON.parse(open()[0]?.detail ?? '{}').errorCode, 'TIMEOUT');
   });
 
+  it('M2:改安裝參數退回 draft 時,尚未送出的指令(舊快照)一併取消', async () => {
+    const r = await register();
+    const queued = await install(pilot, r.packageId);
+    assert.equal(queued.state, 'queued');
+    await env.software.update(ctx, IT, r.packageId, { installArgs: 'ALLUSERS=2' });
+    assert.equal(env.commandStore.commands.find((c) => c.commandId === queued.commandId)!.state, 'queued', 'draft 本來就是 draft,不算退回');
+    await online(pilot);
+    const done = await install(pilot, r.packageId);
+    await succeed(pilot, done.commandId);
+    await env.software.markTested(ctx, IT, r.packageId, [PKG_SIGNER]);
+    // 另一台離線的 pilot 測試機:指令留在 queued
+    env.store.ringOf.set(other.id, 'pilot');
+    const pending = await install(other, r.packageId);
+    assert.equal(pending.state, 'queued');
+    await env.software.update(ctx, IT, r.packageId, { installArgs: 'ALLUSERS=1' });
+    const c = env.commandStore.commands.find((x) => x.commandId === pending.commandId)!;
+    assert.deepEqual([c.state, c.errorCode], ['canceled', 'PACKAGE_CHANGED']);
+  });
+
   it('撤回:尚未送出的安裝取消;不能再安裝,可移除;不能修改', async () => {
     const r = await register();
     const queued = await install(pilot, r.packageId);
@@ -390,7 +421,11 @@ describe('軟體目錄、覆核與派送(SoftwareService + CommandDispatcher)', 
     assert.deepEqual([revoked.status, revoked.canceledCommands], ['revoked', 1]);
     assert.equal(env.commandStore.commands[0]!.state, 'canceled');
     await assert.rejects(install(pilot, r.packageId), { code: 'ITA_PACKAGE_REVOKED' });
-    const un = await env.commands.create(ctx, IT, 'admin', other.deviceId, { kind: 'software.uninstall', params: { packageId: r.packageId } });
+    // C1:draft 撤回的移除只能派 pilot
+    await assert.rejects(env.commands.create(ctx, IT, 'admin', other.deviceId, { kind: 'software.uninstall', params: { packageId: r.packageId } }), {
+      code: 'ITA_PACKAGE_NOT_PUBLISHED',
+    });
+    const un = await env.commands.create(ctx, IT, 'admin', pilot.deviceId, { kind: 'software.uninstall', params: { packageId: r.packageId } });
     assert.deepEqual(un.params, {
       package_id: r.packageId,
       name: '7-Zip',

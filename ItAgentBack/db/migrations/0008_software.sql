@@ -35,8 +35,8 @@ CREATE TABLE ita.software_package (
   created_at         DATETIME2(3)      NOT NULL CONSTRAINT df_software_package_created_at DEFAULT SYSUTCDATETIME(),
   updated_by_emp     NVARCHAR(64)      NULL,
   updated_at         DATETIME2(3)      NULL,
-  -- 最後修改安裝參數 / 偵測規則的人(D2-2:發佈人不可是此人,避免「改參數後自己發佈」)
-  args_changed_by_emp NVARCHAR(64)     NULL,
+  -- 上次發佈以來改過安裝參數 / 偵測規則 / 重開機政策的人(工號,逗號分隔;D2-2:發佈人不可在其中)
+  editors            NVARCHAR(1000)    NULL,
   tested_by_emp      NVARCHAR(64)      NULL,
   tested_at          DATETIME2(3)      NULL,
   published_by_emp   NVARCHAR(64)      NULL,
@@ -44,6 +44,8 @@ CREATE TABLE ita.software_package (
   published_at       DATETIME2(3)      NULL,
   revoked_by_emp     NVARCHAR(64)      NULL,
   revoked_at         DATETIME2(3)      NULL,
+  -- 撤回前的狀態:只有從 published 撤回的套件可對所有電腦派送移除(未經覆核的移除參數只限 pilot)
+  revoked_from       VARCHAR(16)       NULL,
   request_id         VARCHAR(64)       NULL,
   CONSTRAINT uq_software_package_package_id UNIQUE (package_id),
   CONSTRAINT uq_software_package_version UNIQUE (name, version),
@@ -55,9 +57,9 @@ CREATE TABLE ita.software_package (
   CONSTRAINT ck_software_package_status CHECK (status IN ('draft', 'tested', 'published', 'revoked')),
   CONSTRAINT ck_software_package_size CHECK (size_bytes > 0),
   CONSTRAINT ck_software_package_license CHECK (license_limit IS NULL OR license_limit >= 0),
-  -- 兩人覆核(ADR 0002、D2-2):發佈人不可是登錄人,也不可是最後修改安裝參數 / 偵測規則的人;程式先檢查,這裡是第二道防線
+  -- 兩人覆核(ADR 0002、D2-2):發佈人不可是登錄人,也不可是上次發佈以來的修改人;程式先檢查,這裡是第二道防線
   CONSTRAINT ck_software_package_reviewer CHECK (published_by_emp IS NULL OR (published_by_emp <> created_by_emp
-    AND (args_changed_by_emp IS NULL OR published_by_emp <> args_changed_by_emp)))
+    AND CHARINDEX(N',' + published_by_emp + N',', N',' + ISNULL(editors, N'') + N',') = 0))
 );
 GO
 CREATE INDEX ix_software_package_status ON ita.software_package (status, created_at);

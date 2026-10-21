@@ -615,11 +615,11 @@ describe('SQL Server + Mongo + Redis', () => {
     assert.deepEqual([back.status, back.signerThumbprints, back.publishedByEmp, back.testedAt, back.updatedByEmp], ['draft', [], null, null, 'S000001']);
     // D2-2:覆核人改參數後,自己不能發佈(程式條件與 CHECK)
     assert.equal(await sw.updatePackage(p.packageId, 'draft', { installArgs: 'ALLUSERS=1', argsChanged: true, revertToDraft: false }, reviewer, at, 'int-p7'), true);
-    assert.equal((await sw.getPackage(p.packageId))!.argsChangedByEmp, 'S000002');
+    assert.deepEqual((await sw.getPackage(p.packageId))!.editors, ['S000001', 'S000002'], '退回 draft 後修改人累加');
     assert.equal(await sw.markTested(p.packageId, ['b'.repeat(40)], ['b'.repeat(40)], creator, at, 'int-p7'), true);
     assert.equal(await sw.publish(p.packageId, reviewer, at, 'int-p7'), false, '最後修改參數的人不能發佈');
     await assert.rejects(
-      pool.request().input('pid', p.packageId).query(`UPDATE ita.software_package SET published_by_emp = args_changed_by_emp WHERE package_id = @pid`),
+      pool.request().input('pid', p.packageId).query(`UPDATE ita.software_package SET published_by_emp = N'S000002' WHERE package_id = @pid`),
       (err: { number?: number }) => err.number === 547,
     );
     assert.equal(await sw.updatePackage(p.packageId, 'tested', { installArgs: 'ALLUSERS=2', argsChanged: true, revertToDraft: true }, creator, at, 'int-p7'), true);

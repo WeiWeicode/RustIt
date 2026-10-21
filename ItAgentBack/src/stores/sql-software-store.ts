@@ -42,7 +42,7 @@ export const packageParamLike = (packageId: string) => `%"package\\_id":"${packa
 
 const COLS = `id, package_id, name, version, file_name, sha256, size_bytes, installer_type, install_args, uninstall_args, detect_type, detect_value,
   reboot_policy, signer_thumbprints, observed_signers, license_limit, status, notes, created_by_emp, created_by_name, created_at, updated_by_emp, updated_at,
-  args_changed_by_emp, tested_by_emp, tested_at, published_by_emp, published_by_name, published_at, revoked_by_emp, revoked_at`;
+  editors, tested_by_emp, tested_at, published_by_emp, published_by_name, published_at, revoked_by_emp, revoked_at, revoked_from`;
 
 function toPackage(r: Row): PackageRecord {
   return {
@@ -69,7 +69,7 @@ function toPackage(r: Row): PackageRecord {
     createdAt: r.created_at as Date,
     updatedByEmp: str(r.updated_by_emp),
     updatedAt: date(r.updated_at),
-    argsChangedByEmp: str(r.args_changed_by_emp),
+    editors: list(r.editors),
     testedByEmp: str(r.tested_by_emp),
     testedAt: date(r.tested_at),
     publishedByEmp: str(r.published_by_emp),
@@ -77,6 +77,7 @@ function toPackage(r: Row): PackageRecord {
     publishedAt: date(r.published_at),
     revokedByEmp: str(r.revoked_by_emp),
     revokedAt: date(r.revoked_at),
+    revokedFrom: (str(r.revoked_from) as PackageStatus | null) ?? null,
   };
 }
 
@@ -164,15 +165,30 @@ export class SqlSoftwareStore implements SoftwareStore {
     if (p.rebootPolicy !== undefined) set('reboot_policy', 'reboot', sql.VarChar(16), p.rebootPolicy);
     if (p.licenseLimit !== undefined) set('license_limit', 'lic', sql.Int, p.licenseLimit);
     if (p.notes !== undefined) set('notes', 'notes', sql.NVarChar(1000), cut(p.notes, 1000));
-    if (p.argsChanged) sets.push('args_changed_by_emp = @emp');
+    // 上次發佈以來的修改人:已發佈的套件被修改(退回 draft)時重設;否則加入(右側欄位為更新前的值)
+    if (p.argsChanged)
+      sets.push(
+        `editors = CASE WHEN status = 'published' OR editors IS NULL THEN @emp WHEN CHARINDEX(N',' + @emp + N',', N',' + editors + N',') > 0 THEN editors ELSE editors + N',' + @emp END`,
+      );
     // 退回 draft:已發佈版本改安裝參數等於新的覆核,清除簽章者與 tested_* / published_*(設計 §3.2)
     const revert = p.revertToDraft
       ? `, status = 'draft', signer_thumbprints = NULL, tested_by_emp = NULL, tested_at = NULL, published_by_emp = NULL, published_by_name = NULL, published_at = NULL`
       : '';
+    req.input('pat', sql.NVarChar(100), packageParamLike(packageId));
     const r = await req.query(`
+      SET XACT_ABORT ON;
+      BEGIN TRAN;
+      DECLARE @ok BIT;
       UPDATE ita.software_package SET ${[...sets, 'updated_by_emp = @emp', 'updated_at = @at', 'request_id = @req'].join(', ')}${revert}
-      WHERE package_id = @pid AND status = @expect`);
-    return (r.rowsAffected[0] ?? 0) > 0;
+      WHERE package_id = @pid AND status = @expect;
+      SET @ok = CASE WHEN @@ROWCOUNT > 0 THEN 1 ELSE 0 END;
+      -- 退回 draft:尚未送出的指令帶的是舊快照,一併取消(含待核可批次;M2)
+      IF @ok = 1 AND @revert = 1
+        UPDATE ita.command SET state = 'canceled', error_code = 'PACKAGE_CHANGED', finished_at = @at, updated_at = SYSUTCDATETIME()
+        WHERE created_at >= DATEADD(DAY, -7, @at) AND kind IN ('software.install', 'software.uninstall') AND state = 'queued' AND params LIKE @pat ESCAPE '\\';
+      COMMIT;
+      SELECT @ok AS ok;`);
+    return (r.recordset[0] as Row | undefined)?.ok === true;
   }
 
   async markTested(packageId: string, signers: string[], observed: string[], actor: Actor, at: Date, requestId: string): Promise<boolean> {
@@ -203,7 +219,7 @@ export class SqlSoftwareStore implements SoftwareStore {
       .input('req', sql.VarChar(64), cut(requestId, 64)).query(`
         UPDATE ita.software_package SET status = 'published', published_by_emp = @emp, published_by_name = @name, published_at = @at, request_id = @req
         WHERE package_id = @pid AND status = 'tested' AND created_by_emp <> @emp
-          AND (args_changed_by_emp IS NULL OR args_changed_by_emp <> @emp) AND signer_thumbprints IS NOT NULL`);
+          AND CHARINDEX(N',' + @emp + N',', N',' + ISNULL(editors, N'') + N',') = 0 AND signer_thumbprints IS NOT NULL`);
     return (r.rowsAffected[0] ?? 0) > 0;
   }
 
@@ -219,7 +235,7 @@ export class SqlSoftwareStore implements SoftwareStore {
         SET XACT_ABORT ON;
         BEGIN TRAN;
         DECLARE @ok BIT, @n INT;
-        UPDATE ita.software_package SET status = 'revoked', revoked_by_emp = @emp, revoked_at = @at, request_id = @req
+        UPDATE ita.software_package SET status = 'revoked', revoked_from = status, revoked_by_emp = @emp, revoked_at = @at, request_id = @req
         WHERE package_id = @pid AND status <> 'revoked';
         SET @ok = CASE WHEN @@ROWCOUNT > 0 THEN 1 ELSE 0 END;
         SET @n = 0;

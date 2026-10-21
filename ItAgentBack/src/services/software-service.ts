@@ -114,7 +114,8 @@ export function displayNameLike(value: string): string {
 /** 純函式:這台(所屬環)可不可以派送此套件;不可回錯誤 */
 export function deployDenied(pkg: PackageRecord, ring: string | null, action: 'install' | 'uninstall'): AppError | null {
   if (pkg.status === 'revoked') {
-    if (action === 'uninstall') return null;
+    // C1:從 published 撤回的移除參數經過覆核,可派所有電腦;draft / tested 撤回的只限 pilot
+    if (action === 'uninstall') return pkg.revokedFrom === 'published' || ring === 'pilot' ? null : new AppError(409, 'ITA_PACKAGE_NOT_PUBLISHED', `${pkg.name} ${pkg.version} 未曾發佈就撤回,移除只能派送到 pilot 環的測試機`);
     return new AppError(409, 'ITA_PACKAGE_REVOKED', `${pkg.name} ${pkg.version} 已撤回,不能再安裝`);
   }
   if (pkg.status !== 'published' && ring !== 'pilot')
@@ -171,7 +172,8 @@ export function qualifyingSigners(pkg: PackageRecord, rows: InstallResultRow[]):
     }
     const d = p.detect as { type?: unknown; value?: unknown } | undefined;
     if (p.sha256 !== pkg.sha256 || (p.install_args ?? '') !== (pkg.installArgs ?? '') || d?.type !== pkg.detectType || d?.value !== pkg.detectValue) continue;
-    if (res.detected === false) continue;
+    // 偵測結果必須明確通過(L7)
+    if (res.detected !== true) continue;
     const signer = typeof res.signer === 'string' ? res.signer.toLowerCase() : '';
     if (!SIGNER_RE.test(signer)) continue;
     commandIds.push(r.commandId);
@@ -204,7 +206,7 @@ export interface PackageView {
   createdAt: string;
   updatedByEmp: string | null;
   updatedAt: string | null;
-  argsChangedByEmp: string | null;
+  editors: string[];
   testedByEmp: string | null;
   testedAt: string | null;
   publishedBy: { emp: string; name: string | null } | null;
@@ -237,7 +239,7 @@ export function packageView(p: PackageRecord, installedCount: number | null): Pa
     createdAt: p.createdAt.toISOString(),
     updatedByEmp: p.updatedByEmp,
     updatedAt: p.updatedAt?.toISOString() ?? null,
-    argsChangedByEmp: p.argsChangedByEmp,
+    editors: p.editors,
     testedByEmp: p.testedByEmp,
     testedAt: p.testedAt?.toISOString() ?? null,
     publishedBy: p.publishedByEmp ? { emp: p.publishedByEmp, name: p.publishedByName } : null,
@@ -289,6 +291,8 @@ export interface SoftwareServiceOptions {
 }
 
 const actorOf = (who: GatewayIdentity): Actor => ({ emp: who.emp ?? who.sub, name: who.name ?? null });
+/** 工號比對不分大小寫(與 SQL 預設定序一致,L2) */
+const sameEmp = (a: string | null | undefined, b: string | null | undefined) => !!a && !!b && a.toUpperCase() === b.toUpperCase();
 const trimOrNull = (s: string | undefined | null) => (s == null ? null : s.trim() || null);
 
 export class SoftwareService {
@@ -430,7 +434,9 @@ export class SoftwareService {
       next.installArgs !== pkg.installArgs ||
       next.uninstallArgs !== pkg.uninstallArgs ||
       next.detectType !== pkg.detectType ||
-      next.detectValue !== pkg.detectValue;
+      next.detectValue !== pkg.detectValue ||
+      // 重開機政策在快照內,改了也要重新覆核(L1)
+      (input.rebootPolicy !== undefined && input.rebootPolicy !== pkg.rebootPolicy);
     const patch: PackagePatch = {
       installArgs: next.installArgs,
       uninstallArgs: next.uninstallArgs,
@@ -531,12 +537,14 @@ export class SoftwareService {
     const pkg = await this.found(ctx, packageId);
     if (pkg.status !== 'tested') throw new AppError(409, 'ITA_PACKAGE_STATUS', `此套件目前為 ${pkg.status},只有 tested 可發佈`);
     const actor = actorOf(who);
-    if (actor.emp === pkg.createdByEmp) throw new AppError(403, 'ITA_REVIEWER_SAME_AS_CREATOR', '發佈人不可是登錄人,請由另一位 IT 覆核後發佈');
-    if (actor.emp === pkg.argsChangedByEmp)
-      throw new AppError(403, 'ITA_REVIEWER_SAME_AS_EDITOR', '發佈人不可是最後修改安裝參數 / 偵測規則的人,請由另一位 IT 覆核後發佈');
+    // 覆核人必須是有工號的人(系統 client 不算第二人,L2)
+    if (!who.emp) throw new AppError(403, 'ITA_REVIEWER_NOT_PERSON', '發佈需由有工號的 IT 人員執行');
+    if (sameEmp(actor.emp, pkg.createdByEmp)) throw new AppError(403, 'ITA_REVIEWER_SAME_AS_CREATOR', '發佈人不可是登錄人,請由另一位 IT 覆核後發佈');
+    if (pkg.editors.some((e) => sameEmp(e, actor.emp)))
+      throw new AppError(403, 'ITA_REVIEWER_SAME_AS_EDITOR', '發佈人不可是上次發佈以來修改過安裝參數 / 偵測規則 / 重開機政策的人,請由另一位 IT 覆核後發佈');
     const ok = await this.sqlDo(ctx, 'package.publish', () => this.store.publish(packageId, actor, this.now(), ctx.requestId));
     if (!ok) throw new AppError(409, 'ITA_PACKAGE_STATUS', '套件狀態已被變更,請重新整理');
-    ctx.log.info({ packageId, name: pkg.name, version: pkg.version, createdBy: pkg.createdByEmp, argsChangedBy: pkg.argsChangedByEmp, publishedBy: actor.emp }, '發佈軟體套件');
+    ctx.log.info({ packageId, name: pkg.name, version: pkg.version, createdBy: pkg.createdByEmp, editors: pkg.editors, publishedBy: actor.emp }, '發佈軟體套件');
     return this.view(ctx, packageId);
   }
 
@@ -573,7 +581,8 @@ export class SoftwareService {
   /** 建立前檢查:套件狀態與裝置所屬環;回傳參數快照(取代 IT 送來的 packageId) */
   async checkCommand(ctx: Ctx, deviceRef: number, params: Record<string, unknown>, action: 'install' | 'uninstall'): Promise<Record<string, unknown>> {
     const pkg = await this.found(ctx, String(params.packageId).toLowerCase());
-    const ring = pkg.status === 'published' || pkg.status === 'revoked' ? null : await this.sqlDo(ctx, 'device.ring', () => this.store.deviceRing(deviceRef));
+    const reviewed = pkg.status === 'published' || (pkg.status === 'revoked' && pkg.revokedFrom === 'published');
+    const ring = reviewed ? null : await this.sqlDo(ctx, 'device.ring', () => this.store.deviceRing(deviceRef));
     const denied = deployDenied(pkg, ring, action);
     if (denied) throw denied;
     // 目錄內的參數在登錄 / 修改時已驗;建立指令前再驗一次(資料庫被直接修改時擋下)

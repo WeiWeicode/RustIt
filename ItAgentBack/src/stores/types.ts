@@ -758,8 +758,8 @@ export interface PackageRecord {
   createdAt: Date;
   updatedByEmp: string | null;
   updatedAt: Date | null;
-  /** 最後修改安裝參數 / 偵測規則的人(發佈人不可是此人,D2-2) */
-  argsChangedByEmp: string | null;
+  /** 上次發佈以來改過安裝參數 / 偵測規則 / 重開機政策的人(發佈人不可在其中,D2-2) */
+  editors: string[];
   testedByEmp: string | null;
   testedAt: Date | null;
   publishedByEmp: string | null;
@@ -767,6 +767,8 @@ export interface PackageRecord {
   publishedAt: Date | null;
   revokedByEmp: string | null;
   revokedAt: Date | null;
+  /** 撤回前的狀態(C1:只有從 published 撤回才可對所有電腦移除) */
+  revokedFrom: PackageStatus | null;
 }
 
 export interface NewPackage {
@@ -797,7 +799,7 @@ export interface PackagePatch {
   rebootPolicy?: RebootPolicy;
   licenseLimit?: number | null;
   notes?: string | null;
-  /** 改到安裝參數 / 偵測規則:記錄修改人(args_changed_by_emp) */
+  /** 改到安裝參數 / 偵測規則 / 重開機政策:記錄修改人(editors;已發佈時重設為此人) */
   argsChanged: boolean;
   revertToDraft: boolean;
 }
@@ -824,11 +826,11 @@ export interface SoftwareStore {
   getPackage(packageId: string): Promise<PackageRecord | null>;
   /** 同名同版本或同一檔案已登錄丟 AppError 409 ITA_PACKAGE_EXISTS */
   addPackage(p: NewPackage): Promise<PackageRecord>;
-  /** 條件更新:status 仍為 expect 才更新 */
+  /** 條件更新:status 仍為 expect 才更新;revertToDraft 時同交易取消此套件尚未送出的 software.*(M2) */
   updatePackage(packageId: string, expect: PackageStatus, patch: PackagePatch, actor: Actor, at: Date, requestId: string): Promise<boolean>;
   /** draft → tested(寫入預期與實際簽章者) */
   markTested(packageId: string, signers: string[], observed: string[], actor: Actor, at: Date, requestId: string): Promise<boolean>;
-  /** tested → published,且發佈人 ≠ created_by_emp、≠ args_changed_by_emp */
+  /** tested → published,且發佈人 ≠ created_by_emp、不在 editors */
   publish(packageId: string, actor: Actor, at: Date, requestId: string): Promise<boolean>;
   /** 非 revoked → revoked;同一交易取消此套件尚未送出(queued)的 software.install */
   revoke(packageId: string, actor: Actor, at: Date, requestId: string): Promise<{ ok: boolean; canceledCommands: number }>;

@@ -80,7 +80,7 @@ export class MemorySoftwareStore implements SoftwareStore {
       createdAt: n.at,
       updatedByEmp: null,
       updatedAt: null,
-      argsChangedByEmp: null,
+      editors: [],
       testedByEmp: null,
       testedAt: null,
       publishedByEmp: null,
@@ -88,6 +88,7 @@ export class MemorySoftwareStore implements SoftwareStore {
       publishedAt: null,
       revokedByEmp: null,
       revokedAt: null,
+      revokedFrom: null,
     };
     this.packages.push(p);
     return { ...p };
@@ -98,7 +99,11 @@ export class MemorySoftwareStore implements SoftwareStore {
     const { revertToDraft, argsChanged, ...fields } = patch;
     for (const [k, v] of Object.entries(fields)) if (v !== undefined) (p as unknown as Record<string, unknown>)[k] = v;
     Object.assign(p, { updatedByEmp: actor.emp, updatedAt: at });
-    if (argsChanged) p.argsChangedByEmp = actor.emp;
+    if (argsChanged) p.editors = expect === 'published' ? [actor.emp] : [...new Set([...p.editors, actor.emp])];
+    if (revertToDraft)
+      for (const c of this.commands.commands)
+        if (c.kind.startsWith('software.') && c.state === 'queued' && this.pkgParam(c.params) === packageId)
+          Object.assign(c, { state: 'canceled', errorCode: 'PACKAGE_CHANGED', finishedAt: at });
     if (revertToDraft)
       Object.assign(p, {
         status: 'draft',
@@ -119,14 +124,14 @@ export class MemorySoftwareStore implements SoftwareStore {
   }
   async publish(packageId: string, actor: Actor, at: Date) {
     const p = this.packages.find((x) => x.packageId === packageId);
-    if (!p || p.status !== 'tested' || p.createdByEmp === actor.emp || p.argsChangedByEmp === actor.emp || p.signerThumbprints.length === 0) return false;
+    if (!p || p.status !== 'tested' || p.createdByEmp === actor.emp || p.editors.includes(actor.emp) || p.signerThumbprints.length === 0) return false;
     Object.assign(p, { status: 'published', publishedByEmp: actor.emp, publishedByName: actor.name, publishedAt: at });
     return true;
   }
   async revoke(packageId: string, actor: Actor, at: Date) {
     const p = this.packages.find((x) => x.packageId === packageId);
     if (!p || p.status === 'revoked') return { ok: false, canceledCommands: 0 };
-    Object.assign(p, { status: 'revoked', revokedByEmp: actor.emp, revokedAt: at });
+    Object.assign(p, { status: 'revoked', revokedFrom: p.status, revokedByEmp: actor.emp, revokedAt: at });
     let n = 0;
     for (const c of this.commands.commands)
       if (c.kind === 'software.install' && c.state === 'queued' && this.pkgParam(c.params) === packageId) {
