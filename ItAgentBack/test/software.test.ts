@@ -693,6 +693,11 @@ describe('套件下載 API 與管理 API', () => {
     assert.equal(env.sql.events.filter((e) => e.type === 'package_download').length, 1, '從 0 開始才記,同一套件每小時一次');
     assert.equal((await agent.inject({ url: '/agent/v1/packages/not-a-uuid', headers })).statusCode, 400);
     assert.equal((await agent.inject({ url: '/agent/v1/packages/00000000-0000-4000-8000-000000000000', headers })).statusCode, 404);
+    // 另一台離線的 pilot 測試機:安裝排隊中
+    const offline = await env.service.identify(ctx, 'O=GigaNexus Dev,CN=PC-OFFLINE', 'ab'.repeat(20));
+    env.store.ringOf.set(offline.id, 'pilot');
+    const waiting = await env.commands.create(ctx, IT, 'admin', offline.deviceId, { kind: 'software.install', params: { packageId: r.packageId } });
+    assert.equal(waiting.state, 'queued');
     // 檔案被換掉:503,不下發
     writeFileSync(path.join(env.dir.root, ...FILE.split('/')), 'MSI-tampered!!');
     res = await agent.inject({ url, headers });
@@ -703,6 +708,9 @@ describe('套件下載 API 與管理 API', () => {
       tampered.map((a) => [a.deviceRef, a.severity, a.state, JSON.parse(a.detail ?? '{}').packageId]),
       [[device.id, 'critical', 'open', r.packageId]],
     );
+    // M1:排隊中的安裝一併取消
+    const w = env.commandStore.commands.find((c) => c.commandId === waiting.commandId)!;
+    assert.deepEqual([w.state, w.errorCode], ['canceled', 'PACKAGE_FILE_CHANGED']);
     writeFileSync(path.join(env.dir.root, ...FILE.split('/')), CONTENT);
     assert.equal((await agent.inject({ url, headers })).statusCode, 200);
     // draft 套件:裝置移出 pilot 後不給

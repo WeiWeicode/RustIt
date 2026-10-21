@@ -839,6 +839,8 @@ export interface SoftwareStore {
   publish(packageId: string, actor: Actor, at: Date, requestId: string): Promise<boolean>;
   /** 非 revoked → revoked;同一交易取消此套件尚未送出(queued)的 software.install */
   revoke(packageId: string, actor: Actor, at: Date, requestId: string): Promise<{ ok: boolean; canceledCommands: number }>;
+  /** 取消此套件尚未送出(queued)的 software.install,回傳筆數(檔案被換掉,M1) */
+  cancelQueuedInstalls(packageId: string, errorCode: string, at: Date): Promise<number>;
   /** 此套件的 software.install 指令(新到舊) */
   installResults(packageId: string, limit: number): Promise<InstallResultRow[]>;
   /** 這台尚未結束(sent / acked / running)的 software.install 的 package_id(下載授權) */

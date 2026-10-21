@@ -253,6 +253,16 @@ export class SqlSoftwareStore implements SoftwareStore {
     return { ok: row?.ok === true, canceledCommands: Number(row?.n ?? 0) };
   }
 
+  async cancelQueuedInstalls(packageId: string, errorCode: string, at: Date): Promise<number> {
+    const r = await (await this.request())
+      .input('pat', sql.NVarChar(100), packageParamLike(packageId))
+      .input('code', sql.VarChar(64), errorCode)
+      .input('at', sql.DateTime2(3), at).query(`
+        UPDATE ita.command SET state = 'canceled', error_code = @code, finished_at = @at, updated_at = SYSUTCDATETIME()
+        WHERE created_at >= DATEADD(DAY, -7, @at) AND kind = 'software.install' AND state = 'queued' AND params LIKE @pat ESCAPE '\\'`);
+    return r.rowsAffected[0] ?? 0;
+  }
+
   async installResults(packageId: string, limit: number): Promise<InstallResultRow[]> {
     const r = await (await this.request()).input('pat', sql.NVarChar(100), packageParamLike(packageId)).input('limit', sql.Int, limit).query(`
       SELECT TOP (@limit) c.command_id, d.device_id, d.computer_name, d.company, d.ring, c.state, c.params, c.result_summary, c.error_code, c.created_by_emp, c.finished_at

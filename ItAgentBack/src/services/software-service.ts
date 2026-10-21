@@ -713,7 +713,13 @@ export class SoftwareService {
     const sha = await this.files.sha256(f);
     if (sha !== pkg.sha256 || f.size !== pkg.sizeBytes) {
       ctx.log.error({ packageId: id, fileName: pkg.fileName, expected: pkg.sha256, actual: sha }, '安裝檔內容與登錄不符,拒絕下發(需重新登錄新版本)');
+      // 其餘尚未送出的安裝一併取消(會一台一台下載失敗),需重新登錄新版本(M1)
+      const canceled = await this.store.cancelQueuedInstalls(id, 'PACKAGE_FILE_CHANGED', this.now()).catch((err: unknown) => {
+        ctx.log.warn({ err, packageId: id }, '取消此套件排隊中的安裝失敗');
+        return 0;
+      });
       await this.onPackageTampered(ctx, device.id, {
+        canceledCommands: canceled,
         packageId: id,
         name: pkg.name,
         version: pkg.version,
