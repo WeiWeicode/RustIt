@@ -14,7 +14,7 @@
 | **P6-1 版本登錄與發佈環(後端)** | migration `0007_release.sql`;管理 API(版本登錄、發佈環目標版本、裝置所屬環、升級進度);Agent 下載 API(Range);`watchdog/report` 回應帶 `target`、請求帶 `upgrade` 進度;並行上限;`upgrade_failed`、`version_mismatch` 告警;`agent.upgrade` 指令(admin) | — | migration 套用 `giganexus_It_Agent_test`;版本檔目錄(§9-3);合併 develop |
 | **P6-2 Watchdog 升級 Agent** | Watchdog 下載(續傳)→ 驗 SHA-256 與 Authenticode 簽章者 → 管道 `prepare_shutdown` → 停服務、舊版放 `previous\`、替換、啟動 → 2 分鐘內 `get_status` 驗證 → 失敗還原並回報;Agent 實作 `prepare_shutdown` | Agent **0.7.0**、Watchdog **0.2.0**(MSI 首次安裝到 VM) | VM 驗收;測試簽章憑證(§9-1) |
 | **P6-3 Agent 升級 Watchdog、`agent.upgrade` 立即觸發** | Watchdog 下載驗證後經管道 `replace_watchdog` 交給 Agent 替換(互相升級、不覆寫自己);`agent.upgrade` 讓 Watchdog 立即上報 | 同上 | VM 驗收 |
-| **P6-4 Windows Runner + 人工簽章流程** | 主機 2 Windows 本機 GitLab Runner(shell、PowerShell、tag `windows`、`concurrent = 1`);CI 手動 / tag job 產出未簽章 exe、MSI 與 SHA-256;簽章腳本、上架腳本 | — | Runner 註冊 Token 由需求方執行;`.gitlab-ci.yml` |
+| **P6-4 Windows Runner + 人工簽章流程** | 主機 2 Windows 本機 GitLab Runner(shell、`pwsh`、tag `windows`、`concurrent = 1`;2026-10-21 上線,見 WINDOWS-RUNNER-SETUP.md);CI 手動 / tag job 產出未簽章 exe、MSI 與 SHA-256;簽章腳本、上架腳本 | — | Runner 註冊 Token 由需求方執行;`.gitlab-ci.yml` |
 | **P6-5 GigaItApp「Agent 版本」頁** | 版本清單 / 登錄 / 發佈 / 撤回、發佈環目標版本與進度、裝置詳情「所屬環」與升級狀態;`gateway-rbac.yaml` | — | **GigaItApp、`gateway-rbac.yaml`:動手前另外確認**(OpenAPI 註冊、IT 發佈後才綁 `includes`) |
 | P6-6 收尾 | 指南回寫(§7.3、§7.4、§8.3、E4)、`command-kinds.md`、根目錄 `workspace.json` / `PROJECT-MAP.md`、甘特圖 W6-19、測試報告、RUNBOOK 版本回滾一節(B10 先寫這段) | — | Gateway / 根目錄 repo 修改前確認 |
 

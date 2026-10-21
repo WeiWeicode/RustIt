@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-21 P6-4 第一次正式發版流程(Agent 0.8.2 / Watchdog 0.3.2)測試區完成
+- 內容:以 MR !47(rustls 弱點修補)為第一個正式流程版本:Windows Runner `build:release` → 需求方以測試憑證執行 `sign-release.ps1` → `publish-release.ps1 -Environment test` 上架主機 2 → 測試區登錄草稿 → pilot 環 VM `RUSTIT-P34` 自動升級(Agent 44 秒、Watchdog 22 秒)→ 需求方在 GigaItApp 發佈並清空 pilot 目標。
+- 檔案:`docs/test-reports/2026-10-21-p6-4-first-release.md`(新)、`docs/HANDOFF.md`
+- 驗證:見報告 §3、§4;未演練受保護 tag 與正式憑證(報告 §6)
+
 ## 2026-10-21 P6-4 主機 2 Windows Runner 上線與設定文件回寫
 - 內容:MR !45(發版流水線)合併後,在主機 2 Windows 本機裝建置工具並註冊 project runner `host2-windows`(#4,tag `windows`、鎖定 RustIt、服務帳號 `gitlab-runner-svc`、`concurrent = 1`)。實裝與原文件不同處回寫 `WINDOWS-RUNNER-SETUP.md` §2、§3,並新增 §6 維護:Runner shell 必須 `pwsh`(`powershell` 5.1 在 CP950 系統解析 Runner 產生的腳本失敗,`exit status 0xfffd0000`);主機 2 無 D 槽,建置目錄 `C:\ci`;工具全機共用安裝(`C:\Rust`、`C:\Tools\wix`)、`CARGO_HOME` 由 Runner 設定指到 `C:\ci\cargo-home`;`gitlab-runner install --user` 不會授予 `SeServiceLogonRight`,要另外授予;`config.toml` ACL 限縮;服務帳號密碼重設方式。新增 `install-runner-tools.ps1`(可重跑,含 gitlab-runner SHA256 與 PowerShell MSI 簽章檢查);補專案地圖 P6-4 檔案。
 - 檔案:`docs/WINDOWS-RUNNER-SETUP.md`、`RustAgent/installer/install-runner-tools.ps1`(新)、`docs/PROJECT-MAP.md`、`docs/HANDOFF.md`
