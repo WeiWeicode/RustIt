@@ -6,6 +6,7 @@
 //!   - 端點事件([`events`]):本機暫存 → `POST /agent/v1/events`
 //!   - USB 插拔([`usb`]):每 10 秒比對可移除磁碟區
 //!   - 升級(P6-2):Watchdog 經本機管道 `prepare_shutdown` 要求停止前收尾([`pipe`]);指令 `agent.upgrade` 經管道 `status.upgrade_requested` 通知 Watchdog
+//!   - 替換 Watchdog(P6-3):Watchdog 驗證新版後經管道 `replace_watchdog` 交給 Agent,Agent 再驗一次、停止服務、替換、檢查並在失敗時還原(`upgrade_watchdog`)
 //!   - 指令([`command`],P4):WebSocket 收到 `command` 在背景執行,結果先寫本機再經 WebSocket 回報;
 //!     遠端診斷([`diagnose`]、[`logs`],P4-2)。另有每分鐘檢查暫時日誌等級是否到期
 //!
@@ -28,6 +29,8 @@ pub mod protocol;
 #[cfg(windows)]
 pub mod service;
 pub mod store;
+#[cfg(windows)]
+mod upgrade_watchdog;
 mod usb;
 mod ws;
 
@@ -110,6 +113,13 @@ pub(crate) struct Shared {
     pub ws_hold: watch::Sender<bool>,
     /// agent.upgrade(P6-2):管道 status.upgrade_requested 的內容與時間(1 小時內有效)
     pub upgrade_requested: std::sync::Mutex<Option<(serde_json::Value, std::time::Instant)>>,
+    /// 替換 Watchdog 進行中(P6-3):看守 Watchdog 暫停,同時只做一次替換
+    pub watchdog_replacing: Arc<AtomicBool>,
+    /// 替換後最近一次連上管道的 Watchdog PID(伺服端已比對 SCM;替換中才記)
+    pub watchdog_seen: std::sync::Mutex<Option<u32>>,
+    /// 本機信任簽章者(agent.toml [upgrade] trusted_signers)與下載快取目錄(替換 Watchdog 的第二道驗證)
+    pub trusted_signers: Vec<String>,
+    pub cache_dir: std::path::PathBuf,
 }
 
 impl Shared {
@@ -280,6 +290,13 @@ pub async fn run(settings: Settings, mut shutdown: watch::Receiver<bool>) -> Res
         prepare_gen: AtomicU64::new(0),
         ws_hold: watch::channel(false).0,
         upgrade_requested: std::sync::Mutex::new(None),
+        watchdog_replacing: Arc::new(AtomicBool::new(false)),
+        watchdog_seen: std::sync::Mutex::new(None),
+        trusted_signers: settings.trusted_signers.clone(),
+        cache_dir: settings
+            .state_dir
+            .parent()
+            .map_or_else(|| settings.state_dir.join("cache"), |d| d.join("cache")),
     });
     // 上次的 agent.restart 回報成功、中途停止的指令回報失敗(重連後送出);未到期的暫時日誌等級重新套用
     command::recover(&shared);
@@ -361,9 +378,18 @@ pub async fn run(settings: Settings, mut shutdown: watch::Receiver<bool>) -> Res
 async fn service_tasks(shared: Arc<Shared>, stop: watch::Receiver<bool>) {
     #[cfg(windows)]
     if SERVICE_MODE.load(Ordering::Relaxed) {
+        // 上次替換 Watchdog 到一半被中斷:先收尾再開始看守(P6-3;在阻塞執行緒,等健康檢查最多 2 分鐘)
+        let s = shared.clone();
+        tokio::spawn(async move {
+            let _ = tokio::task::spawn_blocking(move || upgrade_watchdog::resume_service(&s)).await;
+        });
         tokio::join!(
             pipe::run(shared.clone(), stop.clone()),
-            guard::run(shared.events.clone(), stop)
+            guard::run(
+                shared.events.clone(),
+                shared.watchdog_replacing.clone(),
+                stop
+            )
         );
     }
     #[cfg(not(windows))]

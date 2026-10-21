@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-21 P6-3 Agent 替換 Watchdog(Agent 0.8.0、Watchdog 0.3.0)
+- 內容:依 `P6-UPGRADE-DESIGN.md` §5.3。Watchdog `run_watchdog` 下載、驗證 `target.watchdog` 後經管道 `replace_watchdog` 交給 Agent;Agent `upgrade_watchdog.rs` 再驗一次(路徑、SHA-256、Authenticode、簽章者、版本資源)後停止 / 備份 / 替換 / 健康檢查 / 必要時還原 Watchdog 服務,中途重啟依標記收尾;看守在替換中暫停。新版 Watchdog 啟動時 `resume_watchdog` 收尾本機紀錄。契約 `pipe.schema.json` `ReplaceWatchdog` / `ReplaceWatchdogAck`。code-reviewer 審查(必修 3)已修正:Agent 端旗標 RAII 與 accept 獨立 task 等;Watchdog 端 `succeeded` 後被換回舊版記 `rolled_back` 並設冷卻(必修 A)、`installing` 超過 15 分鐘記 `rolled_back`(必修 B);看守暫停抽成 `Guard::paused`。security-auditor 稽核(High / Medium 0、Low 6)修 L-1(要求方已放棄不替換、Agent 驗證 50 秒期限)、L-2(換上前對 `.new` 再驗簽章與版本)、L-3(`cache\`、`cache\watchdog\`、標記不可是連結;`not_reparse` 搬到 `rustit_common::winfile`)、L-5(標記 ≤ 4 KB、存舊版雜湊,還原前比對 `previous\`);L-4、L-6 列入上線前檢查。細節與不做的項目見設計 §8.5「審查後調整」「資安稽核後調整」。
+- 檔案:`RustAgent/crates/agent/src/upgrade_watchdog.rs`(新)、`upgrade_watchdog/tests.rs`(新)、`agent/src/{pipe,guard,lib,protocol}.rs`、`agent/tests/contract.rs`、`agent/Cargo.toml`;`crates/watchdog/src/upgrade/{mod,swap,tests}.rs`、`watchdog/src/{lib,report}.rs`、`watchdog/tests/contract.rs`、`watchdog/Cargo.toml`;`Cargo.lock`;`installer/build-test-release.ps1`;`crates/common/src/winfile.rs`(`not_reparse`、`plain_file`);契約 `docs/contracts/pipe.schema.json`、範例 `pipe-replace-watchdog*.sample.json`(新);文件 `docs/P6-UPGRADE-DESIGN.md`(§8.5)、`docs/PROJECT-MAP.md`
+- 驗證:`cargo test -p rustit-common -p rustit-watchdog -p rustit-agent` 全過:Agent 單元 68 項(含替換 Watchdog 34 項、看守 4 項)+ main 2 項 + 契約 9 項;Watchdog 單元 42 項(含升級狀態機 29 項,其中 P6-3 新增 succeeded 後換回舊版、installing 未滿 / 超過 15 分鐘等)+ main 1 項 + 契約 5 項;common 31 項(含 junction 測試;1 項需已簽章檔而略過)。`cargo clippy -p rustit-common -p rustit-watchdog -p rustit-agent --all-targets` 無警告。**未驗證**:SCM 停止 / 替換 / 還原 Watchdog、管道 `replace_watchdog` 實際連線、WinVerifyTrust 對已簽章檔(要在 VM 驗收,步驟見設計 §8.6)。
+
 ## 2026-10-21 P6-2 VM 驗收完成
 - 內容:測試區 VM `RUSTIT-P34` 完成設計 §8.4 步驟 0~9:升級成功、兩種壞版本還原且失敗 2 次後停止、未簽章 / 簽章者不符拒絕、`agent.upgrade`、降版、升級中重開機收尾皆通過;步驟 9 因 `logs.collect` 太快只算部分。待補項目併入 P6-3。
 - 檔案:`docs/test-reports/2026-10-21-p6-2-watchdog-upgrade.md`(新)、`docs/P6-UPGRADE-DESIGN.md`、`docs/HANDOFF.md`
