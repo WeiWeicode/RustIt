@@ -5,7 +5,7 @@
  * 經記憶體儲存;SQL 語句由整合測試涵蓋。
  */
 import assert from 'node:assert/strict';
-import { symlinkSync, writeFileSync } from 'node:fs';
+import { readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { loadGatewayEnv, loadMonitorEnv, type GatewayIdentity } from '@giganexus/backend-sdk';
@@ -23,7 +23,7 @@ import {
   qualifyingSigners,
   type RegisterPackageInput,
 } from '../src/services/software-service.js';
-import type { DeviceRecord, InstallResultRow, PackageRecord } from '../src/stores/types.js';
+import type { DeviceRecord, InstallerType, InstallResultRow, PackageRecord } from '../src/stores/types.js';
 import { ALL, CONTRACTS_DIR, FakeConnection, inventoryRequest, only } from './helpers.js';
 import { PKG_SIGNER, setupSoftware, softwareDir } from './software-helpers.js';
 
@@ -86,45 +86,12 @@ describe('參數白名單、偵測規則、軟體庫路徑(純函式)', () => {
       assert.equal(argsErrors('installArgs', bad).length, 1, `應拒絕:${bad}`);
   });
 
-  it('D3:不可讀寫外部檔案;磁碟機路徑只限 Program Files;{ } 只限 GUID', () => {
-    for (const ok of [
-      '/qn /norestart ALLUSERS=1',
-      'INSTALLDIR="C:/Program Files (x86)/Foo Bar/"',
-      '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /LANG=english /DIR="C:/Program Files/Notepad++"',
-      '/S /D=C:/Program Files/App',
-      '/passive /TASKS="desktopicon" /ALLUSERS',
-      'REMOVE={12345678-1234-1234-1234-123456789ABC}',
-    ])
-      assert.deepEqual(argsErrors('installArgs', ok), [], `應接受:${ok}`);
-    for (const bad of [
-      // 外部檔案參數
-      'TRANSFORMS=x',
-      'patch = y',
-      'MSIPATCHREMOVE=z',
-      '/l*v C:/Program Files/a',
-      '/lv out',
-      '-log out',
-      '/LOG="C:/Program Files/a"',
-      '/LOADINF="settings"',
-      '/SAVEINF=a',
-      '/f1"C:/Program Files/setup"',
-      '/p x',
-      '/update x',
-      'CONFIGFILE=y',
-      // 路徑
-      'INSTALLDIR="//server/share/x"',
-      'INSTALLDIR="C:/Windows/System32"',
-      'INSTALLDIR="D:/Program Files/x"',
-      '/D=C:Program Files',
-      'INSTALLDIR="C:/Program Files/../Windows"',
-      'INSTALLDIR=/Windows',
-      '/DIR={sys}',
-      '/DIR="{tmp}/x"',
-      'A=(1)',
-      'A=@file',
-      'A=[WindowsFolder]',
-    ])
-      assert.equal(argsErrors('installArgs', bad).length, 1, `應拒絕:${bad}`);
+  it('D3:install-args.vectors.json(與 Agent 共用):依安裝程式類型、不可讀寫外部檔案、路徑只限 Program Files', () => {
+    type Vec = { installer_type: InstallerType | null; args: string; why?: string };
+    const v = JSON.parse(readFileSync(path.join(CONTRACTS_DIR, 'install-args.vectors.json'), 'utf8')) as { valid: Vec[]; invalid: Vec[] };
+    for (const x of v.valid) assert.deepEqual(argsErrors('installArgs', x.args, x.installer_type ?? undefined), [], `應接受(${x.installer_type}):${x.args}`);
+    for (const x of v.invalid)
+      assert.equal(argsErrors('installArgs', x.args, x.installer_type ?? undefined).length, 1, `應拒絕(${x.installer_type},${x.why}):${x.args}`);
   });
 
   it('偵測規則:MSI 產品代碼格式;DisplayName 單行、至少 3 個非 % 字元;LIKE 跳脫保留 %', () => {

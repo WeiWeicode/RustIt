@@ -36,36 +36,88 @@ export const DETECT_TYPES: readonly DetectType[] = ['msi_product_code', 'display
 export const REBOOT_POLICIES: readonly RebootPolicy[] = ['never', 'required'];
 export const PACKAGE_STATUSES: readonly PackageStatus[] = ['draft', 'tested', 'published', 'revoked'];
 
-/** 安裝 / 移除額外參數的字元白名單(§2.3):不含 & | ; < > ^ ` $ \ @ [ ] 與換行;路徑用 /;( ) 只為 Program Files (x86);+ 為資料夾名稱(Notepad++) */
+/** 安裝 / 移除額外參數的字元白名單(§2.3):不含 & | ; < > ^ ` $ \ @ [ ] ~ ? 與換行;路徑用 /;( ) 只為 Program Files (x86);+ 為資料夾名稱(Notepad++) */
 export const ARGS_RE = /^[A-Za-z0-9 /\-_=.:,"{}%()+]*$/;
 export const ARGS_MAX = 500;
-/** 參數不可指到其他可執行檔、轉換檔、回應檔(MSI 的 TRANSFORMS、PATCH,Inno 的 /LOADINF 等;§2.3、D3) */
+/** 參數不可指到其他可執行檔、轉換檔、回應檔、設定檔(§2.3、D3) */
 const ARGS_FILE = /\.(msi|msp|mst|exe|dll|bat|cmd|ps1|vbs|js|inf|iss|ini|xml|txt|log|reg|cfg|json)\b/i;
 /**
- * 會讓安裝程式讀寫外部檔案的參數(D3;安裝程式以 SYSTEM 執行):
- * MSI 屬性 TRANSFORMS / PATCH / MSIPATCHREMOVE、msiexec /l* 記錄 /p /update /t /a /j、
- * Inno /LOADINF /SAVEINF /LOG、InstallShield /f1 /f2、Burn / 通用 -log /log /config CONFIGFILE
+ * 禁止的屬性(D3;資安稽核 H2):讀外部檔(轉換、修補、來源)、改變安裝方式、隱藏於「新增 / 移除程式」、繞過重開機政策;
+ * 以及名稱看起來是檔案或設定檔(*FILE、CONFIG*、INI*)
  */
-const ARGS_FILE_SWITCH =
-  /(^|[\s"])(TRANSFORMS|PATCH|MSIPATCHREMOVE|CONFIGFILE)\s*=|(^|[\s"])[/-](LOADINF|SAVEINF|LOG|CONFIG|UPDATE|F1|F2|P|T|A|J)(?=[\s=:"]|$)|(^|[\s"])[/-]L[*!+voiwearucmpx]*(?=[\s=:"]|$)/i;
+const BANNED_PROPS =
+  /^(TRANSFORMS|TRANSFORMSATSOURCE|TRANSFORMSSECURE|PATCH|MSIPATCHREMOVE|PATCHNEWPACKAGECODE|SOURCELIST|INSTALLSOURCE|SOURCEDIR|ADDSOURCE|ADVERTISE|MSINEWINSTANCE|MSIINSTANCEGUID|REINSTALL|REINSTALLMODE|REBOOT|REBOOTPROMPT|MSILOGGINGMODE|LIMITUI|ARPSYSTEMCOMPONENT|ARPNOREMOVE|MSIINSTALLPERUSER|ROOTDRIVE|SETTINGS|XML|CONFIG.*|INI.*|.*FILE)$/i;
+/**
+ * 禁止的開關(去掉開頭的 / - --、比對 = 或 : 之前的名稱,不分大小寫;D3、H2):
+ * 記錄 / 回應檔 / 設定檔(log、l*、loadinf、saveinf、f1、f2、r、config…)、轉交 msiexec(v)、另一個套件或修補(i、p、update、package、y、z、t、a、j、x)、
+ * 改變動作(uninstall、repair、modify、layout)、Burn 內部參數(parent*、burn.*)、Inno 會跳視窗的 /SILENT、/PASSWORD、/DEBUGWND、/RESTARTEXITCODE、NSIS /NCRC、/INI
+ */
+const BANNED_SWITCH =
+  /^(log|l[*!+voiwearucmpx]*|loadinf|saveinf|f1|f2|r|v|b|z|y|i|p|t|a|j.*|x|update|package|uninstall|repair|modify|layout|parent.*|burn\..*|config|configure|settings|response|unattend|answerfile|password|restartexitcode|debugwnd|silent|ncrc|ini)$/i;
+/** 屬性名稱 */
+const PROP_NAME = /^[A-Za-z_][A-Za-z0-9_.]*$/;
+/** 一個參數:名稱(不含引號與 =)+ 可選的 =值(值可用引號包住整個值) */
+const ARGS_TOKEN = /([^\s"=]+)(?:=("[^"]*"|[^\s"]*))?(?=\s|$)/y;
 /** 磁碟機路徑只允許 C:/Program Files/ 與 C:/Program Files (x86)/ 底下(D3) */
-const ARGS_DRIVE = /(^|[\s="])[A-Za-z]:/g;
-const ARGS_DRIVE_OK = /^[Cc]:\/Program Files( \(x86\))?\//i;
-/** { } 只用於 GUID(MSI 產品代碼);Inno 常數 {sys} {tmp} {src} 等會展開成系統路徑 */
-const ARGS_BRACE = /\{[^}]*\}?/g;
+const ARGS_DRIVE_OK = /^[Cc]:\/Program Files( \(x86\))?\/[^:]*$/i;
 const ARGS_GUID = /^\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}$/;
+const PATH_MSG = '路徑只允許 C:/Program Files/ 或 C:/Program Files (x86)/ 底下(路徑用 /,不可含 :、..)';
 
-/** D3:路徑類檢查(字元白名單通過後);回傳錯誤訊息或 null */
-function argsPathError(v: string): string | null {
-  if (v.includes('//')) return '不可使用網路路徑(UNC)';
-  if (v.includes('..')) return '路徑不可含 ..';
-  if (/=\s*"?\//.test(v)) return '參數值不可以 / 開頭(根目錄路徑);路徑需為 C:/Program Files/ 或 C:/Program Files (x86)/ 底下';
-  for (const m of v.matchAll(ARGS_DRIVE)) {
-    const at = (m.index ?? 0) + m[1]!.length;
-    if (!ARGS_DRIVE_OK.test(v.slice(at))) return '磁碟機路徑只允許 C:/Program Files/ 或 C:/Program Files (x86)/ 底下(路徑用 /)';
+/** D3:值的檢查(路徑、UNC、{ }、( ));回傳錯誤訊息或 null */
+function argsValueError(value: string): string | null {
+  if (value === '') return null;
+  if (value.includes('//')) return '不可使用網路路徑(UNC)';
+  if (value.includes('..')) return '路徑不可含 ..';
+  if (/[{}]/.test(value) && !ARGS_GUID.test(value)) return '{ } 只能用於 GUID(MSI 產品代碼)';
+  if (/^[A-Za-z]:/.test(value)) return ARGS_DRIVE_OK.test(value) ? null : PATH_MSG;
+  // 不是磁碟機路徑:不可含 / : ( )(根目錄、相對路徑、替代資料流)
+  if (/[/:()]/.test(value)) return PATH_MSG;
+  return null;
+}
+
+/** D3:依安裝程式類型檢查每個參數;回傳錯誤訊息或 null */
+function argsGrammarError(v: string, installerType: InstallerType | undefined): string | null {
+  let rest = v.trim();
+  // NSIS 的 /D= 必須放最後、不可加引號,值可含空白
+  if (installerType === 'nsis') {
+    const m = /(^|\s)\/D=([^"]*)$/i.exec(rest);
+    if (m) {
+      const err = argsValueError(m[2]!.trim());
+      if (err) return err;
+      rest = rest.slice(0, m.index).trim();
+    }
   }
-  for (const m of v.matchAll(ARGS_BRACE)) if (!ARGS_GUID.test(m[0])) return '{ } 只能用於 GUID(MSI 產品代碼)';
-  if (/[()]/.test(v.replace(/Program Files \(x86\)/gi, ''))) return '( ) 只能出現在 Program Files (x86)';
+  let pos = 0;
+  while (pos < rest.length) {
+    if (rest[pos] === ' ') {
+      pos++;
+      continue;
+    }
+    ARGS_TOKEN.lastIndex = pos;
+    const m = ARGS_TOKEN.exec(rest);
+    if (!m) return '引號只能包住整個值(例如 NAME="C:/Program Files/App")';
+    pos = ARGS_TOKEN.lastIndex;
+    const name = m[1]!;
+    const value = (m[2] ?? '').replace(/^"(.*)"$/, '$1');
+    if (/^[/-]/.test(name)) {
+      if (installerType === 'msi') return 'MSI 只接受「屬性=值」;/qn /norestart 與記錄檔由 Agent 加上';
+      const sw = name.replace(/^(--|[/-])/, '');
+      const swName = sw.split(':')[0]!;
+      if (BANNED_SWITCH.test(swName)) return `不可使用 ${name}(會讀寫外部檔案、轉交其他安裝程式或改變安裝方式)`;
+      // /switch:value 的值同樣檢查
+      const err = argsValueError(sw.includes(':') ? sw.slice(sw.indexOf(':') + 1) : '') ?? argsValueError(value);
+      if (err) return err;
+    } else if (m[2] !== undefined) {
+      if (!PROP_NAME.test(name)) return `屬性名稱 ${name} 不正確`;
+      if (BANNED_PROPS.test(name)) return `不可設定 ${name}(讀外部檔案、改變安裝方式或隱藏安裝)`;
+      const err = argsValueError(value);
+      if (err) return err;
+    } else {
+      if (installerType === 'msi') return 'MSI 只接受「屬性=值」';
+      const err = argsValueError(name);
+      if (err) return err;
+    }
+  }
   return null;
 }
 /** 參數不可含機密(序號、密碼;沿用 logs.collect 遮罩關鍵字,§5.6、§7);不加字首邊界,PIDKEY= / PRODUCTKEY= 也擋 */
@@ -84,15 +136,14 @@ const DETAIL_LIMIT = 200;
 
 type Field = { field: string; message: string };
 
-/** 純函式:安裝 / 移除參數的錯誤(通過回空陣列) */
-export function argsErrors(field: string, v: string | null | undefined): Field[] {
+/** 純函式:安裝 / 移除參數的錯誤(通過回空陣列);installerType 省略時套用通用規則(Agent 端 P7-2 用同一份測試向量) */
+export function argsErrors(field: string, v: string | null | undefined, installerType?: InstallerType): Field[] {
   if (v == null || v === '') return [];
   if (v.length > ARGS_MAX) return [{ field, message: `最多 ${ARGS_MAX} 字` }];
-  if (!ARGS_RE.test(v)) return [{ field, message: '只允許英數字、空白與 / - _ = . : , " { } % ( ) +(不可含 & | ; < > ^ ` $ \\ @ 與換行;路徑請用 /)' }];
+  if (!ARGS_RE.test(v)) return [{ field, message: '只允許英數字、空白與 / - _ = . : , " { } % ( ) +(不可含 & | ; < > ^ ` $ \\ @ [ ] 與換行;路徑請用 /)' }];
   if (ARGS_FILE.test(v)) return [{ field, message: '不可指到其他檔案(.msi / .exe / .mst / .dll / 指令檔 / 回應檔 / 設定檔)' }];
-  if (ARGS_FILE_SWITCH.test(v)) return [{ field, message: '不可使用讀寫外部檔案的參數(TRANSFORMS、PATCH、/l*、/LOADINF、/SAVEINF、/LOG、/f1 等)' }];
-  const pathErr = argsPathError(v);
-  if (pathErr) return [{ field, message: pathErr }];
+  const grammar = argsGrammarError(v, installerType);
+  if (grammar) return [{ field, message: grammar }];
   if (ARGS_SECRET.test(v)) return [{ field, message: '不可含序號、密碼、金鑰類參數(需要序號的軟體不在派送支援範圍)' }];
   return [];
 }
@@ -343,7 +394,9 @@ export class SoftwareService {
     detectValue: string;
     licenseLimit: number | null;
   }): void {
-    const errors = [...argsErrors('installArgs', f.installArgs), ...argsErrors('uninstallArgs', f.uninstallArgs), ...detectErrors(f.detectType, f.detectValue)];
+    const errors = [
+      ...argsErrors('installArgs', f.installArgs, f.installerType),
+      ...argsErrors('uninstallArgs', f.uninstallArgs, f.installerType), ...detectErrors(f.detectType, f.detectValue)];
     // 授權數以 device_software 的 DisplayName 計數;P3 的軟體清單沒有 MSI 產品代碼(§3.4、§9-10)
     if (f.licenseLimit !== null && f.detectType !== 'display_name')
       errors.push({ field: 'licenseLimit', message: '設定授權數時偵測規則需為 display_name(MSI 產品代碼無法計算已安裝台數)' });
@@ -586,7 +639,7 @@ export class SoftwareService {
     const denied = deployDenied(pkg, ring, action);
     if (denied) throw denied;
     // 目錄內的參數在登錄 / 修改時已驗;建立指令前再驗一次(資料庫被直接修改時擋下)
-    const bad = action === 'install' ? argsErrors('installArgs', pkg.installArgs) : argsErrors('uninstallArgs', pkg.uninstallArgs);
+    const bad = action === 'install' ? argsErrors('installArgs', pkg.installArgs, pkg.installerType) : argsErrors('uninstallArgs', pkg.uninstallArgs, pkg.installerType);
     if (bad.length) {
       ctx.log.error({ packageId: pkg.packageId, bad }, '目錄內的安裝參數不符白名單,拒絕派送');
       throw new AppError(409, 'ITA_PACKAGE_INVALID', '套件的安裝參數不符規定,請修改後重新覆核');
