@@ -3,7 +3,11 @@
 #   deploy-test  develop:在主機 2 建置並更新 ItAgentBack(endpoint-server,加入 Gateway 網路)與其 Mongo / Redis
 # 主機需有:${ITA_ENV_FILE}(範本 ItAgentBack/deploy/test.env.example)、ITA_SECRETS_DIR 內的機密檔;
 #           Gateway 已部署(giganexus-gw_default 網路);npm Registry Token 同 GigaItApp(${NPM_TOKEN_FILE})
-stages: [check, deploy-test]
+#   build        tag rustit-v*(自動)或手動:在**主機 2 的 Windows 本機 Runner**(tag windows,P6-4)建置**未簽章**的 Agent / Watchdog exe 與
+#                SHA256SUMS.txt(artifact 保存 30 天);簽章由簽章人員在自己的電腦執行 RustAgent/installer/sign-release.ps1
+#                (私鑰不放 Runner,ADR 0003、PLATFORM-PLAN §4.9 選項 C),再 publish-release.ps1 上架
+# Windows Runner 設定見 docs/WINDOWS-RUNNER-SETUP.md;沒有這個 Runner 時 build 階段的 job 不會被執行(手動 job 不擋 pipeline)
+stages: [check, deploy-test, build]
 
 variables:
   ITA_ENV_FILE: /srv/giganexus/deploy/ita.env
@@ -11,6 +15,10 @@ variables:
 
 .runner: &runner
   tags: [windows-runner]
+
+# 主機 2 的 Windows 本機 Runner(shell executor、PowerShell、concurrent = 1);與上面 WSL 內的 Linux Runner 分開
+.windows-runner: &windows-runner
+  tags: [windows]
 
 check:itagentback:
   <<: *runner
@@ -39,3 +47,31 @@ deploy-test:
     # 冒煙測試:SQL / Mongo / Redis 皆可連線;管理 API 無內部 Token → 401
     - $C exec -T endpoint-server wget -qO- http://127.0.0.1:51240/readyz
     - '$C exec -T endpoint-server node -e "fetch(\"http://127.0.0.1:51240/v1/devices\").then((r) => process.exit(r.status === 401 ? 0 : 1))" && echo "OK   /v1/devices 無內部 Token → 401"'
+
+# 發版建置(P6-4):只產生未簽章檔案與雜湊。tag rustit-v* 自動執行;其他分支手動(allow_failure:沒有 Windows Runner 也不擋 pipeline)
+build:release:
+  <<: *windows-runner
+  stage: build
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^rustit-v/
+    - when: manual
+      allow_failure: true
+  script:
+    - powershell -NoProfile -ExecutionPolicy Bypass -File RustAgent/installer/build-release.ps1 -OutDir release-out
+  artifacts:
+    name: rustit-release-$CI_COMMIT_SHORT_SHA
+    paths:
+      - release-out/
+    expire_in: 30 days
+
+# 相依套件弱點掃描(PLATFORM-PLAN §8 B8):cargo audit 要連 RustSec 資料庫(內網可能連不到,連不到時只記錄,不擋)
+audit:rust:
+  <<: *windows-runner
+  stage: build
+  rules:
+    - when: manual
+      allow_failure: true
+  script:
+    - cd RustAgent
+    - if (-not (Get-Command cargo-audit -ErrorAction SilentlyContinue)) { Write-Error 'Runner 沒有 cargo-audit(cargo install cargo-audit --locked)'; exit 1 }
+    - cargo audit
