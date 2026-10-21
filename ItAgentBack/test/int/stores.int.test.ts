@@ -592,8 +592,8 @@ describe('SQL Server + Mongo + Redis', () => {
     assert.equal((await sw.listPackages({ q: '%' })).length, 0, '關鍵字的萬用字元跳脫');
 
     // 狀態條件更新
-    assert.equal(await sw.updatePackage(p.packageId, 'tested', { notes: 'x', revertToDraft: false }, creator, at, 'int-p7'), false);
-    assert.equal(await sw.updatePackage(p.packageId, 'draft', { installArgs: 'ALLUSERS=1 /norestart', licenseLimit: null, revertToDraft: false }, creator, at, 'int-p7'), true);
+    assert.equal(await sw.updatePackage(p.packageId, 'tested', { notes: 'x', argsChanged: false, revertToDraft: false }, creator, at, 'int-p7'), false);
+    assert.equal(await sw.updatePackage(p.packageId, 'draft', { installArgs: 'ALLUSERS=1 /norestart', licenseLimit: null, argsChanged: true, revertToDraft: false }, creator, at, 'int-p7'), true);
     assert.equal(await sw.publish(p.packageId, reviewer, at, 'int-p7'), false, 'draft 不能發佈');
     assert.equal(await sw.markTested(p.packageId, ['b'.repeat(40)], ['b'.repeat(40), 'c'.repeat(40)], creator, at, 'int-p7'), true);
     assert.equal(await sw.publish(p.packageId, creator, at, 'int-p7'), false, '登錄人不能發佈');
@@ -610,9 +610,19 @@ describe('SQL Server + Mongo + Redis', () => {
       (err: { number?: number }) => err.number === 547,
     );
     // 改安裝參數退回 draft(清除簽章者與覆核)
-    assert.equal(await sw.updatePackage(p.packageId, 'published', { installArgs: 'ALLUSERS=2', revertToDraft: true }, creator, at, 'int-p7'), true);
+    assert.equal(await sw.updatePackage(p.packageId, 'published', { installArgs: 'ALLUSERS=2', argsChanged: true, revertToDraft: true }, creator, at, 'int-p7'), true);
     const back = (await sw.getPackage(p.packageId))!;
     assert.deepEqual([back.status, back.signerThumbprints, back.publishedByEmp, back.testedAt, back.updatedByEmp], ['draft', [], null, null, 'S000001']);
+    // D2-2:覆核人改參數後,自己不能發佈(程式條件與 CHECK)
+    assert.equal(await sw.updatePackage(p.packageId, 'draft', { installArgs: 'ALLUSERS=1', argsChanged: true, revertToDraft: false }, reviewer, at, 'int-p7'), true);
+    assert.equal((await sw.getPackage(p.packageId))!.argsChangedByEmp, 'S000002');
+    assert.equal(await sw.markTested(p.packageId, ['b'.repeat(40)], ['b'.repeat(40)], creator, at, 'int-p7'), true);
+    assert.equal(await sw.publish(p.packageId, reviewer, at, 'int-p7'), false, '最後修改參數的人不能發佈');
+    await assert.rejects(
+      pool.request().input('pid', p.packageId).query(`UPDATE ita.software_package SET published_by_emp = args_changed_by_emp WHERE package_id = @pid`),
+      (err: { number?: number }) => err.number === 547,
+    );
+    assert.equal(await sw.updatePackage(p.packageId, 'tested', { installArgs: 'ALLUSERS=2', argsChanged: true, revertToDraft: true }, creator, at, 'int-p7'), true);
 
     // 指令參數快照:測試結果、下載授權(只認 sent / acked / running)
     const newCmd = (deviceRef: number, dn: string, params: object, batchRef?: string) => ({

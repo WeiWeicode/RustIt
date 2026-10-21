@@ -31,6 +31,7 @@ const log = Fastify({ logger: { level: 'silent' } }).log;
 const ctx = { log, requestId: 'req-sw-1', scope: ALL };
 const IT: GatewayIdentity = { sub: '1', emp: 'S000001', name: '登錄人' };
 const REVIEWER: GatewayIdentity = { sub: '2', emp: 'S000002', name: '覆核人' };
+const THIRD: GatewayIdentity = { sub: '3', emp: 'S000003', name: '第三人' };
 const FILE = '7-Zip/24.09/7z2409-x64.msi';
 const CONTENT = 'MSI-7zip-24.09';
 
@@ -58,6 +59,7 @@ const pkg = (p: Partial<PackageRecord> = {}): PackageRecord => ({
   createdAt: new Date(0),
   updatedByEmp: null,
   updatedAt: null,
+  argsChangedByEmp: null,
   testedByEmp: null,
   testedAt: null,
   publishedByEmp: null,
@@ -79,6 +81,47 @@ describe('參數白名單、偵測規則、軟體庫路徑(純函式)', () => {
     for (const bad of ['TRANSFORMS=evil.mst', '/i other.msi', 'RUN=calc.exe', 'x.ps1', 'PATCH=a.MSP'])
       assert.equal(argsErrors('installArgs', bad).length, 1, `應拒絕:${bad}`);
     for (const bad of ['PIDKEY=XXXXX', 'PASSWORD=1', 'api-key: 1', 'Token=1', 'PRODUCTKEY = A'])
+      assert.equal(argsErrors('installArgs', bad).length, 1, `應拒絕:${bad}`);
+  });
+
+  it('D3:不可讀寫外部檔案;磁碟機路徑只限 Program Files;{ } 只限 GUID', () => {
+    for (const ok of [
+      '/qn /norestart ALLUSERS=1',
+      'INSTALLDIR="C:/Program Files (x86)/Foo Bar/"',
+      '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /LANG=english /DIR="C:/Program Files/Notepad++"',
+      '/S /D=C:/Program Files/App',
+      '/passive /TASKS="desktopicon" /ALLUSERS',
+      'REMOVE={12345678-1234-1234-1234-123456789ABC}',
+    ])
+      assert.deepEqual(argsErrors('installArgs', ok), [], `應接受:${ok}`);
+    for (const bad of [
+      // 外部檔案參數
+      'TRANSFORMS=x',
+      'patch = y',
+      'MSIPATCHREMOVE=z',
+      '/l*v C:/Program Files/a',
+      '/lv out',
+      '-log out',
+      '/LOG="C:/Program Files/a"',
+      '/LOADINF="settings"',
+      '/SAVEINF=a',
+      '/f1"C:/Program Files/setup"',
+      '/p x',
+      '/update x',
+      'CONFIGFILE=y',
+      // 路徑
+      'INSTALLDIR="//server/share/x"',
+      'INSTALLDIR="C:/Windows/System32"',
+      'INSTALLDIR="D:/Program Files/x"',
+      '/D=C:Program Files',
+      'INSTALLDIR="C:/Program Files/../Windows"',
+      'INSTALLDIR=/Windows',
+      '/DIR={sys}',
+      '/DIR="{tmp}/x"',
+      'A=(1)',
+      'A=@file',
+      'A=[WindowsFolder]',
+    ])
       assert.equal(argsErrors('installArgs', bad).length, 1, `應拒絕:${bad}`);
   });
 
@@ -295,6 +338,22 @@ describe('軟體目錄、覆核與派送(SoftwareService + CommandDispatcher)', 
     const detail = await env.software.get(ctx, r.packageId);
     assert.equal(detail.testResults.length, 1, '只列 pilot 的結果');
     assert.deepEqual([detail.testResults[0]!.signer, detail.testResults[0]!.qualifies], [PKG_SIGNER.toUpperCase(), false]);
+  });
+
+  it('D2-2:最後修改安裝參數 / 偵測規則的人不能發佈;只改說明 / 授權數不算', async () => {
+    const r = await register();
+    // 覆核人改了安裝參數 → 之後不能由他發佈(登錄人也不行),要第三人
+    const edited = await env.software.update(ctx, REVIEWER, r.packageId, { installArgs: 'ALLUSERS=2' });
+    assert.equal(edited.argsChangedByEmp, 'S000002');
+    await env.software.update(ctx, THIRD, r.packageId, { notes: '只改說明' });
+    assert.equal((await env.software.get(ctx, r.packageId)).argsChangedByEmp, 'S000002', '改說明不記為參數修改人');
+    await online(pilot);
+    const cmd = await install(pilot, r.packageId);
+    await succeed(pilot, cmd.commandId, PKG_SIGNER);
+    await env.software.markTested(ctx, IT, r.packageId, [PKG_SIGNER]);
+    await assert.rejects(env.software.publish(ctx, REVIEWER, r.packageId), { code: 'ITA_REVIEWER_SAME_AS_EDITOR' });
+    await assert.rejects(env.software.publish(ctx, IT, r.packageId), { code: 'ITA_REVIEWER_SAME_AS_CREATOR' });
+    assert.equal((await env.software.publish(ctx, THIRD, r.packageId)).publishedBy?.emp, 'S000003');
   });
 
   it('撤回:尚未送出的安裝取消;不能再安裝,可移除;不能修改', async () => {

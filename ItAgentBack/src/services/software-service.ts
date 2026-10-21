@@ -1,7 +1,7 @@
 /**
  * 軟體派送(PLATFORM-PLAN P7 §4.6;P7-SOFTWARE-DESIGN §1–§4、§6):軟體目錄、狀態機與兩人覆核、派送前檢查(目錄快照)、授權數、套件下載。
  *   - 狀態機:draft →(pilot 測試機安裝成功、IT 確認簽章者)tested →(第二人)published → revoked;改安裝參數 / 偵測規則退回 draft
- *   - 覆核:published_by ≠ created_by(§9-4);tested_by 可以是建立人
+ *   - 覆核:published_by ≠ created_by(§9-4),也 ≠ 最後修改安裝參數 / 偵測規則的人(D2-2);tested_by 可以是建立人
  *   - 目錄是全公司共用:登錄 / 修改 / 測試完成 / 發佈 / 撤回需 endpoint.software.manage(BFF)且全部公司角色(§9-5)
  *   - draft / tested 只能派到 pilot 環的電腦(放進 / 移出 pilot 需全部公司角色,P6);revoked 不可再安裝(可移除)
  *   - software.install / software.uninstall 的 params 由這裡換成目錄快照(Agent 只信任快照,§2.2);授權數只檢查已發佈套件的安裝(§3.4)
@@ -36,11 +36,38 @@ export const DETECT_TYPES: readonly DetectType[] = ['msi_product_code', 'display
 export const REBOOT_POLICIES: readonly RebootPolicy[] = ['never', 'required'];
 export const PACKAGE_STATUSES: readonly PackageStatus[] = ['draft', 'tested', 'published', 'revoked'];
 
-/** 安裝 / 移除額外參數的字元白名單(§2.3):不含 & | ; < > ^ ` $ \ 與換行 */
-export const ARGS_RE = /^[A-Za-z0-9 /\-_=.:,"{}%]*$/;
+/** 安裝 / 移除額外參數的字元白名單(§2.3):不含 & | ; < > ^ ` $ \ @ [ ] 與換行;路徑用 /;( ) 只為 Program Files (x86);+ 為資料夾名稱(Notepad++) */
+export const ARGS_RE = /^[A-Za-z0-9 /\-_=.:,"{}%()+]*$/;
 export const ARGS_MAX = 500;
-/** 參數不可指到其他可執行檔(MSI 的 TRANSFORMS、PATCH 等;§2.3) */
-const ARGS_FILE = /\.(msi|msp|mst|exe|dll|bat|cmd|ps1|vbs|js)\b/i;
+/** 參數不可指到其他可執行檔、轉換檔、回應檔(MSI 的 TRANSFORMS、PATCH,Inno 的 /LOADINF 等;§2.3、D3) */
+const ARGS_FILE = /\.(msi|msp|mst|exe|dll|bat|cmd|ps1|vbs|js|inf|iss|ini|xml|txt|log|reg|cfg|json)\b/i;
+/**
+ * 會讓安裝程式讀寫外部檔案的參數(D3;安裝程式以 SYSTEM 執行):
+ * MSI 屬性 TRANSFORMS / PATCH / MSIPATCHREMOVE、msiexec /l* 記錄 /p /update /t /a /j、
+ * Inno /LOADINF /SAVEINF /LOG、InstallShield /f1 /f2、Burn / 通用 -log /log /config CONFIGFILE
+ */
+const ARGS_FILE_SWITCH =
+  /(^|[\s"])(TRANSFORMS|PATCH|MSIPATCHREMOVE|CONFIGFILE)\s*=|(^|[\s"])[/-](LOADINF|SAVEINF|LOG|CONFIG|UPDATE|F1|F2|P|T|A|J)(?=[\s=:"]|$)|(^|[\s"])[/-]L[*!+voiwearucmpx]*(?=[\s=:"]|$)/i;
+/** 磁碟機路徑只允許 C:/Program Files/ 與 C:/Program Files (x86)/ 底下(D3) */
+const ARGS_DRIVE = /(^|[\s="])[A-Za-z]:/g;
+const ARGS_DRIVE_OK = /^[Cc]:\/Program Files( \(x86\))?\//i;
+/** { } 只用於 GUID(MSI 產品代碼);Inno 常數 {sys} {tmp} {src} 等會展開成系統路徑 */
+const ARGS_BRACE = /\{[^}]*\}?/g;
+const ARGS_GUID = /^\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}$/;
+
+/** D3:路徑類檢查(字元白名單通過後);回傳錯誤訊息或 null */
+function argsPathError(v: string): string | null {
+  if (v.includes('//')) return '不可使用網路路徑(UNC)';
+  if (v.includes('..')) return '路徑不可含 ..';
+  if (/=\s*"?\//.test(v)) return '參數值不可以 / 開頭(根目錄路徑);路徑需為 C:/Program Files/ 或 C:/Program Files (x86)/ 底下';
+  for (const m of v.matchAll(ARGS_DRIVE)) {
+    const at = (m.index ?? 0) + m[1]!.length;
+    if (!ARGS_DRIVE_OK.test(v.slice(at))) return '磁碟機路徑只允許 C:/Program Files/ 或 C:/Program Files (x86)/ 底下(路徑用 /)';
+  }
+  for (const m of v.matchAll(ARGS_BRACE)) if (!ARGS_GUID.test(m[0])) return '{ } 只能用於 GUID(MSI 產品代碼)';
+  if (/[()]/.test(v.replace(/Program Files \(x86\)/gi, ''))) return '( ) 只能出現在 Program Files (x86)';
+  return null;
+}
 /** 參數不可含機密(序號、密碼;沿用 logs.collect 遮罩關鍵字,§5.6、§7);不加字首邊界,PIDKEY= / PRODUCTKEY= 也擋 */
 const ARGS_SECRET = /(token|password|passwd|pwd|secret|api[_-]?key|key)\s*[=:]/i;
 export const MSI_PRODUCT_CODE_RE = /^\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}$/;
@@ -61,8 +88,11 @@ type Field = { field: string; message: string };
 export function argsErrors(field: string, v: string | null | undefined): Field[] {
   if (v == null || v === '') return [];
   if (v.length > ARGS_MAX) return [{ field, message: `最多 ${ARGS_MAX} 字` }];
-  if (!ARGS_RE.test(v)) return [{ field, message: '只允許英數字、空白與 / - _ = . : , " { } %(不可含 & | ; < > ^ ` $ \\ 與換行)' }];
-  if (ARGS_FILE.test(v)) return [{ field, message: '不可指到其他檔案(.msi / .exe / .mst / .dll / 指令檔)' }];
+  if (!ARGS_RE.test(v)) return [{ field, message: '只允許英數字、空白與 / - _ = . : , " { } % ( ) +(不可含 & | ; < > ^ ` $ \\ @ 與換行;路徑請用 /)' }];
+  if (ARGS_FILE.test(v)) return [{ field, message: '不可指到其他檔案(.msi / .exe / .mst / .dll / 指令檔 / 回應檔 / 設定檔)' }];
+  if (ARGS_FILE_SWITCH.test(v)) return [{ field, message: '不可使用讀寫外部檔案的參數(TRANSFORMS、PATCH、/l*、/LOADINF、/SAVEINF、/LOG、/f1 等)' }];
+  const pathErr = argsPathError(v);
+  if (pathErr) return [{ field, message: pathErr }];
   if (ARGS_SECRET.test(v)) return [{ field, message: '不可含序號、密碼、金鑰類參數(需要序號的軟體不在派送支援範圍)' }];
   return [];
 }
@@ -174,6 +204,7 @@ export interface PackageView {
   createdAt: string;
   updatedByEmp: string | null;
   updatedAt: string | null;
+  argsChangedByEmp: string | null;
   testedByEmp: string | null;
   testedAt: string | null;
   publishedBy: { emp: string; name: string | null } | null;
@@ -206,6 +237,7 @@ export function packageView(p: PackageRecord, installedCount: number | null): Pa
     createdAt: p.createdAt.toISOString(),
     updatedByEmp: p.updatedByEmp,
     updatedAt: p.updatedAt?.toISOString() ?? null,
+    argsChangedByEmp: p.argsChangedByEmp,
     testedByEmp: p.testedByEmp,
     testedAt: p.testedAt?.toISOString() ?? null,
     publishedBy: p.publishedByEmp ? { emp: p.publishedByEmp, name: p.publishedByName } : null,
@@ -403,6 +435,7 @@ export class SoftwareService {
       licenseLimit: next.licenseLimit,
       ...(input.rebootPolicy !== undefined ? { rebootPolicy: input.rebootPolicy } : {}),
       ...(input.notes !== undefined ? { notes: trimOrNull(input.notes) } : {}),
+      argsChanged: reviewed,
       revertToDraft: reviewed && pkg.status !== 'draft',
     };
     const ok = await this.sqlDo(ctx, 'package.update', () => this.store.updatePackage(packageId, pkg.status, patch, actorOf(who), this.now(), ctx.requestId));
@@ -488,16 +521,18 @@ export class SoftwareService {
     return this.view(ctx, packageId);
   }
 
-  /** tested → published:第二人(published_by ≠ created_by,§9-4) */
+  /** tested → published:第二人(published_by ≠ created_by,§9-4;≠ 最後修改安裝參數 / 偵測規則的人,D2-2) */
   async publish(ctx: MgmtCtx, who: GatewayIdentity, packageId: string): Promise<PackageView> {
     this.requireAll(ctx);
     const pkg = await this.found(ctx, packageId);
     if (pkg.status !== 'tested') throw new AppError(409, 'ITA_PACKAGE_STATUS', `此套件目前為 ${pkg.status},只有 tested 可發佈`);
     const actor = actorOf(who);
     if (actor.emp === pkg.createdByEmp) throw new AppError(403, 'ITA_REVIEWER_SAME_AS_CREATOR', '發佈人不可是登錄人,請由另一位 IT 覆核後發佈');
+    if (actor.emp === pkg.argsChangedByEmp)
+      throw new AppError(403, 'ITA_REVIEWER_SAME_AS_EDITOR', '發佈人不可是最後修改安裝參數 / 偵測規則的人,請由另一位 IT 覆核後發佈');
     const ok = await this.sqlDo(ctx, 'package.publish', () => this.store.publish(packageId, actor, this.now(), ctx.requestId));
     if (!ok) throw new AppError(409, 'ITA_PACKAGE_STATUS', '套件狀態已被變更,請重新整理');
-    ctx.log.info({ packageId, name: pkg.name, version: pkg.version, createdBy: pkg.createdByEmp, publishedBy: actor.emp }, '發佈軟體套件');
+    ctx.log.info({ packageId, name: pkg.name, version: pkg.version, createdBy: pkg.createdByEmp, argsChangedBy: pkg.argsChangedByEmp, publishedBy: actor.emp }, '發佈軟體套件');
     return this.view(ctx, packageId);
   }
 

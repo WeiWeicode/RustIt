@@ -80,6 +80,7 @@ export class MemorySoftwareStore implements SoftwareStore {
       createdAt: n.at,
       updatedByEmp: null,
       updatedAt: null,
+      argsChangedByEmp: null,
       testedByEmp: null,
       testedAt: null,
       publishedByEmp: null,
@@ -94,9 +95,10 @@ export class MemorySoftwareStore implements SoftwareStore {
   async updatePackage(packageId: string, expect: PackageStatus, patch: PackagePatch, actor: Actor, at: Date) {
     const p = this.packages.find((x) => x.packageId === packageId);
     if (!p || p.status !== expect) return false;
-    const { revertToDraft, ...fields } = patch;
+    const { revertToDraft, argsChanged, ...fields } = patch;
     for (const [k, v] of Object.entries(fields)) if (v !== undefined) (p as unknown as Record<string, unknown>)[k] = v;
     Object.assign(p, { updatedByEmp: actor.emp, updatedAt: at });
+    if (argsChanged) p.argsChangedByEmp = actor.emp;
     if (revertToDraft)
       Object.assign(p, {
         status: 'draft',
@@ -117,7 +119,7 @@ export class MemorySoftwareStore implements SoftwareStore {
   }
   async publish(packageId: string, actor: Actor, at: Date) {
     const p = this.packages.find((x) => x.packageId === packageId);
-    if (!p || p.status !== 'tested' || p.createdByEmp === actor.emp || p.signerThumbprints.length === 0) return false;
+    if (!p || p.status !== 'tested' || p.createdByEmp === actor.emp || p.argsChangedByEmp === actor.emp || p.signerThumbprints.length === 0) return false;
     Object.assign(p, { status: 'published', publishedByEmp: actor.emp, publishedByName: actor.name, publishedAt: at });
     return true;
   }

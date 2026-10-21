@@ -750,6 +750,8 @@ export interface PackageRecord {
   createdAt: Date;
   updatedByEmp: string | null;
   updatedAt: Date | null;
+  /** 最後修改安裝參數 / 偵測規則的人(發佈人不可是此人,D2-2) */
+  argsChangedByEmp: string | null;
   testedByEmp: string | null;
   testedAt: Date | null;
   publishedByEmp: string | null;
@@ -787,6 +789,8 @@ export interface PackagePatch {
   rebootPolicy?: RebootPolicy;
   licenseLimit?: number | null;
   notes?: string | null;
+  /** 改到安裝參數 / 偵測規則:記錄修改人(args_changed_by_emp) */
+  argsChanged: boolean;
   revertToDraft: boolean;
 }
 
@@ -816,7 +820,7 @@ export interface SoftwareStore {
   updatePackage(packageId: string, expect: PackageStatus, patch: PackagePatch, actor: Actor, at: Date, requestId: string): Promise<boolean>;
   /** draft → tested(寫入預期與實際簽章者) */
   markTested(packageId: string, signers: string[], observed: string[], actor: Actor, at: Date, requestId: string): Promise<boolean>;
-  /** tested → published,且 created_by_emp ≠ 發佈人 */
+  /** tested → published,且發佈人 ≠ created_by_emp、≠ args_changed_by_emp */
   publish(packageId: string, actor: Actor, at: Date, requestId: string): Promise<boolean>;
   /** 非 revoked → revoked;同一交易取消此套件尚未送出(queued)的 software.install */
   revoke(packageId: string, actor: Actor, at: Date, requestId: string): Promise<{ ok: boolean; canceledCommands: number }>;
