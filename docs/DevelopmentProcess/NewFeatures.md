@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-21 P6-2 VM 驗收完成
+- 內容:測試區 VM `RUSTIT-P34` 完成設計 §8.4 步驟 0~9:升級成功、兩種壞版本還原且失敗 2 次後停止、未簽章 / 簽章者不符拒絕、`agent.upgrade`、降版、升級中重開機收尾皆通過;步驟 9 因 `logs.collect` 太快只算部分。待補項目併入 P6-3。
+- 檔案:`docs/test-reports/2026-10-21-p6-2-watchdog-upgrade.md`(新)、`docs/P6-UPGRADE-DESIGN.md`、`docs/HANDOFF.md`
+- 驗證:VM 日誌(`watchdog-*.log`)、`GET /api/endpoint/devices/{id}/upgrade`、`ita.device_event`;pilot 目標驗收後已清空
+
 ## 2026-10-20 P7 軟體派送設計草案
 - 內容:新增 `docs/P7-SOFTWARE-DESIGN.md`(待需求方確認 §9,確認前不動程式)。依 PLATFORM-PLAN §4.6、ADR 0002、B1 與 A6:分 P7-1 軟體目錄與下載(migration 0008、兩人覆核狀態機、參數快照、`GET /agent/v1/packages/{id}`、授權數)、P7-2 Agent `software` 模組(從 `deploy.rs` 移植,Agent 0.8.0)、P7-3 `system.reboot` 與批次第二人核可(> 20 台)、P7-4 NAS 唯讀掛載、P7-5 GigaItApp 軟體派送頁、P7-6 收尾。重點決定待確認:未簽章套件由公司憑證加簽(§9-2)、覆核與核可規則、重開機政策、A6 延後上限。
 - 檔案:`docs/P7-SOFTWARE-DESIGN.md`(新)、`docs/PLATFORM-PLAN.md`(§5.2 migration 編號、進度列)、`docs/HANDOFF.md`
