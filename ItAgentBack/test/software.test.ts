@@ -559,6 +559,25 @@ describe('軟體目錄、覆核與派送(SoftwareService + CommandDispatcher)', 
     assert.equal((await install(a, id)).batchState, null);
   });
 
+  it('M3:大量電腦同時重連,全域並行上限不會被超過', async () => {
+    env = setupSoftware({ approvalThreshold: 10_000, maxConcurrent: 2 });
+    pilot = await addDevice('PC-PILOT', 1);
+    env.store.ringOf.set(pilot.id, 'pilot');
+    env.dir.put(FILE, CONTENT);
+    const id = await published();
+    const devices = [];
+    for (let i = 0; i < 6; i++) {
+      const d = await addDevice(`PC-STORM-${i}`, 200 + i);
+      await install(d, id);
+      devices.push(d);
+    }
+    for (const d of devices) await online(d);
+    // 同時 hello 補送
+    await Promise.all(devices.map((d) => env.commands.onHello(ctx, d.id)));
+    const active = env.commandStore.commands.filter((c) => c.kind === 'software.install' && ['sent', 'acked', 'running'].includes(c.state));
+    assert.equal(active.length, 2);
+  });
+
   it('全域並行上限補送:最舊的 200 筆以上都是離線電腦時,後面在線的仍補送得到', async () => {
     // 累計核可門檻(D2-1)放大,只測補送
     env = setupSoftware({ approvalThreshold: 10_000 });

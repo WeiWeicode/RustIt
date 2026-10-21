@@ -680,16 +680,30 @@ export class CommandDispatcher {
   // ---------- 推送 ----------
 
   /** queued 且未逾期、裝置在線、批次未達上限 → 改 sent 後送出;回傳送出後的紀錄(沒送回 null)。失敗只記錄,留在 queued */
+  /** 有上限的指令送出前的「計數 → 改為 sent」序列化(M3) */
+  private sendGate: Promise<unknown> = Promise.resolve();
+
+  private reserve(fn: () => Promise<boolean>): Promise<boolean> {
+    const run = this.sendGate.then(fn, fn);
+    this.sendGate = run.catch(() => undefined);
+    return run;
+  }
+
   private async trySend(ctx: Ctx, cmd: CommandRecord): Promise<CommandRecord | null> {
     const at = this.now();
     if (cmd.state !== 'queued' || cmd.expiresAt <= at || !this.channel.isOnline(cmd.deviceId)) return null;
     // 待核可、駁回、逾期的批次不送出(B1)
     if (cmd.batchState && !SENDABLE.includes(cmd.batchState)) return null;
     try {
-      if (cmd.batchRef && cmd.batchMaxConcurrent && (await this.store.activeInBatch(cmd.batchRef)) >= cmd.batchMaxConcurrent) return null;
-      // 全域並行上限(軟上限:不同批次 / 單台的補送之間不加鎖,可能略為超過)
-      if (this.limited?.kinds.includes(cmd.kind) && (await this.store.activeOfKinds(this.limited.kinds)) >= this.limited.max) return null;
-      if (!(await this.store.transition(cmd.id, ['queued'], { state: 'sent', at }))) return null;
+      const claim = async () => {
+        if (cmd.batchRef && cmd.batchMaxConcurrent && (await this.store.activeInBatch(cmd.batchRef)) >= cmd.batchMaxConcurrent) return false;
+        // 全域並行上限
+        if (this.limited?.kinds.includes(cmd.kind) && (await this.store.activeOfKinds(this.limited.kinds)) >= this.limited.max) return false;
+        return this.store.transition(cmd.id, ['queued'], { state: 'sent', at });
+      };
+      // 有上限的(批次、軟體派送):「計數 → 改為 sent」在本行程內序列化,大量電腦同時重連時不會超過上限(單一實例;資安稽核 M3)
+      const limited = !!cmd.batchRef || !!this.limited?.kinds.includes(cmd.kind);
+      if (!(await (limited ? this.reserve(claim) : claim()))) return null;
       const body = {
         command_id: cmd.commandId,
         kind: cmd.kind,
