@@ -34,7 +34,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File install-runner-tools.ps1
 | Rust stable MSVC(`--profile minimal`) | `RUSTUP_HOME=C:\Rust\rustup`、`C:\Rust\cargo\bin` | 1.99.1 |
 | PowerShell 7(Runner 的 shell,見 §3 步驟 4) | `C:\Program Files\PowerShell\7`(驗 Microsoft 簽章) | 7.6.7 |
 | VS 2022 Build Tools(`Microsoft.VisualStudio.Workload.VCTools`,含 Windows SDK) | `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools` | MSVC 14.44 |
-| (選用)`cargo-audit` | `cargo install cargo-audit --locked` | 未裝 |
+| `cargo-audit`(`audit:rust` 用;腳本不裝,另外執行,見 §6) | `C:\Rust\cargo\bin\cargo-audit.exe` | 0.22.2 |
 
 - 以上目錄都加入**系統** PATH;`RUSTUP_HOME` 設為系統環境變數。`CARGO_HOME`(crate 下載快取)**不**放 `C:\Rust`,由 Runner 設定指到服務帳號可寫的 `C:\ci\cargo-home`(§3 步驟 3)。
 - 腳本要存成 **UTF-8 含 BOM**:Windows PowerShell 5.1 在 CP950(Big5)系統讀無 BOM 的 UTF-8 會變亂碼並語法錯誤。
@@ -105,5 +105,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File install-runner-tools.ps1
 | 重設服務帳號密碼(需求方) | `$pw = Read-Host -AsSecureString`;`Set-LocalUser gitlab-runner-svc -Password $pw`;再 `$c = New-Object PSCredential('.\gitlab-runner-svc', $pw); $s = Get-CimInstance Win32_Service -Filter "Name='gitlab-runner'"; Invoke-CimMethod -InputObject $s -MethodName Change -Arguments @{StartName=$c.UserName; StartPassword=$c.GetNetworkCredential().Password}; Restart-Service gitlab-runner` |
 | 改 `config.toml` 後 | `Restart-Service gitlab-runner`(或等 Runner 自動重新載入) |
 | 升級工具 | 重跑 `install-runner-tools.ps1` 只補缺的;Rust 升版用 `rustup update`(以系統管理員、`RUSTUP_HOME=C:\Rust\rustup`、`CARGO_HOME=C:\Rust\cargo` 執行) |
+| 安裝 `cargo-audit` 等 cargo 工具 | 以系統管理員、`RUSTUP_HOME=C:\Rust\rustup`、`CARGO_HOME=C:\Rust\cargo` 執行 `cargo install cargo-audit --locked`(主機 2 約 11 分鐘)。**裝完要 `icacls C:\Rust\cargo\bin\cargo-audit.exe /reset`**:`cargo install` 是從暫存目錄搬檔,沿用暫存目錄的 ACL,不繼承 `C:\Rust`,服務帳號會無法執行 |
 | 以系統管理員在建置目錄下 git 指令 | 目錄擁有者是 `gitlab-runner-svc`,git 會報 `dubious ownership`;只讀檢查時用 `git -c safe.directory=<路徑> …`,不要加全域例外 |
 | Runner 記錄 | 事件檢視器 → 應用程式,來源 `gitlab-runner`;`request_concurrency=1` 的 long polling 警告在 `concurrent = 1` 下可忽略 |
