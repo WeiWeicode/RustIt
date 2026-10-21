@@ -433,6 +433,10 @@ export class SoftwareService {
 
   async register(ctx: MgmtCtx, who: GatewayIdentity, input: RegisterPackageInput): Promise<PackageView> {
     this.requireAll(ctx);
+    // 名稱 / 版本會顯示在覆核畫面:不可含控制字元與雙向文字控制字元(資安稽核 L8)
+    const plain = [['name', input.name], ['version', input.version]].filter(([, s]) => !DISPLAY_NAME_RE.test(s!));
+    if (plain.length)
+      throw new AppError(400, 'VALIDATION_FAILED', '名稱 / 版本不可含控制字元', plain.map(([field]) => ({ field: field!, message: '不可含控制字元或雙向文字控制字元' })));
     const parts = splitSoftwarePath(input.fileName);
     if (!parts) throw new AppError(400, 'VALIDATION_FAILED', '檔案路徑需為 {軟體}/{版本}/{檔名}.msi 或 .exe', [{ field: 'fileName', message: '格式不符' }]);
     const fileName = parts.join('/');
@@ -503,7 +507,20 @@ export class SoftwareService {
     };
     const ok = await this.sqlDo(ctx, 'package.update', () => this.store.updatePackage(packageId, pkg.status, patch, actorOf(who), this.now(), ctx.requestId));
     if (!ok) throw new AppError(409, 'ITA_PACKAGE_STATUS', '套件狀態已被變更,請重新整理');
-    ctx.log.info({ packageId, reviewed, revertedFrom: patch.revertToDraft ? pkg.status : undefined, emp: actorOf(who).emp }, '修改軟體套件');
+    // 稽核:受覆核欄位的新舊值(目錄規定不得含機密,§5.6;資安稽核 M4)
+    const changed = (['installArgs', 'uninstallArgs', 'detectType', 'detectValue', 'rebootPolicy', 'licenseLimit'] as const).filter(
+      (k) => patch[k] !== undefined && patch[k] !== pkg[k],
+    );
+    ctx.log.info(
+      {
+        packageId,
+        reviewed,
+        revertedFrom: patch.revertToDraft ? pkg.status : undefined,
+        emp: actorOf(who).emp,
+        changes: Object.fromEntries(changed.map((k) => [k, { from: pkg[k], to: patch[k] }])),
+      },
+      '修改軟體套件',
+    );
     return this.view(ctx, packageId);
   }
 
@@ -638,6 +655,9 @@ export class SoftwareService {
     const ring = reviewed ? null : await this.sqlDo(ctx, 'device.ring', () => this.store.deviceRing(deviceRef));
     const denied = deployDenied(pkg, ring, action);
     if (denied) throw denied;
+    // 未經覆核的套件派到測試機:路由只能掛 endpoint.command.admin,另要求全部公司角色(與目錄管理同一群人;資安稽核 M5)
+    if (!reviewed && !(ctx as Partial<MgmtCtx>).scope?.all)
+      throw new AppError(403, 'ITA_SCOPE_ALL_REQUIRED', '尚未發佈的套件只能由可管理所有公司的角色派送到測試機');
     // 目錄內的參數在登錄 / 修改時已驗;建立指令前再驗一次(資料庫被直接修改時擋下)
     const bad = action === 'install' ? argsErrors('installArgs', pkg.installArgs, pkg.installerType) : argsErrors('uninstallArgs', pkg.uninstallArgs, pkg.installerType);
     if (bad.length) {
@@ -662,7 +682,8 @@ export class SoftwareService {
     const already = new Set(hits.map((h) => h.deviceRef));
     const adding = deviceRefs.filter((r) => !already.has(r)).length;
     if (installed + adding > pkg.licenseLimit)
-      throw new AppError(409, 'ITA_LICENSE_EXCEEDED', `${pkg.name} 授權數 ${pkg.licenseLimit},已安裝 ${installed} 台,本次新增 ${adding} 台會超過`, [
+      // 不回全公司已安裝台數(資料範圍受限的使用者也會看到,資安稽核 L6)
+      throw new AppError(409, 'ITA_LICENSE_EXCEEDED', `${pkg.name} 授權數 ${pkg.licenseLimit},本次新增 ${adding} 台會超過`, [
         { field: 'deviceIds', message: `可再安裝 ${Math.max(0, pkg.licenseLimit - installed)} 台` },
       ]);
   }

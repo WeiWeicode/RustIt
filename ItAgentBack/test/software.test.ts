@@ -281,6 +281,15 @@ describe('軟體目錄、覆核與派送(SoftwareService + CommandDispatcher)', 
     await assert.rejects(install(pilot, '00000000-0000-4000-8000-000000000000'), { code: 'ITA_PACKAGE_NOT_FOUND' });
   });
 
+  it('M5:未發佈的套件派到測試機需全部公司角色', async () => {
+    const r = await register();
+    env.sql.byId(pilot.id).company = '甲公司';
+    await assert.rejects(env.commands.create({ ...ctx, scope: only('甲公司') }, IT, 'admin', pilot.deviceId, { kind: 'software.install', params: { packageId: r.packageId } }), {
+      code: 'ITA_SCOPE_ALL_REQUIRED',
+    });
+    assert.equal((await install(pilot, r.packageId)).kind, 'software.install');
+  });
+
   it('mark-tested:需 pilot 安裝成功;簽章者需等於回報值;發佈需第二人;改參數退回 draft', async () => {
     const r = await register();
     await assert.rejects(env.software.markTested(ctx, IT, r.packageId, [PKG_SIGNER]), { code: 'ITA_PACKAGE_NOT_TESTED' });

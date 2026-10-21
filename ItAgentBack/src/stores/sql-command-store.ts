@@ -344,7 +344,7 @@ export class SqlCommandStore implements CommandStore, CommandFileStore {
         BEGIN TRAN;
         DECLARE @ok BIT;
         UPDATE ita.command_batch SET state = 'running', approved_by_emp = @emp, approved_by_name = @name, approved_at = @at
-        WHERE id = @batch AND state = 'pending_approval' AND created_by_emp <> @emp;
+        WHERE id = @batch AND state = 'pending_approval' AND created_by_emp <> @emp AND created_at > DATEADD(HOUR, -24, @at);
         SET @ok = CASE WHEN @@ROWCOUNT > 0 THEN 1 ELSE 0 END;
         -- 待核可期間不倒數:有效期限自核可時起算
         IF @ok = 1 UPDATE ita.command SET expires_at = @exp, updated_at = SYSUTCDATETIME() WHERE batch_ref = @batch AND state = 'queued';

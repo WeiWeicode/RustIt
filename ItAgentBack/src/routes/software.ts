@@ -147,7 +147,8 @@ export function softwareRoutes(software: SoftwareService): FastifyPluginAsync {
           summary: '尚未登錄的安裝檔',
           description: '軟體庫({軟體}/{版本}/{安裝檔},.msi 或 .exe)中尚未登錄的檔案,給登錄畫面挑選。IT 把測過的安裝檔放進軟體庫後才會出現。',
           tags: TAGS,
-          'x-permission': 'endpoint.device.read',
+          // 軟體庫的檔名只給目錄管理者(資安稽核 L9)
+          'x-permission': 'endpoint.software.manage',
           'x-gherkin': [
             '場景: 列出尚未登錄的安裝檔',
             '  假如 軟體庫有 7-Zip/24.09/7z2409-x64.msi 且尚未登錄',
