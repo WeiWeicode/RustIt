@@ -2,7 +2,7 @@
 
 > 草案 2026-10-20,分支 `docs/p7-software-design`(從 develop `948adf1` 開,P6-2 已合併)。依據:PLATFORM-PLAN §4.4、§4.6、§4.10 A6、§5、§8 P7 列、§8 B1;[ADR 0002](decisions/0002-software-deployment.md)(採方案 B)、[ADR 0003](decisions/0003-code-signing-pki.md);`P4-COMMAND-DESIGN.md`(指令通道、批次);`P6-UPGRADE-DESIGN.md`(`authenticode`、本機信任清單、版本檔目錄、下載 API 模式);`contracts/command-kinds.md`。
 > **狀態**:2026-10-20 需求方確認 §9 全部:第 2 項依建議(未簽章套件由公司憑證加簽),第 11 項先用需求方自己的本機電腦(開發機)加 VM `RUSTIT-P34`,另一台 IT 同意的電腦之後再補;其餘照建議。可開工 P7-1。
-> **進度(2026-10-21,P7-1 未完成)**:P6 已於 2026-10-21 完成,P7 接續。分支 `feature/p7-1-software-catalog`(從本設計分支開,worktree `../RustIt-p7-1`)已推到 gitlab / origin,2026-10-21 已合併 develop(P6 完成),**MR 尚未開**。P7-1 後端實作完成:migration 0008(**只套用整合測試庫 `_poc_test`**)、軟體目錄與兩人覆核、`software.*` / `system.reboot` 指令與參數快照、套件下載、批次第二人核可、全域並行上限;`npm test` 200/200、`test:int` 13/13、typecheck / build 通過。code-reviewer 審查已處理(§8.1);**security-auditor 的報告未完整取得,下一步先重跑並處理**(見 §8.1.1「接手」)。
+> **進度(2026-10-21,P7-1 後端完成、待 MR)**:P6 已於 2026-10-21 完成,P7 接續。分支 `feature/p7-1-software-catalog`(worktree `../RustIt-p7-1`)已推到 gitlab / origin,**MR 尚未開**。P7-1 後端實作完成:migration 0008(**只套用整合測試庫 `_poc_test`**)、軟體目錄與兩人覆核、`software.*` / `system.reboot` 指令與參數快照、套件下載、批次第二人核可與累計核可、全域並行上限、三個告警規則;需求方 2026-10-21 決定 D1~D6 全部照建議、資安稽核(重跑)已修大部分項目(§8.1.1)。測試:`npm test` 210/210、`test:int` 13/13、typecheck 通過(報告 `test-reports/2026-10-21-p7-1-backend.md`)。下一步:主工作階段處理 code-reviewer 結果後開 MR(HANDOFF §2 1-6)。
 > 設計當時的現況:Agent 0.7.0、Watchdog 0.2.0(P6-2 已合併 develop);`rustit-common::authenticode`(WinVerifyTrust + 簽章者指紋)與 `agent.toml` `[upgrade] trusted_signers` 已有;`ita.command_batch` 已有 `requires_approval` / `approved_by_*` 欄位(P4 預留、無邏輯);`kindHooks`、批次 `max_concurrent` 補送(`refillBatch`)已有;`ita.device_software`(P3)有每台最新軟體清單;**NAS `RustIT\` 未掛載、軟體目錄與 `software.*` 指令都還沒有**。`RustAgent/crates/demo/src/deploy.rs`(536 行,Firefox / WinRAR 單機版)是移植來源。
 
 ## 0. 分批
@@ -90,12 +90,16 @@ IT 只送 `{ packageId }`;Server 建立指令時查目錄(必須 `published`,測
 
 ### 2.3 安裝參數的限制(防止把「靜默參數」變成任意程式執行)
 
-`install_args` / `uninstall_args` 由 IT 輸入,風險等於可在全公司電腦以 SYSTEM 執行指令,所以:
+`install_args` / `uninstall_args` 由 IT 輸入,風險等於可在全公司電腦以 SYSTEM 執行指令,所以(D3,2026-10-21 需求方同意;資安稽核 H2):
 
 - Agent 一律 `CreateProcess` 直接執行**已驗證的下載檔案**(MSI 是 `msiexec.exe /i <檔> …`),**不經 `cmd.exe` / PowerShell**;不使用 shell 展開。
-- 參數字元白名單:`[A-Za-z0-9 /\-_=.:,"{}%]`,不含 `& | ; < > ^ \` $ \r \n`;長度 ≤ 500;主機建立與登錄時驗,Agent 執行前再驗一次,不符 `INVALID_PARAMS`。
-- 不允許把 `installer_type = msi` 的參數指到其他檔案(出現 `.msi` / `.exe` / `\\` 開頭的路徑一律拒絕)。
-- 這兩個欄位與簽章者一起,屬於「第二人覆核」要看的內容(§3.2)。
+- 參數字元白名單:`[A-Za-z0-9 /\-_=.:,"{}%()+]`,不含 `& | ; < > ^ \` $ \ @ [ ] ~ ?` 與換行;路徑一律用 `/`;`( )` 只為 `Program Files (x86)`,`+` 為資料夾名稱(`Notepad++`);長度 ≤ 500;主機建立與登錄時驗,Agent 執行前再驗一次,不符 `INVALID_PARAMS`。
+- **依 `installer_type` 逐一檢查每個參數**(斷詞後):引號只能包住整個值;MSI 只接受「屬性=值」(`/qn`、`/norestart`、記錄檔由 Agent 加上);其他類型的開關比對禁止清單。
+- **禁止讀寫外部檔案或改變安裝方式**:屬性 `TRANSFORMS*`、`PATCH*`、`MSIPATCHREMOVE`、`SOURCELIST` / `INSTALLSOURCE` / `ADDSOURCE`、`REINSTALL*`、`REBOOT`、`ARPSYSTEMCOMPONENT`、`*FILE`、`CONFIG*`、`PIDKEY` 等;開關 `/l*`、`/log`、`/loadinf`、`/saveinf`、`/f1`、`/v`、`/i`、`/p`、`/y`、`/update`、`/layout`、`/uninstall`、`-burn.*`、Inno `/SILENT` `/PASSWORD`、NSIS `/NCRC` 等。完整清單與邊界案例以測試向量為準。
+- **路徑值**:禁止 UNC(`//`)、`..`、根目錄與相對路徑、替代資料流(`:`);磁碟機路徑只允許 `C:/Program Files/`、`C:/Program Files (x86)/` 底下;`{ }` 只能用於 GUID(MSI 產品代碼);NSIS 的 `/D=` 必須放最後、不加引號。
+- 不允許把參數指到其他檔案(出現 `.msi` / `.exe` / `.mst` / `.inf` / `.iss` / `.ini` / `.xml` / `.txt` / `.log` / `.reg` / `.cfg` / `.json` 等副檔名一律拒絕)。
+- **測試向量**:[`contracts/install-args.vectors.json`](contracts/install-args.vectors.json)(`valid` / `invalid` 兩組,含 `installer_type`)。ItAgentBack `argsErrors(field, value, installerType)` 與 Agent(P7-2)吃同一份,Agent 端實作必須通過全部向量。
+- 這兩個欄位與簽章者一起,屬於「第二人覆核」要看的內容(§3.2);修改後覆核人規則見 §8.1.1 D2-2。
 
 ### 2.4 `result` 與錯誤代碼
 
@@ -289,24 +293,48 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
 - **Agent**:`software` 以假實作測試——成功(MSI / Inno / NSIS)、`3010` 標記重開機、`1638` 已安裝、`1618` 重試後成功 / 失敗、逾時、`HASH_MISMATCH`(沒有啟動安裝程式)、`SIGNATURE_INVALID`、`SIGNER_NOT_TRUSTED`、已安裝時跳過、偵測失敗、移除輪詢(NSIS 自我複製)、A6 延後與恢復 / 逾時、斷線補送、重複 `command_id` 不重跑、參數字元白名單、`system.reboot` 排程與取消;`power.rs` 以注入測試。
 - **契約**:`command-kinds.md` 對應範例檔,兩端吃同一份。
 
-### 8.1.1 P7-1 實作與審查(2026-10-20,未完成)
+### 8.1.1 P7-1 實作、需求方決定與資安稽核(2026-10-21)
 
-- **與設計的差異(實作時決定,待需求方確認)**:
-  - 批次派送 `POST /v1/software/{id}/deploy` 的 `x-permission` 為 `endpoint.command.admin`(BFF 一個 operation 只能一個權限,與單台 admin-commands 一致);核可 / 駁回為 `endpoint.software.manage`,另檢查核可人的資料範圍涵蓋批次全部電腦。
-  - 核可路由沿用 P4 路徑:`POST /v1/batches/{id}/approve`、`/reject`、`GET /v1/batches/{id}`(設計寫 `/command-batches`)。
-  - 路徑段白名單多允許 `+`(範例 `Notepad++`);安裝檔只接受 `.msi`(installer_type msi)與 `.exe`(其他)。
-  - MSI 產品代碼由 IT 填(主機不解析 MSI);授權數不計尚未完成的派送(軟上限)。
-  - `uninstall` 可對已撤回的套件執行;`draft` / `tested` 的移除同樣只限 pilot。
-  - `system.reboot` 類型已可建立,Agent 0.7 回 `UNSUPPORTED_COMMAND`(Agent 端在 P7-3)。
-  - 主機取消指令時寫 `error_code`:`PACKAGE_REVOKED`、`BATCH_REJECTED`、`APPROVAL_EXPIRED`。
-  - 告警規則 `software_install_failed`、`reboot_pending`(§3.1)**尚未做**;套件被換掉只記 error 日誌、回 503,未開告警。
-- **code-reviewer(無必修,已處理)**:全域補送分頁掃描(避免最舊 200 筆都是離線電腦時餓死);LIKE 樣式參數 800 字;`markTested` 服務層擋空簽章者、實際簽章者不截斷;`rooted-files` 只有不存在回 null,權限 / 掛載錯誤回 503 `ITA_FILES_UNAVAILABLE`(P6 版本檔目錄同樣受惠);`params LIKE` 以 `created_at` 收斂(撤回 7 天、測試結果 180 天);重讀批次失敗記 warn;補測試(核可人範圍 404、空簽章者)。另自行修正:同一個 Idempotency-Key 用在另一個套件回 422(批次與單台)。
-- **security-auditor(報告未完整取得)**:只收到摘要——H1 安裝參數白名單可能擋不住「讓 msiexec / 安裝程式讀外部檔案」(需在 VM 驗證);兩人覆核與批次核可可由同一人以合法 API 繞過(例如:以單台 admin-commands 逐台派送避開 > 20 台核可;登錄後改參數再由他人發佈等路徑待確認);deploy 實際只檢查 `endpoint.command.admin`。
-- **接手**:
-  1. 在 worktree `D:\檔案分享\程式碼\GigaNexusAI\RustIt-p7-1` 重跑 security-auditor(diff `d345dda..HEAD`),取得完整報告後修正高 / 中項目,結果補進本節。
-  2. 重跑 `npm run typecheck`、`npm test`、`npm run test:int`(`npx tsx --env-file=../../RustIt/ItAgentBack/.env --test test/int/*.int.test.ts`,只讀原檢出的 `.env`、不複製;Mongo / Redis 為 127.0.0.1,DB 守門只允許 `*_poc_test`)。
-  3. 用 `GITLAB_TOKEN` 開 MR → develop(只開不合併),描述註明:依賴 MR !39 先合併;**部署前必須先套用 migration 0008**(新版所有指令查詢讀 `command_batch.state`);migration 0008 內容請需求方先看,再經同意套用 `giganexus_It_Agent_test`;測試區 compose 已加 `SOFTWARE_DIR=/srv/software`。
-  4. P6 已完成(2026-10-21),但部署前仍須先套用 migration 0008(需求方看過並同意);不推送或合併 develop / main。
+- **需求方決定(2026-10-21,D1~D6 全部照建議)**:
+  - **D1**:實作時與設計的七個差異全部同意——批次派送 `POST /v1/software/{id}/deploy` 的 `x-permission` 為 `endpoint.command.admin`(BFF 一個 operation 只能一個權限),核可 / 駁回為 `endpoint.software.manage` 並檢查核可人資料範圍涵蓋批次全部電腦;核可路由沿用 P4 的 `/v1/batches/{id}/approve`、`/reject`、`GET /v1/batches/{id}`;路徑段允許 `+`;安裝檔只接受 `.msi`(msi)與 `.exe`(其他);MSI 產品代碼由 IT 填;授權數為軟上限(不計尚未完成的派送);`uninstall` 可對已撤回的套件執行;`system.reboot` 類型可建立、Agent 0.7 回 `UNSUPPORTED_COMMAND`(Agent 端在 P7-3);主機取消指令寫 `PACKAGE_REVOKED` / `BATCH_REJECTED` / `APPROVAL_EXPIRED`。
+  - **D2-1**:同一人 24 小時內累計派送超過 20 台需第二人核可(逐台或多批小批次都累計)。軟體安裝 / 移除共用一組計數,`system.reboot` 另一組;已由第二人核可的批次不計,取消的單台照計(避免「建立 → 取消」循環);超過時單台指令進待核可的單台批次(`CommandView.batchState`)。同一人同一組的「計數 → 建立」在程序內以鎖序列化(單一實例)。
+  - **D2-2**:發佈人 ≠ 登錄人,且 ≠ 上次發佈以來修改過安裝參數 / 偵測規則 / 重開機政策的人(`editors`;已發佈後再修改重設為修改人;只改說明 / 授權數不算);發佈者必須有工號。
+  - **D3**:安裝參數依安裝程式類型檢查、路徑只限 Program Files(§2.3,測試向量 `contracts/install-args.vectors.json`)。
+  - **D4**:新增告警規則 `software_install_failed`(warn;安裝失敗開,同一台再派送同一套件成功自動關)、`reboot_pending`(warn;自動類,成功且 `reboot_required` 的 `software.*` 之後開機時間沒變新超過 7 天)、`software_file_tampered`(critical;下載時發現軟體庫安裝檔與登錄雜湊不符,開在要求下載的裝置上,不自動關閉)。
+  - **D5**:Agent 版本 0.9.0(P7-2 / P7-3 一起發)。
+  - **D6**:驗收先用 2 台(需求方本機電腦 + VM `RUSTIT-P34`),第 3 台待同意後補測。
+- **code-reviewer(2026-10-20,無必修,已處理)**:全域補送分頁掃描(避免最舊 200 筆都是離線電腦時餓死);LIKE 樣式參數 800 字;`markTested` 服務層擋空簽章者、實際簽章者不截斷;`rooted-files` 只有不存在回 null,權限 / 掛載錯誤回 503 `ITA_FILES_UNAVAILABLE`;`params LIKE` 以 `created_at` 收斂(撤回 7 天、測試結果 180 天);重讀批次失敗記 warn;同一個 Idempotency-Key 用在另一個套件回 422。2026-10-21 再次審查建議(管控類型查表防原型鏈、`reboot_since` 開機時間未知不算、exe 寫檔類開關與 `%` 禁止等)已於 `d2e84d8` 處理,主工作階段仍在處理其餘結果。
+- **資安稽核(security-auditor,2026-10-21 重跑)已修**:
+
+  | 編號 | 內容 | 修法 |
+  | --- | --- | --- |
+  | C1 | 未經覆核的移除參數可對所有電腦執行 | `revoked_from`;只有從 `published` 撤回的套件可對所有電腦派送移除,其餘只限 pilot |
+  | H1 | 以逐台派送避開 > 20 台核可 | D2-1 累計核可、`ix_command_creator` |
+  | H2 | 參數白名單擋不住讓安裝程式讀外部檔案 | D3 依類型檢查、測試向量 |
+  | H3 | 登錄後改參數再由他人發佈、或同一人改完自己發佈 | D2-2 `editors`(取代 `args_changed_by_emp`),CHECK 同步 |
+  | M1(部分) | 軟體庫安裝檔被換掉 | 下載時複驗雜湊,不符則取消此套件排隊中的安裝(`PACKAGE_FILE_CHANGED`)並開 `software_file_tampered`;**主動定期重算雜湊未做** |
+  | M2 | 改參數後舊快照仍可下載 / 送出 | 退回 `draft` 同交易取消尚未送出的 `software.*`(`PACKAGE_CHANGED`);下載要求指令快照與目前目錄一致 |
+  | M3 | 大量電腦同時重連超過並行上限 | 「計數 → 送出」在程序內序列化 |
+  | M4 | 修改套件缺稽核內容 | 日誌記錄受覆核欄位的新舊值 |
+  | M5 | 未發佈套件派到測試機的權限 | 需可管理所有公司的角色(`ITA_SCOPE_ALL_REQUIRED`) |
+  | M6 | 清單算已安裝台數的 `LIKE` 成本 | 清單只算已發佈套件,其他看詳情 |
+  | L1 | 改重開機政策不需重新覆核 | 重開機政策變更也退回 `draft`、計入修改人 |
+  | L2 | 系統 client 當作第二人、工號大小寫 | 發佈需有工號(`ITA_REVIEWER_NOT_PERSON`);工號比對不分大小寫 |
+  | L3 | 核可 UPDATE 缺 24 小時條件 | 已加 |
+  | L6 | 授權數錯誤洩漏全公司已安裝台數 | 不回台數 |
+  | L7 | 偵測結果不明確也算通過 | 需 `detected === true` |
+  | L8 | 名稱 / 版本含控制字元、雙向文字控制字元 | 登錄時拒絕 |
+  | L9 | 軟體庫檔名給唯讀權限者看 | `GET /software/files` 改需 `endpoint.software.manage` |
+
+- **資安稽核未修(列入 HANDOFF「P7-1 資安稽核剩餘項目」)**:
+  - **M1 主動定期重算雜湊**:目前只在下載時複驗;定期掃描軟體庫的作法待決定(頻率、IO 成本)。
+  - **L4、L5、L10、L11**:低風險項目,待排入後續批次。
+  - **L12**:攻擊前提為「已有軟體庫寫入權」,接受此風險(軟體庫寫入權以檔案伺服器權限控管)。
+  - **L13**:既有相依套件的弱點,不屬 P7 變更,依相依套件更新流程處理。
+- **接手(主工作階段)**:
+  1. 處理 code-reviewer 剩餘結果,重跑 `npm run typecheck`、`npm test`、`npm run test:int`(`npx tsx --env-file=../../RustIt/ItAgentBack/.env --test test/int/*.int.test.ts`,只讀原檢出的 `.env`、不複製;DB 守門只允許 `*_poc_test`)。
+  2. 用 `GITLAB_TOKEN` 開 MR → develop(只開不合併),描述註明:依賴 MR !39 先合併;**部署前必須先套用 migration 0008**(新版所有指令查詢讀 `command_batch.state`;0008 現在含 `editors`、`revoked_from`、`ix_command_creator`);migration 內容請需求方先看,再經同意套用 `giganexus_It_Agent_test`;測試區 compose 已加 `SOFTWARE_DIR=/srv/software`。
+  3. 不推送或合併 develop / main。
 
 ### 8.2 風險與已知限制(實作前先看)
 
@@ -354,5 +382,6 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
 10. ✅ **授權數**:`license_limit` 只做派送時的上限檢查,並以 `display_name` 樣式計數;報表與 MSI 產品代碼計數留路線圖。(建議:同意)
 11. ✅ **測試機範圍**(調整:先用需求方本機電腦 + VM):`draft` 套件只能派到 `pilot` 環;P7 驗收的「3 台 IT 電腦」= VM `RUSTIT-P34` + 另 2 台 IT 同意的電腦(**不在使用者電腦上測試**,AGENT.md §5)。(建議:同意,請指定另 2 台)
 12. ✅ migration 0008 寫好後先給你看,由 Claude 經同意套用 `giganexus_It_Agent_test`(同 P5、P6)。
+13. ⏳ **`system.reboot` 批次的核可權限**:目前核可 / 駁回路由要 `endpoint.software.manage`,但 `system.reboot` 批次與軟體目錄無關。/ 建議另開「核可路由」要 `endpoint.command.admin`(BFF 一個 operation 一個權限,故為獨立路由),`system.reboot` 批次改走此路由,軟體批次維持 `endpoint.software.manage`。(建議:另開;待需求方決定)
 
 PLATFORM-PLAN 要配合修正的地方(確認後與 P7-1 一起改):§5.2 `0006_software.sql` → `0008_software.sql`(加 `command_batch.state`);§4.6 補「參數快照」「`draft` 只能派 pilot」「安裝前複驗」「批次核可」;§4.4 補 `system.reboot` 與三個新類型的每台上限;`command-kinds.md` 補三類型與錯誤代碼。
