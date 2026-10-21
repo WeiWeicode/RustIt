@@ -187,6 +187,8 @@
 | --- | --- |
 | admin 批次 > `BATCH_APPROVAL_THRESHOLD`(20)台,**或同一人 24 小時內累計(含逐台與多批小批次)超過門檻**(D2-1;軟體安裝 / 移除一組、`system.reboot` 一組) | 批次 `state = pending_approval`,指令 `queued` 不送出(重連補送也不送);累計超過門檻的單台指令進單台批次,`CommandView.batchState` 為 `pending_approval` |
 | `POST /api/endpoint/batches/{batchId}/approve`(`endpoint.software.manage`) | 建立人以外、資料範圍涵蓋批次全部電腦的人核可 → `running`,指令有效期限自核可時起算並開始送出;核可人 = 建立人 `403 ITA_APPROVER_SAME_AS_CREATOR`;不是待核可或已超過 24 小時 `409 ITA_BATCH_NOT_PENDING` |
+| `POST /api/endpoint/batches/{batchId}/approve-command`(`endpoint.command.admin`) | 同 `/approve`,但用於**軟體派送以外**的批次(`system.reboot` 等);批次類型與路由不符(軟體批次走 `/approve-command`、其他批次走 `/approve`)`403 ITA_APPROVAL_ROUTE_MISMATCH` |
+| `POST /api/endpoint/batches/{batchId}/reject-command`(`reason` 必填,`endpoint.command.admin`) | 同 `/reject`,用於非軟體批次;類型不符同上 `403 ITA_APPROVAL_ROUTE_MISMATCH` |
 | `POST /api/endpoint/batches/{batchId}/reject`(`reason` 必填) | `rejected`,指令 `canceled`(`BATCH_REJECTED`);建立人也可撤回自己的批次 |
 | 24 小時無人核可 | 每分鐘掃描 → `expired`,指令 `canceled`(`APPROVAL_EXPIRED`) |
 | ≤ 門檻 | 不需核可(`running`),一樣寫稽核 |

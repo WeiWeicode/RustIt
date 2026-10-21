@@ -184,7 +184,8 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
 | `GET` | `/software/{packageId}` | `endpoint.device.read` | 詳情:狀態、覆核人、歷次測試機結果、已安裝電腦(依資料範圍過濾) |
 | `POST` | `/devices/{deviceId}/admin-commands` | `endpoint.command.admin` | 單台派送:`{ kind: "software.install", params: { packageId } }`(`software.uninstall` 同形;`system.reboot` 帶 §2.5 參數)|
 | `POST` | `/software/{packageId}/deploy` | `endpoint.software.manage` + `endpoint.command.admin` | 批次派送:`{ action: "install" \| "uninstall", deviceIds: [...], maxConcurrent? }` → 建立 `command_batch`(> `BATCH_APPROVAL_THRESHOLD` 台進入 `pending_approval`,§6) |
-| `POST` | `/command-batches/{batchId}/approve`、`/reject` | `endpoint.software.manage` | 第二人核可 / 駁回(§6) |
+| `POST` | `/batches/{batchId}/approve`、`/reject` | `endpoint.software.manage` | 軟體派送批次(`software.*`)第二人核可 / 駁回(§6) |
+| `POST` | `/batches/{batchId}/approve-command`、`/reject-command` | `endpoint.command.admin` | 軟體派送以外的批次(`system.reboot` 等)第二人核可 / 駁回(§6);批次類型與路由不符 `403 ITA_APPROVAL_ROUTE_MISMATCH` |
 | `GET` | `/command-batches/{batchId}` | `endpoint.device.read` | 批次進度(沿用 P4 `GET /batches/{id}`,加 `state`、核可資訊) |
 
 - 全部依 E6 資料範圍過濾裝置。**軟體目錄是全公司共用**,與 P6 版本一樣:登錄 / 修改 / 發佈 / 撤回需 `ENDPOINT_SCOPE_ALL_ROLES` 角色,其他回 `403 ITA_SCOPE_ALL_REQUIRED`(§9-5)。
@@ -264,8 +265,9 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
 
 | 條件 | 行為 |
 | --- | --- |
-| 批次派送(`software.*` 或 `system.reboot`)**> `BATCH_APPROVAL_THRESHOLD`(20)台** | 批次 `state = pending_approval`,指令不送出;建立人以外的、具 `endpoint.software.manage` 且資料範圍涵蓋該批所有裝置的人,`POST /command-batches/{id}/approve` 後才進入 `running` 並開始補送 |
+| 批次派送(`software.*` 或 `system.reboot`)**> `BATCH_APPROVAL_THRESHOLD`(20)台** | 批次 `state = pending_approval`,指令不送出;建立人以外的、具 `endpoint.software.manage` 且資料範圍涵蓋該批所有裝置的人,`POST /batches/{id}/approve`(軟體批次,`endpoint.software.manage`)或 `/approve-command`(`system.reboot` 等其他批次,`endpoint.command.admin`)後才進入 `running` 並開始補送 |
 | 核可人 = 建立人 | `403 ITA_APPROVER_SAME_AS_CREATOR` |
+| 路由與批次類型不符(軟體批次走 `/approve-command`,或其他批次走 `/approve`) | `403 ITA_APPROVAL_ROUTE_MISMATCH` |
 | 24 小時沒人核可 | 批次 `expired`,指令全部設 `canceled`(沿用 P4 過期掃描) |
 | 駁回 | `reject` 帶原因;指令設 `canceled` |
 | 單台或 ≤ 20 台 | 不需核可,但寫稽核 |
@@ -301,6 +303,7 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
   - **D2-2**:發佈人 ≠ 登錄人,且 ≠ 上次發佈以來修改過安裝參數 / 偵測規則 / 重開機政策的人(`editors`;已發佈後再修改重設為修改人;只改說明 / 授權數不算);發佈者必須有工號。
   - **D3**:安裝參數依安裝程式類型檢查、路徑只限 Program Files(§2.3,測試向量 `contracts/install-args.vectors.json`)。
   - **D4**:新增告警規則 `software_install_failed`(warn;安裝失敗開,同一台再派送同一套件成功自動關)、`reboot_pending`(warn;自動類,成功且 `reboot_required` 的 `software.*` 之後開機時間沒變新超過 7 天)、`software_file_tampered`(critical;下載時發現軟體庫安裝檔與登錄雜湊不符,開在要求下載的裝置上,不自動關閉)。
+  - **D7(2026-10-21)**:`system.reboot` 等非軟體派送批次的核可 / 駁回改走 `POST /v1/batches/{id}/approve-command`、`/reject-command`(`endpoint.command.admin`);軟體批次仍走 `/approve`、`/reject`(`endpoint.software.manage`);類型與路由不符 `403 ITA_APPROVAL_ROUTE_MISMATCH`(`07d5307`,只動路由與服務層)。Gateway OpenAPI 草稿批次要多發佈這兩個 operation。
   - **D5**:Agent 版本 0.9.0(P7-2 / P7-3 一起發)。
   - **D6**:驗收先用 2 台(需求方本機電腦 + VM `RUSTIT-P34`),第 3 台待同意後補測。
 - **code-reviewer(2026-10-20,無必修,已處理)**:全域補送分頁掃描(避免最舊 200 筆都是離線電腦時餓死);LIKE 樣式參數 800 字;`markTested` 服務層擋空簽章者、實際簽章者不截斷;`rooted-files` 只有不存在回 null,權限 / 掛載錯誤回 503 `ITA_FILES_UNAVAILABLE`;`params LIKE` 以 `created_at` 收斂(撤回 7 天、測試結果 180 天);重讀批次失敗記 warn;同一個 Idempotency-Key 用在另一個套件回 422。2026-10-21 再次審查建議(管控類型查表防原型鏈、`reboot_since` 開機時間未知不算、exe 寫檔類開關與 `%` 禁止等)已於 `d2e84d8` 處理(建議修正 1、3、4、5、9 與 D2-1 競態測試)。**待辦**:第 7 點「直接取消的指令所屬批次是否會收尾」、第 10 點「新 SQL 的整合測試覆蓋」。
@@ -326,6 +329,7 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
   | L8 | 名稱 / 版本含控制字元、雙向文字控制字元 | 登錄時拒絕 |
   | L9 | 軟體庫檔名給唯讀權限者看 | `GET /software/files` 改需 `endpoint.software.manage` |
 
+- **設計取捨(`software_install_failed`)**:每台電腦、每個規則只保留一筆開啟中的告警(`device_alert` 唯一約束),同一台多個套件安裝失敗時只留最近一次的 detail;某套件之後安裝成功只關閉 detail 指向該套件的那一筆。要逐套件各一筆需改告警鍵,列入後續。
 - **資安稽核未修(列入 HANDOFF「P7-1 資安稽核剩餘項目」)**:
   - **M1 主動定期重算雜湊**:目前只在下載時複驗;定期掃描軟體庫的作法待決定(頻率、IO 成本)。
   - **L4、L5、L10、L11**:低風險項目,待排入後續批次。
@@ -382,6 +386,6 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
 10. ✅ **授權數**:`license_limit` 只做派送時的上限檢查,並以 `display_name` 樣式計數;報表與 MSI 產品代碼計數留路線圖。(建議:同意)
 11. ✅ **測試機範圍**(調整:先用需求方本機電腦 + VM):`draft` 套件只能派到 `pilot` 環;P7 驗收的「3 台 IT 電腦」= VM `RUSTIT-P34` + 另 2 台 IT 同意的電腦(**不在使用者電腦上測試**,AGENT.md §5)。(建議:同意,請指定另 2 台)
 12. ✅ migration 0008 寫好後先給你看,由 Claude 經同意套用 `giganexus_It_Agent_test`(同 P5、P6)。
-13. ⏳ **`system.reboot` 批次的核可權限**:目前核可 / 駁回路由要 `endpoint.software.manage`,但 `system.reboot` 批次與軟體目錄無關。/ 建議另開「核可路由」要 `endpoint.command.admin`(BFF 一個 operation 一個權限,故為獨立路由),`system.reboot` 批次改走此路由,軟體批次維持 `endpoint.software.manage`。(建議:另開;待需求方決定)
+13. ✅ **`system.reboot` 批次的核可權限**:需求方 2026-10-21 決定另開核可路由 `POST /v1/batches/{id}/approve-command`、`/reject-command`(`endpoint.command.admin`),`system.reboot` 等非軟體批次走此路由;軟體批次維持 `/approve`、`/reject`(`endpoint.software.manage`)。已實作(`07d5307`),見 §6、§8.1.1 D7。
 
 PLATFORM-PLAN 要配合修正的地方(確認後與 P7-1 一起改):§5.2 `0006_software.sql` → `0008_software.sql`(加 `command_batch.state`);§4.6 補「參數快照」「`draft` 只能派 pilot」「安裝前複驗」「批次核可」;§4.4 補 `system.reboot` 與三個新類型的每台上限;`command-kinds.md` 補三類型與錯誤代碼。

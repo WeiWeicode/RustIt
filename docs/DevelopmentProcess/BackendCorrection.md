@@ -12,6 +12,7 @@
   - migration 0008(仍只套用 `_poc_test`)新增 `editors`、`revoked_from`、`ix_command_creator`,CHECK `ck_software_package_reviewer` 改寫。
   - 未修(HANDOFF「P7-1 資安稽核剩餘項目」):M1 主動定期重算雜湊、L4、L5、L10、L11;L12 接受(前提已有寫入權);L13 既有相依套件。
   - 測試發現:`sql-monitor-store.ts` 的 `reboot_since` 子查詢誤用 `ita.device.boot_time`(欄位在 `ita.device_inventory`),整合測試 P5 失敗、自動告警掃描整批失效;已在主工作階段修正(見測試報告)。
+  - 核可路由(`07d5307`):非軟體批次(`system.reboot` 等)改走 `POST /v1/batches/{id}/approve-command`、`/reject-command`(`endpoint.command.admin`),軟體批次仍走 `/approve`、`/reject`(`endpoint.software.manage`),不符 `403 ITA_APPROVAL_ROUTE_MISMATCH`;只動路由與服務層。
 - 檔案:`ItAgentBack/src/services/{software-service,command-dispatcher,alert-service}.ts`、`src/stores/{types,sql-software-store,sql-command-store,sql-monitor-store}.ts`、`src/routes/{alerts,commands,software}.ts`、`src/server.ts`、`db/migrations/0008_software.sql`、`docs/contracts/{command-kinds.md,install-args.vectors.json}`、`ItAgentBack/docs/DB_SCHEMA.md`、`test/*`
 - 驗證:`npm run typecheck` 無錯誤;`npm test` 210/210;`npm run test:int` 13/13(`giganexus_It_Agent_poc_test`、本機 Docker Mongo / Redis)。第一次整合測試 12/13 的失敗與修正見 `docs/test-reports/2026-10-21-p7-1-backend.md`。
 

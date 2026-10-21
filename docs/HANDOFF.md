@@ -19,7 +19,18 @@
 
 ## 2. 下一步
 
-0. **目前階段:P7 軟體派送(P6 已於 2026-10-21 完成)**:[P7-SOFTWARE-DESIGN.md](P7-SOFTWARE-DESIGN.md) §9 全部已確認(MR !39)。**P7-1 後端程式與文件完成,待開 MR**:分支 `feature/p7-1-software-catalog`(worktree `../RustIt-p7-1`)已推送、MR 未開;2026-10-21 需求方決定 D1~D6 全部照建議,資安稽核已修大部分(設計 §8.1.1),`npm test` 210/210、`test:int` 13/13(測試報告 `test-reports/2026-10-21-p7-1-backend.md`)。**下一步:主工作階段處理 code-reviewer 結果後,再開 MR(1-6)。** code-reviewer 建議 1、3、4、5、9 與 D2-1 競態測試已處理(`d2e84d8`);待辦:第 7 點(直接取消的指令所屬批次是否會收尾)、第 10 點(新 SQL 的整合測試覆蓋)。 migration 0008 只套用 `_poc_test`,尚未給需求方看、未套用 `giganexus_It_Agent_test`。P7-2 Agent 版本號改為 **0.9.0**(0.8.x 已被 P6 使用,見設計 §9-1)。
+0. **目前階段:P7 軟體派送(P6 已於 2026-10-21 完成)**:[P7-SOFTWARE-DESIGN.md](P7-SOFTWARE-DESIGN.md) §9 全部已確認。**明天新討論串從這裡接手。**
+   - **現況(2026-10-21 收工)**:
+     - 分支 `feature/p7-1-software-catalog`(worktree `D:\檔案分享\程式碼\GigaNexusAI\RustIt-p7-1`)已推 gitlab / origin,**MR 尚未開**;程式最新 commit `07d5307`(`git log` 為準)。單元測試 211/211;整合測試 13/13(`c5c3d17` 時;之後 `07d5307` 只動路由與服務層,未重跑 `test:int`)。報告 `test-reports/2026-10-21-p7-1-backend.md`。
+     - 需求方已決定並實作:D1~D6 全部照建議(設計 §8.1.1);**`system.reboot` 等非軟體批次的核可改走 `POST /v1/batches/{id}/approve-command`、`/reject-command`(`endpoint.command.admin`)**,軟體批次仍走 `/approve`、`/reject`(`endpoint.software.manage`),不符 `403 ITA_APPROVAL_ROUTE_MISMATCH`(`07d5307`)。
+     - 資安稽核已修:C1、H1、H2、H3、M1(部分)、M2~M6、L1~L3、L6~L9;code-reviewer 建議 1、3、4、5、9 與 D2-1 競態測試已處理(`d2e84d8`)。migration 0008 **只套用過 `_poc_test`**,尚未給需求方看、未套用 `giganexus_It_Agent_test`。Agent 版本 **0.9.0**。
+   - **下一步(依序)**:
+     1. **開 MR → develop**(Sonnet 子任務做,只開不合併)。描述註明:依賴 MR !39 先合併;**部署前必須先套用 migration 0008**(新版所有指令查詢讀 `command_batch.state`;0008 含 `editors`、`revoked_from`、`ix_command_creator`);0008 只套過 `_poc_test`;測試區 compose 已加 `SOFTWARE_DIR=/srv/software`。
+     2. **需求方看 migration 0008**,同意後套用 `giganexus_It_Agent_test`。
+     3. **需求方合併 MR、部署測試區**;Gateway OpenAPI 草稿批次發佈(**新增 `approve-command`、`reject-command` 兩個 operation**);主機 2 建 `/srv/giganexus/ita-software/`。
+     4. **主工作階段(Opus)開始 P7-2 Agent `software` 模組**(Agent 0.9.0;新分支從 develop 開,可在 MR 審核期間先做)。Agent 必須通過 `docs/contracts/install-args.vectors.json` 全部向量;注意 `UninstallString` 只讀 HKLM、不經 `cmd /c`、不展開 `%`。
+   - **P7-1 待辦(未修)**:M1 主動定期重算軟體庫雜湊(目前只在下載時複驗)、L4 下載 TOCTOU、L5 單台下載併發上限、L10 補送鏈累積、L11 冪等鍵比對目標電腦;code-reviewer 第 7 點「直接取消的指令其所屬批次是否會收尾」;第 10 點新 SQL 的整合測試覆蓋(`recentGatedTargets`、`cancelQueuedInstalls`、`revoked_from`、`reboot_since`);`software_install_failed` 每台只有一筆開啟中的告警(多套件失敗只留最近一次)的取捨已記在設計 §8.1.1。L12 接受、L13 不屬 P7。
+   - **分工提醒**:程式與規劃由 Opus 主工作階段;測試執行、文件、需要需求方操作的步驟開 Sonnet 子任務。
    - **P7 工作項目(2026-10-21)**。分工:**Claude 主工作階段只寫程式與規劃**;測試、寫文件、需要需求方操作的步驟一律開 **Sonnet 子任務**(另開工作階段);下表「子任務」即指 Sonnet 子任務。
      - **P7-1 軟體目錄與下載(後端)🟡 程式完成,待收尾**
        | # | 工作 | 負責 | 前置 |
@@ -32,7 +43,7 @@
        | 1-6 | 開 MR → develop(只開不合併) | 子任務 | 1-4 |
        | 1-7 | 需求方看過 migration 0008 並同意後,套用 `giganexus_It_Agent_test` | 需求方看;子任務套用 | 1-6 |
        | 1-8 | 合併 MR、部署測試區(**必須先套 0008**) | 需求方 | 1-7 |
-       | 1-9 | Gateway OpenAPI 草稿批次發佈 | 子任務(寫入測試區先取得同意) | 1-8 |
+       | 1-9 | Gateway OpenAPI 草稿批次發佈(含 `approve-command`、`reject-command`) | 子任務(寫入測試區先取得同意) | 1-8 |
        | 1-10 | 主機 2 建 `/srv/giganexus/ita-software/` | 子任務(`ssh host2`) | 1-8 |
      - **P7-2 Agent `software` 模組(Agent 0.9.0)⬜**
        | # | 工作 | 負責 | 前置 |
@@ -57,8 +68,6 @@
      - **P7-4 NAS 唯讀掛載 ⏸ 等 NAS 帳密**:4-1 NAS 帳密機密腳本(需求方執行,AI 不經手);4-2 `endpoint-server` CIFS 唯讀掛載 `RustIT\`(`releases\`、`software\` 共用)(Claude 改 compose,子任務上主機 2)。正式區部署前必須完成。
      - **P7-5 GigaItApp「軟體派送」頁 ⬜(動手前先確認)**:5-1 軟體目錄 / 派送工作兩個 Tab(批次進度、核可);5-2 電腦詳情「派送軟體」「重新開機」按鈕;5-3 `gateway-rbac.yaml`(選單、按鈕、`endpoint.software.manage`,IT 發佈後才綁 `includes`)。Claude 寫程式;前置 1-8、1-9。
      - **P7-6 收尾 ⬜(Gateway / 根目錄 repo 修改前確認)**:全部子任務。Gateway `ENDPOINT-AGENT-GUIDE.md`(§8.3 指令類型、§5 套件下載)、`command-kinds.md` 校對、RUNBOOK「軟體派送失敗處理」與廠商簽章者憑證換新流程(B10)、根目錄 `workspace.json` / `PROJECT-MAP.md`、甘特圖 W6-20、測試報告。
-     - **P7-1 資安稽核剩餘項目**(設計 §8.1.1;未修):M1 主動定期重算軟體庫雜湊(目前只在下載時複驗)、L4、L5、L10、L11;L12 接受(前提已有寫入權);L13 既有相依套件(不屬 P7 變更)。排入 P7-1 MR 之後的批次。
-     - **待需求方決定:`system.reboot` 批次核可權限**(設計 §9-13):目前核可路由需 `endpoint.software.manage`;建議另開需 `endpoint.command.admin` 的核可路由。
      - **順序**:1-1~1-3(同時需求方看 1-5)→ 1-4、1-6 → 1-7 → 等部署期間開新分支寫 P7-2 → P7-1 上測試區後做 P7-5 → P7-2 / P7-3 完成後 VM 驗收 → P7-6;P7-4 帳密到位隨時插入。
 0. **P6 升級 ✅ 測試區完成(2026-10-21,甘特圖 W6-19 done)**:Agent 0.8.2 / Watchdog 0.3.2 已發佈;P6-6 收尾完成(RUNBOOK §2 版本回滾、Gateway ENDPOINT-AGENT-GUIDE v0.11、根目錄 `workspace.json` / `PROJECT-MAP.md` / 甘特圖)。**上線前仍待**:正式程式碼簽章憑證(IT AD CS)與 `-Environment prod` 演練、版本檔目錄改 NAS(與 P7)、設計 §8.3 / §8.5 列的上線前資安項目(L-4 本機最低版本、L-6 `swap` 在服務已停止時拒絕、測試憑證指紋拒絕)、清理測試痕跡(VM 兩張測試根憑證、主機 2 `ita-releases` 的測試版本檔與測試區對應登錄:先在 GigaItApp「撤回」再刪檔)。以下為過程紀錄。設計:設計 [P6-UPGRADE-DESIGN.md](P6-UPGRADE-DESIGN.md),2026-10-20 需求方確認 §9 全部照建議;分批 P6-1(版本登錄與發佈環,後端)→ P6-2(Watchdog 升級 Agent)→ P6-3(Agent 升級 Watchdog)→ P6-4(Windows Runner + 人工簽章,P6-1~3 驗收後)→ P6-5(GigaItApp,動手前另外確認)→ P6-6 收尾。**P6-1 實作完成**(分支 `feature/p6-1-release`,測試 178/178、整合 12/12);待:migration 0007 套用 `giganexus_It_Agent_test`(需求方看過後)→ MR 合併 develop 部署 → Gateway OpenAPI 草稿批次發佈 → 主機 2 建 `/srv/giganexus/ita-releases/`。P6-1 已合併 develop(MR !37)。**P6-2 ✅ 已合併 develop(MR !38)**(分支 `feature/p6-2-watchdog-upgrade`,Watchdog 0.2.0 / Agent 0.7.0 / MSI 0.7.0;審查後調整見設計 §8.3);**2026-10-21 VM 驗收完成**(步驟 0~8 通過、步驟 9 部分;報告 [test-reports/2026-10-21-p6-2-watchdog-upgrade.md](test-reports/2026-10-21-p6-2-watchdog-upgrade.md);VM 維持 Agent 0.7.0 / Watchdog 0.2.0、pilot 目標已清空,可留作 P6-3 驗收)。**P6-3 ✅ 已合併 develop(MR !43)並於 2026-10-21 測試區 VM 驗收通過(Agent 0.8.0 / Watchdog 0.3.0 / MSI 0.8.0;設計 §8.5、§8.6;報告 [test-reports/2026-10-21-p6-3-replace-watchdog.md](test-reports/2026-10-21-p6-3-replace-watchdog.md))**:VM 現為 Agent 0.8.1 / Watchdog 0.3.1(pilot 環,目標已清空),檢查點「P6-3 before」可還原;VM 的兩張測試根憑證與主機 2 的 `ita-releases` 測試檔尚未清理。**P6-4 ✅ 測試區完成(2026-10-21)**:第一次正式流程走完(Agent 0.8.2 / Watchdog 0.3.2:pipeline 384 建置 → 測試憑證簽章 → 上架 → 登錄 → pilot VM 升級成功 → 發佈;報告 [test-reports/2026-10-21-p6-4-first-release.md](test-reports/2026-10-21-p6-4-first-release.md));剩受保護 tag `rustit-v*`(需求方在 GitLab 設定)與正式憑證演練(待 IT)。以下為過程紀錄:發版流水線 MR !45 已合併 develop(`build:release` / `audit:rust`、`build-release.ps1` / `sign-release.ps1` / `publish-release.ps1`、`RUNBOOK.md`);2026-10-21 主機 2 Windows Runner `host2-windows` 上線(設定與踩過的坑見 [WINDOWS-RUNNER-SETUP.md](WINDOWS-RUNNER-SETUP.md)),pipeline 378 `build:release` 成功(job 1075,Agent 0.8.0 / Watchdog 0.3.0 未簽章、雜湊相符);待:測試憑證跑 `sign-release.ps1` → `publish-release.ps1`(寫入測試區要先同意;下載 artifact 需 Token 有 Job: Read 或需求方手動下載)、受保護 tag `rustit-v*`。`audit:rust` 已可執行(主機 2 `cargo-audit` 0.22.2),第一次查到 rustls / rustls-webpki 弱點,分支 `fix/rustls-audit` 升 **Agent 0.8.2 / Watchdog 0.3.2**(只改 `Cargo.lock`,見 BugFix 2026-10-21),合併後當作 P6-4 第一次正式「建置 → 簽章 → 上架」的版本。P6-5 ✅(GigaItApp「Agent 版本」頁,GigaItApp MR !9 已上測試區)、P6-6 ✅(收尾)。前置條件替代:測試簽章憑證(正式 AD CS 憑證待 IT)、主機 2 `/srv/giganexus/ita-releases/`(NAS 掛載待帳密,與 P7 一起)。
    - 以下為 P5 紀錄(已完成)。
