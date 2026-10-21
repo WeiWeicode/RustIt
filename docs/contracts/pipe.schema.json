@@ -2,19 +2,21 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://giganexus.local/rustit/contracts/pipe.schema.json",
   "title": "本機具名管道 \\\\.\\pipe\\giganexus-agent-v1 訊息",
-  "description": "Watchdog ↔ Agent 的本機通道(ENDPOINT-AGENT-GUIDE §7.2;P5-MONITOR-DESIGN §2.4)。伺服端為 Agent,ACL 只允許 SYSTEM、Administrators;每條連線一則請求、一則回應(各一行 JSON,UTF-8,以 \\n 結尾,單則上限 4 KB),之後由 Agent 關閉。信封同 WebSocket {v, type, id, body},回應沿用請求的 id。用戶端連線後以 GetNamedPipeServerProcessId 比對 SCM 的 GigaNexusAgent PID,不一致即中斷(防冒充)。不認得的 type 回 unsupported。prepare_shutdown(P6-2,Agent 0.7.0 起;0.6.0 回 unsupported):Watchdog 升級 Agent 前送出,Agent 只接受用戶端 PID 為 SCM 的 GigaNexusWatchdog,停止接新指令、執行中的指令等最多 60 秒(逾時記 failed AGENT_UPGRADING)、送完待送資料(上限 20 秒)並以 1000 關閉 WebSocket 後回 prepare_shutdown_ack(P6-UPGRADE-DESIGN §2.2)。",
+  "description": "Watchdog ↔ Agent 的本機通道(ENDPOINT-AGENT-GUIDE §7.2;P5-MONITOR-DESIGN §2.4)。伺服端為 Agent,ACL 只允許 SYSTEM、Administrators;每條連線一則請求、一則回應(各一行 JSON,UTF-8,以 \\n 結尾,單則上限 4 KB),之後由 Agent 關閉。信封同 WebSocket {v, type, id, body},回應沿用請求的 id。用戶端連線後以 GetNamedPipeServerProcessId 比對 SCM 的 GigaNexusAgent PID,不一致即中斷(防冒充)。不認得的 type 回 unsupported。prepare_shutdown(P6-2,Agent 0.7.0 起;0.6.0 回 unsupported):Watchdog 升級 Agent 前送出,Agent 只接受用戶端 PID 為 SCM 的 GigaNexusWatchdog,停止接新指令、執行中的指令等最多 60 秒(逾時記 failed AGENT_UPGRADING)、送完待送資料(上限 20 秒)並以 1000 關閉 WebSocket 後回 prepare_shutdown_ack(P6-UPGRADE-DESIGN §2.2)。replace_watchdog(P6-3,Agent 0.8.0 起;更舊的 Agent 回 unsupported):Watchdog 下載並驗證新版 Watchdog 後送出,Agent 同樣只接受 SCM 的 GigaNexusWatchdog 為用戶端,**自行再驗一次**(path 必須在 ProgramData\\GigaNexus\\Agent\\cache\\watchdog\\ 底下、SHA-256、Authenticode、簽章者 = 主機清單 ∩ 本機清單、版本資源)後回 replace_watchdog_ack;accepted = true 時 Agent 稍後停止 Watchdog 服務、備份、替換、啟動並檢查,失敗還原,結果由 Agent 經 /agent/v1/events 上報 upgrade_* 事件(component = watchdog)(P6-UPGRADE-DESIGN §2.2、§5.3)。",
   "type": "object",
   "required": ["v", "type", "id"],
   "properties": {
     "v": { "type": "integer", "const": 1 },
-    "type": { "type": "string", "enum": ["get_status", "status", "prepare_shutdown", "prepare_shutdown_ack", "unsupported"] },
+    "type": { "type": "string", "enum": ["get_status", "status", "prepare_shutdown", "prepare_shutdown_ack", "replace_watchdog", "replace_watchdog_ack", "unsupported"] },
     "id": { "type": "string", "minLength": 1, "maxLength": 64 },
     "body": { "type": "object" }
   },
   "allOf": [
     { "if": { "properties": { "type": { "const": "status" } } }, "then": { "required": ["body"], "properties": { "body": { "$ref": "#/definitions/StatusBody" } } } },
     { "if": { "properties": { "type": { "const": "prepare_shutdown" } } }, "then": { "required": ["body"], "properties": { "body": { "$ref": "#/definitions/PrepareShutdown" } } } },
-    { "if": { "properties": { "type": { "const": "prepare_shutdown_ack" } } }, "then": { "required": ["body"], "properties": { "body": { "$ref": "#/definitions/PrepareShutdownAck" } } } }
+    { "if": { "properties": { "type": { "const": "prepare_shutdown_ack" } } }, "then": { "required": ["body"], "properties": { "body": { "$ref": "#/definitions/PrepareShutdownAck" } } } },
+    { "if": { "properties": { "type": { "const": "replace_watchdog" } } }, "then": { "required": ["body"], "properties": { "body": { "$ref": "#/definitions/ReplaceWatchdog" } } } },
+    { "if": { "properties": { "type": { "const": "replace_watchdog_ack" } } }, "then": { "required": ["body"], "properties": { "body": { "$ref": "#/definitions/ReplaceWatchdogAck" } } } }
   ],
   "definitions": {
     "StatusBody": {
@@ -67,6 +69,27 @@
         "outbox_pending": { "type": "integer", "minimum": 0 },
         "events_pending": { "type": "integer", "minimum": 0 },
         "commands_aborted": { "type": "integer", "minimum": 0, "description": "等 60 秒仍未結束、記為 AGENT_UPGRADING 的指令數" }
+      }
+    },
+    "ReplaceWatchdog": {
+      "description": "Watchdog → Agent:新版 Watchdog 已下載並驗證,請 Agent 替換(P6-3)",
+      "type": "object",
+      "required": ["version", "path", "sha256", "signer_thumbprints"],
+      "properties": {
+        "version": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "path": { "type": "string", "minLength": 1, "maxLength": 260, "description": "cache\\watchdog\\ 底下已驗證的檔案(Agent 會正規化後確認仍在該目錄內)" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "signer_thumbprints": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "type": "string", "pattern": "^[0-9a-fA-F]{40}$" }, "description": "主機下發的預期簽章者;Agent 另與本機信任清單取交集" }
+      }
+    },
+    "ReplaceWatchdogAck": {
+      "description": "Agent → Watchdog:accepted = true 表示 Agent 再驗通過並接手(稍後會停止 Watchdog);false 表示拒絕,附 error_code",
+      "type": "object",
+      "required": ["accepted"],
+      "properties": {
+        "accepted": { "type": "boolean" },
+        "error_code": { "type": "string", "enum": ["DOWNLOAD_FAILED", "HASH_MISMATCH", "SIGNATURE_INVALID", "SIGNER_NOT_TRUSTED", "PREPARE_TIMEOUT", "STOP_TIMEOUT", "REPLACE_FAILED", "HEALTH_CHECK_FAILED", "ROLLBACK_FAILED", "DISK_FULL"], "description": "與 event.schema.json UpgradeErrorCode 相同(兩份要一起改;這裡內嵌是為了管道契約不跨檔引用)" },
+        "error_message": { "type": "string", "maxLength": 300 }
       }
     }
   }

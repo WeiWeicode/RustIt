@@ -3,7 +3,9 @@
 > 草案 2026-10-20,分支 `docs/p6-upgrade-design`(從 develop `56d2263` 開)。依據:PLATFORM-PLAN §4.5、§4.9、§5、§6、§7、§8 P6 列、§8 B1 / B2;指南 ENDPOINT-AGENT-GUIDE §7.1–§7.4、§8.3、§10.2 E4;ADR 0002、0003;`P5-MONITOR-DESIGN.md`(Watchdog、本機管道、`watchdog/report`)。
 > **2026-10-20 需求方確認**:§9 全部照建議(測試簽章憑證、本機信任清單 P6 就做、測試區先用主機 2 本機目錄、`pilot` 未滿 24 小時回 409 + `force`、改環與版本需 `endpoint.software.manage` 且全部公司角色、執行中指令等最多 60 秒、版本號 Agent 0.7.0 / Watchdog 0.2.0、Windows Runner 在 P6-1~3 驗收後、migration 0007 先給需求方看再由 Claude 套用)。
 > **進度(2026-10-20)**:P6-1 完成實作(分支 `feature/p6-1-release`):migration 0007、管理 API、下載 API、`watchdog/report` 的 `target` / `upgrade`、`agent.upgrade` 與 admin-commands 路由、升級告警;`npm test` 178/178、`test:int` 12/12(0007 已套用整合測試庫 `_poc_test`);審查後調整見 §8.1。**待辦**:migration 0007 套用 `giganexus_It_Agent_test`(需求方看過後)、合併 develop 部署測試區、Gateway OpenAPI 草稿批次發佈。
-> **進度(2026-10-20,P6-2)**:P6-1 已合併 develop(MR !37)。P6-2 實作完成(分支 `feature/p6-2-watchdog-upgrade`):Watchdog 0.2.0 升級 Agent、Agent 0.7.0 `prepare_shutdown` / `agent.upgrade`、監控 MSI 0.7.0 `-TrustedSigners`、測試簽章憑證腳本;`cargo test` / `clippy` 通過、契約測試通過;子代理審查後調整見 §8.3。**待辦**:VM 驗收(§8.4,需求方執行)。
+> **進度(2026-10-20,P6-2)**:P6-1 已合併 develop(MR !37)。P6-2 實作完成(分支 `feature/p6-2-watchdog-upgrade`):Watchdog 0.2.0 升級 Agent、Agent 0.7.0 `prepare_shutdown` / `agent.upgrade`、監控 MSI 0.7.0 `-TrustedSigners`、測試簽章憑證腳本;`cargo test` / `clippy` 通過、契約測試通過;子代理審查後調整見 §8.3。**2026-10-21 VM 驗收完成**:步驟 0~8 通過,步驟 9 部分(`logs.collect` 太快,未觸發 `AGENT_UPGRADING`),報告 [test-reports/2026-10-21-p6-2-watchdog-upgrade.md](test-reports/2026-10-21-p6-2-watchdog-upgrade.md);待補:步驟 9 慢指令情境、降版收尾後的 `upgrade_succeeded` 事件補報(併入 P6-3)。
+> **進度(2026-10-21,P6-3)**:實作完成(分支 `feature/p6-3-replace-watchdog`):Agent **0.8.0** 新增 `upgrade_watchdog.rs`(管道 `replace_watchdog`:Agent 再驗一次、停止 Watchdog、替換、健康檢查、還原、中斷收尾;事件 `component = watchdog`)、看守暫停;Watchdog **0.3.0** 的 `run_watchdog` / `resume_watchdog`(`target.watchdog` 下載驗證後交給 Agent)、`broken-exit` 測試用 feature;管道契約 `replace_watchdog` / `replace_watchdog_ack`;`build-test-release.ps1 -Component watchdog`。`cargo test` / `clippy` 通過;子代理審查後調整見 §8.5。**2026-10-21 VM 驗收完成**:步驟 0~6 通過(步驟 2 的「失敗 2 次後停止」未實測,單元測試涵蓋),報告 [test-reports/2026-10-21-p6-3-replace-watchdog.md](test-reports/2026-10-21-p6-3-replace-watchdog.md)。後端不必改(P6-1 已有 `target.watchdog` 與 `onAgentUpgradeEvents`)。
+> **完成(2026-10-21,P6-4 ~ P6-6)**:P6-3 VM 驗收通過(MR !43);P6-5 GigaItApp「Agent 版本」頁上測試區(GigaItApp MR !9);P6-4 主機 2 Windows Runner 上線,第一次正式流程 Agent 0.8.2 / Watchdog 0.3.2 建置 → 簽章 → 上架 → pilot 升級 → 發佈(MR !45 ~ !48,報告 `test-reports/2026-10-21-p6-4-first-release.md`);P6-6 收尾:RUNBOOK §2 版本回滾、Gateway ENDPOINT-AGENT-GUIDE v0.11、根目錄架構資料與甘特圖。**P6 測試區完成**;上線前項目見 HANDOFF §2 第 0 項。
 > 設計當時的現況:Agent 0.6.0、Watchdog 0.1.0(P5-2,VM `RUSTIT-P34` 驗收通過);`watchdog/report` 回應已有 `target` 欄位(一律 `null`);管道 `prepare_shutdown` 只定義、回 `unsupported`;`ita.device.agent_version`、`ita.device_health.watchdog_version` 已有;**程式碼簽章憑證未簽發(ADR 0003 建議中)、NAS `RustIT\` 未掛載、主機 2 沒有 Windows Runner**。
 
 ## 0. 分批
@@ -13,7 +15,7 @@
 | **P6-1 版本登錄與發佈環(後端)** | migration `0007_release.sql`;管理 API(版本登錄、發佈環目標版本、裝置所屬環、升級進度);Agent 下載 API(Range);`watchdog/report` 回應帶 `target`、請求帶 `upgrade` 進度;並行上限;`upgrade_failed`、`version_mismatch` 告警;`agent.upgrade` 指令(admin) | — | migration 套用 `giganexus_It_Agent_test`;版本檔目錄(§9-3);合併 develop |
 | **P6-2 Watchdog 升級 Agent** | Watchdog 下載(續傳)→ 驗 SHA-256 與 Authenticode 簽章者 → 管道 `prepare_shutdown` → 停服務、舊版放 `previous\`、替換、啟動 → 2 分鐘內 `get_status` 驗證 → 失敗還原並回報;Agent 實作 `prepare_shutdown` | Agent **0.7.0**、Watchdog **0.2.0**(MSI 首次安裝到 VM) | VM 驗收;測試簽章憑證(§9-1) |
 | **P6-3 Agent 升級 Watchdog、`agent.upgrade` 立即觸發** | Watchdog 下載驗證後經管道 `replace_watchdog` 交給 Agent 替換(互相升級、不覆寫自己);`agent.upgrade` 讓 Watchdog 立即上報 | 同上 | VM 驗收 |
-| **P6-4 Windows Runner + 人工簽章流程** | 主機 2 Windows 本機 GitLab Runner(shell、PowerShell、tag `windows`、`concurrent = 1`);CI 手動 / tag job 產出未簽章 exe、MSI 與 SHA-256;簽章腳本、上架腳本 | — | Runner 註冊 Token 由需求方執行;`.gitlab-ci.yml` |
+| **P6-4 Windows Runner + 人工簽章流程** | 主機 2 Windows 本機 GitLab Runner(shell、`pwsh`、tag `windows`、`concurrent = 1`;2026-10-21 上線,見 WINDOWS-RUNNER-SETUP.md);CI 手動 / tag job 產出未簽章 exe、MSI 與 SHA-256;簽章腳本、上架腳本 | — | Runner 註冊 Token 由需求方執行;`.gitlab-ci.yml` |
 | **P6-5 GigaItApp「Agent 版本」頁** | 版本清單 / 登錄 / 發佈 / 撤回、發佈環目標版本與進度、裝置詳情「所屬環」與升級狀態;`gateway-rbac.yaml` | — | **GigaItApp、`gateway-rbac.yaml`:動手前另外確認**(OpenAPI 註冊、IT 發佈後才綁 `includes`) |
 | P6-6 收尾 | 指南回寫(§7.3、§7.4、§8.3、E4)、`command-kinds.md`、根目錄 `workspace.json` / `PROJECT-MAP.md`、甘特圖 W6-19、測試報告、RUNBOOK 版本回滾一節(B10 先寫這段) | — | Gateway / 根目錄 repo 修改前確認 |
 
@@ -157,7 +159,7 @@ P6-1 先做(後端可單獨用 API 與 curl 驗證);P6-2 依賴 P6-1 的 API;P6-
 7. 失敗(啟動失敗、2 分鐘內不正常、版本不符)→ 停止 → `previous\` 換回 → 啟動 → 確認舊版 `get_status` 正常 → `rolled_back`;還原也失敗 → `ROLLBACK_FAILED`(critical 告警,看守恢復照常拉起)。同一目標版本失敗 2 次不再自動嘗試。
 8. Watchdog 在步驟 3–7 期間自己被重啟(當機、關機):重啟後讀本機 `upgrade` 狀態,若停在 `installing` → 檢查目前 exe 版本與服務狀態,依步驟 6 / 7 收尾,不會停在半套。
 
-### 5.3 Agent 替換 Watchdog(P6-3,Agent 0.7.0 `upgrade_watchdog.rs`)
+### 5.3 Agent 替換 Watchdog(P6-3,Agent 0.8.0 `upgrade_watchdog.rs`;Watchdog 0.3.0 才會送 `replace_watchdog`)
 
 Watchdog 完成下載與驗證後送 `replace_watchdog` → Agent 再驗一次 → 回 `accepted` → Agent 的 Watchdog 看守進入維護中 → 停止 `GigaNexusWatchdog` → 備份 / 替換(同 §5.2 步驟 5)→ 啟動 → 2 分鐘內新 Watchdog 以 SCM 的 PID 連上管道並送出 `get_status` → 成功;否則還原。結果由 Agent 經 `/agent/v1/events` 上報,新 Watchdog 的上報版本也會反映在 `watchdog_version`。
 
@@ -252,6 +254,69 @@ Runner 建好前(P6-1~3 開發期):開發機 `build-agent-msi.ps1` 建置 + 測�
 | 9 | 升級時有執行中的指令(下 `logs.collect` 後立即觸發升級) | 指令完成或 60 秒後 `failed AGENT_UPGRADING`;升級照常 |
 
 查看:VM `C:\ProgramData\GigaNexus\Agent\logs\watchdog-*.log`、`agent-*.log`(`-Encoding UTF8`,系統管理員);主機 `ita.device_upgrade`、`ita.device_event`。驗收後還原檢查點或解除安裝。
+
+### 8.5 P6-3 實作摘要與審查後的調整
+
+**實作摘要**
+
+- **Watchdog 端**(`upgrade/mod.rs`):`Upgrader` 的下載 / 驗證 / 快取清理依元件參數化(`Comp::Agent` / `Comp::Watchdog`,下載到 `cache\watchdog\{版本}\`);`run_watchdog(target, 自己的版本)`:檢查目標(下限 0.3.0、網址元件段必須是 `watchdog`)→ 下載(續傳)→ SHA-256、簽章、簽章者、版本資源 → Agent 服務必須執行中 → 先記 `installing` 再送 `replace_watchdog` → Agent 回 `accepted` 後結束(`Outcome::HandedOff`)。失敗只記本機 `upgrade` 表(失敗次數加一、冷卻 30 分鐘,Watchdog 與 Agent 的冷卻分開),**不產生事件**(主機的路徑白名單只收 Watchdog 路徑上 `component = agent` 的升級事件)。
+- **Watchdog 啟動收尾**:`resume_watchdog(自己的版本)`:`installing` 且版本 = 目標 → `succeeded`;仍是舊版 → `rolled_back`(失敗次數加一、`HEALTH_CHECK_FAILED`;Agent 已上報 `upgrade_failed`)。
+- **Agent 端**(`upgrade_watchdog.rs`,同步邏輯以 `Env` trait 注入,在阻塞執行緒執行):`validate`(路徑正規化後必須在 `cache\watchdog\` 底下、大小、SHA-256、WinVerifyTrust、簽章者、版本資源、版本 ≥ 0.3.0)→ `accept` 回 ack → 等 2 秒(讓 Watchdog 讀完 ack)→ `replace`:維護中、寫標記 `cache\watchdog\replace.json`、事件 `upgrade_started`、服務設定的程式必須是安裝目錄的 `rustit-watchdog.exe`、停止服務(握住行程控制代碼,逾時才結束行程)、`previous\` 備份、`.new` 再驗雜湊、`rename` 換上、啟動、健康檢查(服務執行中、PID 連續兩次相同、**新 Watchdog 以 SCM 的 PID 連上管道**,2 分鐘)、失敗還原並確認舊版穩定。`resume`:Agent 在替換中途被重啟時依標記與目前 exe 收尾。
+- **看守**:`guard.rs` 在 `watchdog_replacing` 期間暫停,結束後以目前狀態重新開始(不把替換造成的停止當成竄改)。
+- **管道**:`replace_watchdog` 與 `prepare_shutdown` 一樣只接受 SCM 的 Watchdog PID;請求上限 60 秒(讀檔、驗簽章);同時只做一次替換;替換中 `get_status` 另記下 Watchdog PID(健康檢查依據)。契約 `pipe.schema.json` 新增 `ReplaceWatchdog` / `ReplaceWatchdogAck`(`error_code` 內嵌與 `event.schema.json` 相同的清單)。
+- **版本**:Agent 0.8.0、Watchdog 0.3.0、監控 MSI 0.8.0(MSI 版本取自 `crates\agent\Cargo.toml`)。舊的 Watchdog(0.2.0)不會送 `replace_watchdog`,因此**要先以 MSI 0.8.0 安裝**,才能驗 Watchdog 0.3.0 → 0.3.1。
+- **建置**:`build-test-release.ps1 -Component watchdog -Version 0.3.1 -Thumbprint <T>`;壞版本 `-Component watchdog -Version 0.3.2-broken -Features broken-exit`(啟動即結束;Watchdog 沒有 `broken-no-ws`)。上架路徑 `/srv/giganexus/ita-releases/watchdog/<版本>/rustit-watchdog.exe`,登錄 `component: watchdog`、`fileName: rustit-watchdog.exe`。
+- **驗收時查證的 P6-2 疑點**:降版收尾後「缺 `upgrade_succeeded` 事件」是驗收當下查得太早,事件(#143)在 Watchdog 5 分鐘上報後已到,**不是缺陷**(測試報告已更正)。
+
+**審查後調整**(code-reviewer 子代理,2026-10-21:必修 3、建議數項)
+
+- **Agent 端**(`upgrade_watchdog.rs`):`watchdog_replacing` 改由 RAII `Hold` 持有,`accept` 改在獨立 task 執行、以 oneshot 回結果(管道請求逾時被取消時旗標不會卡在 true,看守不會永久暫停);`resume_service` 先取得旗標;`replace_files` / `restore_files` 驗雜湊;標記 `replace.json` 寫不進就中止(不在沒有標記的情況下動服務);啟動改 `start_logged`;resume 判定「舊版仍在原位」時補送 `upgrade_failed`(`rolled_back = true`);查詢服務失敗改 `REPLACE_FAILED`。測試新增 Flapping 模式(新版反覆重啟)與 3 項。
+- **必修 A — `succeeded` 後被換回舊版的無限循環**(Watchdog `resume_watchdog`):新版 Watchdog 一啟動就把 `installing` 改 `succeeded`,但 Agent 的 2 分鐘健康檢查此時還沒結束;之後失敗還原時,舊版只收尾 `installing`,紀錄停在 `succeeded`、失敗次數不加、不設冷卻,下次上報又替換。改為 `state == succeeded` 且目標不是自己的版本也記 `rolled_back`(失敗次數加一、`HEALTH_CHECK_FAILED`);`lib.rs` 啟動收尾得到 `Failed` 時比照 `run_watchdog` 設 `upgrade_cooldown_until_watchdog`。
+- **必修 B — 交給 Agent 後停在 `installing`**(Watchdog `run_watchdog`):Agent 在沒動到服務的失敗路徑(查詢服務失敗、服務 exe 路徑不符)下不會停止舊 Watchdog,紀錄不會被 `resume_watchdog` 收尾,原本對同一目標永遠 `Skipped("上一次替換尚未收尾")`。新增 `WATCHDOG_REPLACE_STALE`(15 分鐘,從 `started_at` 起算;Agent 替換最長約停止 + 健康檢查 2 分鐘 + 還原 2 分鐘):超過且自己仍不是目標版本 → 記 `rolled_back`(失敗次數加一、`HEALTH_CHECK_FAILED`「替換逾時未完成」),回 `Failed` 由呼叫端設冷卻;冷卻後可再試一次,達 `MAX_ATTEMPTS` 不再嘗試。未滿 15 分鐘維持 `Skipped`;`started_at` 解析不了視為逾時(不讓壞紀錄永遠擋住替換)。
+- **看守暫停可測**(建議):`guard.rs` 的「替換中暫停、結束後重設」抽成 `Guard::paused`,補單元測試。管道 `get_status` 記錄 `watchdog_seen` 依賴 `NamedPipeServer` 與 SCM,抽不成純函式,**未補測試**(VM 驗收 §8.6 涵蓋)。
+- **不做**:
+  - `sha256_file` / `same_path` / `known_code` 搬到 `rustit-common`:與 P6-2 一致,兩個 crate 各自一份,不在 P6-3 擴大範圍。
+  - `cfg!(feature = "broken-exit")` 改寫:沿用 Agent 0.7.0 的 broken-exit 做法,保持兩個 crate 一致。
+  - 「Agent 拒絕 / 驗證失敗時伺服端沒有事件」:**刻意設計**。Watchdog 路徑的事件白名單只收 `component = agent`,Watchdog 送不出 `component = watchdog` 的事件;失敗經 Watchdog 上報的 `upgrade` 進度(`component = watchdog`,含 `state`、`attempts`、`error_code`)讓主機得知。Agent 接受之後的失敗(替換、健康檢查、還原)才由 Agent 上報 `upgrade_failed`。
+- **已知限制(只影響紀錄)**:重裝 MSI 換回較舊的 Watchdog 時,若本機紀錄是 `succeeded`(目標 ≠ 目前版本),`resume_watchdog` 會誤記一次 `rolled_back`(失敗次數加一、設冷卻);有 `MAX_ATTEMPTS` 上限,`agent.upgrade` 可重設。
+
+**資安稽核後調整**(security-auditor 子代理,2026-10-21:High / Medium 0、Low 6;修 L-1、L-2、L-3、L-5)
+
+- **L-1 要求方已放棄仍替換**:`accept` 的交接抽成 `hand_over`(可測):`oneshot` 送 `accepted` 失敗(管道請求已逾時或用戶端斷線)就記警告並**不替換**。Agent 端驗證另有期限 `VALIDATE_LIMIT` 50 秒(`tokio::time::timeout` 包住阻塞執行緒,逾時回 `REPLACE_FAILED`;阻塞執行緒仍會跑完,但只讀檔、結果丟棄)。三者關係寫在三處常數註解:**Agent 驗證 50 秒 < 管道 `REPLACE_VERIFY_LIMIT` 60 秒 < Watchdog `REPLACE_ACK_TIMEOUT` 70 秒**,驗證逾時時 Watchdog 收得到明確的拒絕。`accepted` 送進 oneshot 只代表管道請求還在等,寫回管道仍可能失敗;此時 Watchdog 記失敗而 Agent 繼續替換,由新版 `resume_watchdog` 依實際版本收尾。
+- **L-2 驗證之間被換檔(TOCTOU)**:簽章者 / 版本資源檢查抽成 `check_signed`;`replace_files` 在 `.new` 驗完雜湊後、`rename` 前,對 `.new` 再跑一次 Authenticode + 簽章者(`Request` 帶主機清單 `signers` 與本機 `trusted`)+ 版本資源,失敗回 `SIGNATURE_INVALID` / `SIGNER_NOT_TRUSTED` / `HASH_MISMATCH` 並照原失敗路徑啟動舊版、不換檔。
+- **L-3 快取是 junction**:`not_reparse` 從 Watchdog `lib.rs` 搬到 `rustit_common::winfile`(Watchdog 改用共用版,行為不變),另加 `plain_file`。Agent `cache_safe`:`cache\`、`cache\watchdog\` 必須是一般目錄、`replace.json` 存在時必須是一般檔案;`validate`(回 `REPLACE_FAILED`,拒絕 `replace_watchdog`)、`replace`(寫標記前,失敗不動服務)、`resume`(不讀、不寫、不刪)都先檢查。
+- **L-5 標記**:`replace.json` 讀取前限制 ≤ 4 KB(超過或內容損毀:記警告並刪除,不收尾);`Marker` 新增 `old_sha256`(寫標記前算的安裝目錄 exe 雜湊)。`replace_files` 確認 exe 與 `previous\` 都是這個雜湊;`restore_files` 還原前比對 `previous\`,不符就回錯(→ `ROLLBACK_FAILED`)且**不覆寫 exe**。0.8.0 尚未發佈,標記格式沒有相容需求,舊格式視為損毀。
+- 測試:Agent 替換 Watchdog 22 → 34 項(交接 3、`.new` 簽章 / 簽章者 / 版本不符、標記超過 4 KB 與損毀、標記含舊版雜湊、exe 在標記後被改、`previous\` 被換 → 不還原 / `ROLLBACK_FAILED`、junction 快取三處拒絕、標記是目錄、期限順序);common 新增 junction 測試(`mklink /J`,不需系統管理員)。
+
+**上線前檢查(不在 P6-3 修)**
+
+- **L-4 降版沒有本機最低版本下限**(沿用 P6-2 L7):上線前 `agent.toml` 設本機版本下限、`-Env prod` 拒絕測試憑證指紋、壞版本改用只在 VM 信任的另一張憑證。
+- **L-6 `scm.rs` `exe_of` 對沒有引號的 ImagePath 取第一個 `.exe`**(既有 P5 程式):P6-3 以「服務程式必須是安裝目錄的 `rustit-watchdog.exe`」fail-closed;但 `pid == None`(服務已停止)時 `swap` 仍會換檔,建議之後讓 `swap` 在 `pid == None` 時拒絕。
+
+### 8.6 P6-3 VM 驗收步驟(`RUSTIT-P34`;VM 內指令由需求方執行,API 步驟 Claude 可經瀏覽器執行,寫入測試區前先取得明確允許)
+
+**前置**
+
+1. P6-3 已合併 develop;endpoint-server 不必重新部署(後端沒改)。
+2. 開發機(需求方):`build-agent-msi.ps1 -Env test … -TrustedSigners <T>` → `GigaNexusAgent-0.8.0-test.msi`(Agent 0.8.0 + Watchdog 0.3.0);
+   `build-test-release.ps1 -Component watchdog -Version 0.3.1 -Thumbprint <T>`、`-Component watchdog -Version 0.3.0 -Thumbprint <T>`(降版用)、`-Component watchdog -Version 0.3.2-broken -Features broken-exit -Thumbprint <T>`、
+   `-Component agent -Version 0.8.1 -Thumbprint <T>`(確認 Agent 升級沒被影響);反向用:未簽章 0.3.3(`$env:RUSTIT_BUILD_VERSION='0.3.3'; cargo build --release -p rustit-watchdog --target-dir target\rel-watchdog-0.3.3`,不簽)、第二張憑證簽的 0.3.4。
+3. 升級檔複製到主機 2 `/srv/giganexus/ita-releases/watchdog/<版本>/rustit-watchdog.exe`(Agent 0.8.1 放 `agent/0.8.1/`);登錄(`component: watchdog`、`fileName: rustit-watchdog.exe`、`signerThumbprints`)→ 0.3.0、0.3.1 發佈(`published`),壞版與反向版維持 `draft`(只經 pilot)。
+4. VM 先建檢查點「P6-3 前(Agent 0.7.0 / Watchdog 0.2.0)」;裝置維持 `pilot` 環,pilot 兩個元件目標先清空。
+
+| # | 步驟 | 通過條件 |
+| --- | --- | --- |
+| 0 | `msiexec /i GigaNexusAgent-0.8.0-test.msi /qn /l*v install.log`(升級安裝) | 兩個服務執行中;`ProductVersion` Agent 0.8.0、Watchdog 0.3.0;GigaItApp / API 顯示 Agent 0.8.0、Watchdog 0.3.0 |
+| 1 | pilot `watchdog` 目標設 `0.3.1`,下 `agent.upgrade`(`params: { component: "watchdog" }`)讓 Watchdog 立即上報 | 約 1 分鐘內:`rustit-watchdog.exe` 的 `ProductVersion` = 0.3.1、`previous\rustit-watchdog.exe` = 0.3.0;`GET /devices/{id}/upgrade` watchdog `succeeded`、`currentVersion` 0.3.1;事件 `upgrade_started` / `upgrade_succeeded`(`component: watchdog`);Agent 日誌「開始替換 Watchdog」、新 Watchdog 日誌「Watchdog 已升級為 0.3.1」;**沒有** `watchdog_stopped` / `watchdog_binary_changed` / `agent_tampered` |
+| 2 | 目標改 `0.3.2-broken`(啟動即結束) | 約 2 分鐘後還原 0.3.1(`rustit-watchdog.exe` 回到 0.3.1);事件 `upgrade_failed`(`rolled_back: true`、`HEALTH_CHECK_FAILED`);API `rolled_back`;冷卻 30 分鐘後(或 `agent.upgrade`)再試一次仍失敗 → `attempts = 2` 後不再下發、告警 `upgrade_failed` |
+| 3 | 反向:① 目標 `0.3.3`(未簽章)② `0.3.4`(第二張憑證) | ① `SIGNATURE_INVALID` ② `SIGNER_NOT_TRUSTED`,都在 **Watchdog 驗證階段**被擋(日誌「升級 Watchdog … 失敗」),Agent 沒收到 `replace_watchdog`、Watchdog 服務沒被停止、`previous\` 不變 |
+| 4 | 降版:目標改 `0.3.0` | 換回 0.3.0 並 `succeeded`(0.3.0 = 版本下限,允許) |
+| 5 | 替換中重開機:目標設 `0.3.1`,下 `agent.upgrade`;Agent 日誌出現「開始替換 Watchdog」後立即 `Restart-Computer -Force`(或用先前的自動偵測腳本,關鍵字改為「開始替換 Watchdog」) | 開機後 Agent 日誌「上一次替換 Watchdog … 在中途中斷,收尾中」→ `succeeded` 或 `rolled_back`;兩個服務都執行中、沒有停在半套;5 分鐘內 API 狀態一致 |
+| 6 | 回歸:同時把 pilot `agent` 目標設 `0.8.1`,`agent.upgrade` | Agent 0.8.0 → 0.8.1 照常 `succeeded`(Watchdog 升級 Agent 沒被影響);兩個元件的 `upgrade` 狀態互不覆蓋 |
+
+查看:VM `C:\ProgramData\GigaNexus\Agent\logs\agent-*.log`(替換 Watchdog 的流程在 Agent 日誌)與 `watchdog-*.log`(`-Encoding UTF8`,系統管理員);主機 `ita.device_upgrade`、`ita.device_event`。
+**單元測試涵蓋、VM 不另測**:Agent 的第二道驗證(路徑穿越、雜湊不符、簽章者不符等,Watchdog 正常運作時送不出這些請求)、服務程式路徑被改、`previous\` 還原失敗。
+**仍未驗(P6-2 遺留)**:升級時有執行中的指令且逾時的 `AGENT_UPGRADING` 情境;全新安裝 MSI(無舊版)的路徑。驗收後依設計 §8.3 資安項目移除 VM `LocalMachine\Root` 的兩張測試根憑證。
 
 ## 9. 要你決定的事
 

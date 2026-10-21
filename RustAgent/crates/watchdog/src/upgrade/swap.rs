@@ -1,7 +1,9 @@
 //! 正式的升級環境(§5.1 `swap.rs`):SCM 停止 / 啟動 Agent、本機管道 `prepare_shutdown` / `get_status`、mTLS 下載、
 //! WinVerifyTrust、`watchdog.db` 的 `upgrade` 表與事件、維護中旗標。備份 / 替換 / 還原的檔案操作在 [`super::Upgrader`]。
 
-use super::{Fetched, PREPARE_TIMEOUT, UpgradeEnv, UpgradeRecord};
+use super::{
+    Fetched, PREPARE_TIMEOUT, REPLACE_ACK_TIMEOUT, UpgradeEnv, UpgradeRecord, UpgradeTarget,
+};
 use crate::Shared;
 use crate::monitor::AgentStatus;
 use log::warn;
@@ -103,9 +105,9 @@ impl UpgradeEnv for RealEnv {
         scm::hands_off()
     }
 
-    fn load(&self) -> Option<UpgradeRecord> {
+    fn load_component(&self, component: &str) -> Option<UpgradeRecord> {
         let outbox = self.shared.outbox.lock().unwrap_or_else(|p| p.into_inner());
-        outbox.upgrade_get(super::COMPONENT).unwrap_or_else(|e| {
+        outbox.upgrade_get(component).unwrap_or_else(|e| {
             warn!("{e}");
             None
         })
@@ -124,13 +126,13 @@ impl UpgradeEnv for RealEnv {
         self.shared.changed.notify_one();
     }
 
-    fn clear(&self) {
+    fn clear_component(&self, component: &str) {
         if let Err(e) = self
             .shared
             .outbox
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .upgrade_delete(super::COMPONENT)
+            .upgrade_delete(component)
         {
             warn!("{e}");
         }
@@ -147,6 +149,44 @@ impl UpgradeEnv for RealEnv {
             warn!("{e}");
         }
         self.shared.changed.notify_one();
+    }
+
+    async fn replace_watchdog(
+        &self,
+        agent_pid: u32,
+        target: &UpgradeTarget,
+        path: &Path,
+    ) -> Result<(), (String, String)> {
+        let req = Envelope::new(
+            "replace_watchdog",
+            super::replace_watchdog_body(target, path),
+        );
+        let reply = rustit_common::pipe::request(&req, agent_pid, REPLACE_ACK_TIMEOUT)
+            .await
+            .map_err(|e| ("REPLACE_FAILED".to_string(), e.to_string()))?;
+        if reply.kind != "replace_watchdog_ack" {
+            return Err((
+                "REPLACE_FAILED".into(),
+                format!(
+                    "Agent 回應 {}(舊版 Agent 不支援 replace_watchdog)",
+                    reply.kind
+                ),
+            ));
+        }
+        let body = reply.body.unwrap_or_default();
+        if body["accepted"] == json!(true) {
+            return Ok(());
+        }
+        Err((
+            body["error_code"]
+                .as_str()
+                .unwrap_or("REPLACE_FAILED")
+                .to_string(),
+            body["error_message"]
+                .as_str()
+                .unwrap_or("Agent 拒絕替換")
+                .to_string(),
+        ))
     }
 
     fn maintenance(&self, on: bool) {
