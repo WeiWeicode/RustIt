@@ -174,7 +174,7 @@ export class MemorySoftwareStore implements SoftwareStore {
   async activeInstallPackages(deviceRef: number) {
     return this.commands.commands
       .filter((c) => c.deviceRef === deviceRef && c.kind === 'software.install' && ['sent', 'acked', 'running'].includes(c.state))
-      .map((c) => this.pkgParam(c.params));
+      .map((c) => ({ packageId: this.pkgParam(c.params), params: JSON.parse(c.params) as Record<string, unknown> }));
   }
   async deviceRing(deviceRef: number) {
     return this.devices.devices.some((d) => d.id === deviceRef) ? (this.ringOf.get(deviceRef) ?? 'all') : null;

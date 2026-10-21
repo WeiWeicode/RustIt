@@ -285,17 +285,17 @@ export class SqlSoftwareStore implements SoftwareStore {
     }));
   }
 
-  async activeInstallPackages(deviceRef: number): Promise<string[]> {
+  async activeInstallPackages(deviceRef: number): Promise<{ packageId: string; params: Record<string, unknown> }[]> {
     const r = await (
       await this.request()
     )
       .input('dev', sql.Int, deviceRef)
       .query(`SELECT params FROM ita.command WHERE device_ref = @dev AND kind = 'software.install' AND state IN ('sent', 'acked', 'running')`);
-    const out: string[] = [];
+    const out: { packageId: string; params: Record<string, unknown> }[] = [];
     for (const row of r.recordset as Row[]) {
       try {
-        const id = (JSON.parse(String(row.params)) as { package_id?: unknown }).package_id;
-        if (typeof id === 'string') out.push(id.toLowerCase());
+        const params = JSON.parse(String(row.params)) as Record<string, unknown>;
+        if (typeof params.package_id === 'string') out.push({ packageId: params.package_id.toLowerCase(), params });
       } catch {
         // 參數不是 JSON(不會發生:由本服務寫入);略過
       }

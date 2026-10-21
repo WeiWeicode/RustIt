@@ -844,7 +844,7 @@ export interface SoftwareStore {
   /** 此套件的 software.install 指令(新到舊) */
   installResults(packageId: string, limit: number): Promise<InstallResultRow[]>;
   /** 這台尚未結束(sent / acked / running)的 software.install 的 package_id(下載授權) */
-  activeInstallPackages(deviceRef: number): Promise<string[]>;
+  activeInstallPackages(deviceRef: number): Promise<{ packageId: string; params: Record<string, unknown> }[]>;
   deviceRing(deviceRef: number): Promise<Ring | null>;
   /** 各樣式(LIKE,已跳脫)的已安裝台數:active、未合併的裝置;companies 為資料範圍(undefined = 全部) */
   installedCounts(patterns: string[], companies?: string[]): Promise<number[]>;

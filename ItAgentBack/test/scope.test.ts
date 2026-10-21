@@ -420,8 +420,9 @@ describe('管理 API 的資料範圍(:51240)', () => {
     const reg = await call(tokens.all!, 'POST', '/v1/software', body);
     assert.equal(reg.statusCode, 200, reg.body);
     const pkgId = reg.json().packageId as string;
-    // 已安裝台數:甲只看到 PC-A;全部公司看到 PC-A、PC-B(PC-U 沒有資產)
-    const count = async (token: string) => ((await call(token, 'GET', '/v1/software')).json().items as { installedCount: number }[])[0]!.installedCount;
+    // 已安裝台數:甲只看到 PC-A;全部公司看到 PC-A、PC-B(PC-U 沒有資產)。清單只算已發佈的套件(M6),draft 看詳情
+    assert.equal(((await call(tokens.all!, 'GET', '/v1/software')).json().items as { installedCount: number | null }[])[0]!.installedCount, null);
+    const count = async (token: string) => (await call(token, 'GET', `/v1/software/${pkgId}`)).json().installedCount as number;
     assert.equal(await count(tokens.all!), 2);
     assert.equal(await count(tokens.a!), [devA, devB].filter((d) => env.sql.byId(d.id).company === '甲公司').length);
     assert.equal(await count(tokens.none!), 0);

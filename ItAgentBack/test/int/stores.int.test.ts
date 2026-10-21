@@ -648,7 +648,7 @@ describe('SQL Server + Mongo + Redis', () => {
     assert.deepEqual(await sw.activeInstallPackages(d.id), []);
     const rec1 = (await cmds.getCommand(c1.commandId))!;
     await cmds.transition(rec1.id, ['queued'], { state: 'sent', at: new Date() });
-    assert.deepEqual(await sw.activeInstallPackages(d.id), [p.packageId]);
+    assert.deepEqual((await sw.activeInstallPackages(d.id)).map((a) => a.packageId), [p.packageId]);
     assert.equal(await cmds.activeOfKinds(['software.install', 'software.uninstall']), 1);
     assert.equal((await cmds.queuedOfKinds(['software.install'], new Date(), 10)).filter((c) => c.deviceRef === d.id).length, 1);
     // 撤回:同一交易取消尚未送出的安裝(已送出的不動)

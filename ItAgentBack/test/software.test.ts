@@ -717,6 +717,11 @@ describe('套件下載 API 與管理 API', () => {
     env.store.ringOf.set(device.id, 'all');
     assert.equal((await agent.inject({ url, headers })).statusCode, 404);
     env.store.ringOf.set(device.id, 'pilot');
+    // M2:目錄改了安裝參數,已送出的舊快照不給;改回後可下載
+    await env.software.update(ctx, IT, r.packageId, { installArgs: 'ALLUSERS=1' });
+    assert.equal((await agent.inject({ url, headers })).statusCode, 404);
+    await env.software.update(ctx, IT, r.packageId, { installArgs: '' });
+    assert.equal((await agent.inject({ url, headers })).statusCode, 200);
     // 指令結束後不再給
     await env.commands.onUpdate(ctx, device.id, { command_id: cmd.commandId, state: 'failed', error_code: 'INSTALL_FAILED' });
     assert.equal((await agent.inject({ url, headers })).statusCode, 404);

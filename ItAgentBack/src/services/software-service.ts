@@ -194,6 +194,18 @@ export function installSnapshot(pkg: PackageRecord, opts: { ignorePower?: boolea
   };
 }
 
+/** 純函式:指令的安裝快照與目前目錄一致(檔案、安裝參數、偵測規則、重開機政策) */
+export function snapshotCurrent(pkg: PackageRecord, p: Record<string, unknown>): boolean {
+  const d = p.detect as { type?: unknown; value?: unknown } | undefined;
+  return (
+    p.sha256 === pkg.sha256 &&
+    (p.install_args ?? '') === (pkg.installArgs ?? '') &&
+    d?.type === pkg.detectType &&
+    d?.value === pkg.detectValue &&
+    p.reboot_policy === pkg.rebootPolicy
+  );
+}
+
 /** 純函式:software.uninstall 參數快照 */
 export function uninstallSnapshot(pkg: PackageRecord): Record<string, unknown> {
   return {
@@ -420,8 +432,11 @@ export class SoftwareService {
 
   async list(ctx: MgmtCtx, f: { status?: PackageStatus; q?: string }): Promise<{ items: PackageView[] }> {
     const rows = await this.sqlDo(ctx, 'package.list', () => this.store.listPackages({ status: f.status, q: f.q?.trim() || undefined }));
-    const counts = await this.installedCount(ctx, rows);
-    return { items: rows.map((p, i) => packageView(p, counts[i] ?? null)) };
+    // 已安裝台數是前置萬用字元的 LIKE(無法用索引):清單只算已發佈的套件,其他看詳情(資安稽核 M6)
+    const published = rows.filter((p) => p.status === 'published');
+    const counts = await this.installedCount(ctx, published);
+    const byId = new Map(published.map((p, i) => [p.packageId, counts[i] ?? null]));
+    return { items: rows.map((p) => packageView(p, byId.get(p.packageId) ?? null)) };
   }
 
   /** 軟體庫內尚未登錄的安裝檔 */
@@ -697,10 +712,13 @@ export class SoftwareService {
     const [pkg, active, ring] = await this.sqlDo(ctx, 'package.download', () =>
       Promise.all([this.store.getPackage(id), this.store.activeInstallPackages(device.id), this.store.deviceRing(device.id)]),
     );
-    // 只給被指派(有尚未結束的此套件 software.install)的裝置;端點不能任意下載軟體庫的檔案
-    if (!pkg || !active.includes(id) || deployDenied(pkg, ring, 'install')) {
+    // 只給被指派(有尚未結束的此套件 software.install)的裝置;端點不能任意下載軟體庫的檔案。
+    // 指令快照必須與目前目錄一致:套件改過參數(退回 draft 再發佈)之前送出的舊快照不給(資安稽核 M2)
+    const assigned = active.some((a) => a.packageId === id);
+    const current = !!pkg && active.some((a) => a.packageId === id && snapshotCurrent(pkg, a.params));
+    if (!pkg || !current || deployDenied(pkg, ring, 'install')) {
       ctx.log.warn(
-        { deviceId: device.deviceId, packageId: id, status: pkg?.status ?? 'missing', assigned: active.includes(id), ring },
+        { deviceId: device.deviceId, packageId: id, status: pkg?.status ?? 'missing', assigned, current, ring },
         '下載的套件不是這台被指派的安裝,拒絕',
       );
       throw notFound();
