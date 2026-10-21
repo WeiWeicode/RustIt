@@ -1,0 +1,92 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://giganexus.local/rustit/contracts/watchdog.schema.json",
+  "title": "POST /agent/v1/watchdog/report 請求",
+  "description": "Watchdog 上報(ENDPOINT-AGENT-GUIDE §7.3;PLATFORM-PLAN P5 §4.10 A5;P5-MONITOR-DESIGN §2.3)。與 Agent 同一個位址 :9443、同一張裝置憑證;每 report_interval_sec(預設 300)秒一次,狀態改變或有新事件時立即送。events 先寫 Watchdog 本機紀錄,主機回 accepted 才刪。主機只讓這條路徑更新 Watchdog 欄位與寫 Watchdog 事件。停用 / 退役裝置回 403(與 Agent 相同)。P6:請求帶 upgrade(升級進度),回應 target 帶各元件目標版本與下載資訊(P6-UPGRADE-DESIGN §2.1)。",
+  "type": "object",
+  "required": ["watchdog_version", "reported_at", "agent"],
+  "properties": {
+    "watchdog_version": { "type": "string", "minLength": 1, "maxLength": 32 },
+    "reported_at": { "type": "string", "format": "date-time", "description": "端點時間" },
+    "agent": { "$ref": "#/definitions/AgentState" },
+    "agent_restarts_24h": { "type": "integer", "minimum": 0, "description": "24 小時內 Agent 非正常重啟次數(crashed + hung)" },
+    "cert_not_after": { "type": "string", "format": "date-time", "description": "裝置憑證到期日;讀不到時省略" },
+    "events": {
+      "type": "array",
+      "maxItems": 50,
+      "items": { "$ref": "https://giganexus.local/rustit/contracts/event.schema.json#/definitions/Event" }
+    },
+    "upgrade": { "$ref": "#/definitions/UpgradeProgress" }
+  },
+  "definitions": {
+    "AgentState": {
+      "description": "Watchdog 從 SCM 與本機管道 get_status 看到的 Agent",
+      "type": "object",
+      "required": ["service_state", "start_type"],
+      "properties": {
+        "service_state": {
+          "type": "string",
+          "enum": ["running", "stopped", "start_pending", "stop_pending", "paused", "missing", "unknown"],
+          "description": "missing = 服務不存在"
+        },
+        "start_type": { "type": "string", "enum": ["auto", "manual", "disabled", "missing", "unknown"] },
+        "pid": { "type": "integer", "minimum": 0 },
+        "exe_present": { "type": "boolean", "description": "服務設定指向的 exe 是否存在" },
+        "status_ok": { "type": "boolean", "description": "最近一次本機管道 get_status 是否成功(Agent 未執行時省略)" },
+        "status_at": { "type": "string", "format": "date-time" },
+        "version": { "type": "string", "maxLength": 32, "description": "get_status 回報的 Agent 版本" },
+        "ws_connected": { "type": "boolean" },
+        "last_heartbeat_ack": { "type": "string", "format": "date-time" },
+        "last_error": { "type": "string", "maxLength": 300, "description": "Agent 最近一次錯誤摘要,或 get_status 失敗原因" }
+      }
+    },
+    "WatchdogReportResponse": {
+      "title": "POST /agent/v1/watchdog/report 回應(200)",
+      "type": "object",
+      "required": ["server_time", "accepted"],
+      "properties": {
+        "server_time": { "type": "string", "format": "date-time" },
+        "accepted": { "type": "array", "items": { "type": "string", "format": "uuid" }, "description": "已保存(含先前已收過)的 event_id" },
+        "report_interval_sec": { "type": "integer", "minimum": 60, "maximum": 3600, "description": "下次定期上報間隔(預設 300)" },
+        "target": {
+          "type": ["object", "null"],
+          "description": "各元件的目標版本(P6 升級);不需升級、同版本已失敗 2 次、或超過同時升級上限的元件為 null。主機未啟用升級時整個為 null;Watchdog 0.1.0 忽略",
+          "properties": {
+            "agent": { "oneOf": [{ "$ref": "#/definitions/UpgradeTarget" }, { "type": "null" }] },
+            "watchdog": { "oneOf": [{ "$ref": "#/definitions/UpgradeTarget" }, { "type": "null" }] }
+          }
+        }
+      }
+    },
+    "UpgradeProgress": {
+      "description": "進行中或剛結束的升級(P6);沒有升級時省略。結束狀態(succeeded / failed / rolled_back)在結束後的上報帶,主機記錄於 ita.device_upgrade",
+      "type": "object",
+      "required": ["component", "target_version", "state"],
+      "properties": {
+        "component": { "type": "string", "enum": ["agent", "watchdog"] },
+        "target_version": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "from_version": { "type": "string", "maxLength": 32 },
+        "state": { "type": "string", "enum": ["downloading", "verifying", "installing", "succeeded", "failed", "rolled_back"] },
+        "attempts": { "type": "integer", "minimum": 0, "maximum": 100, "description": "同一目標版本的失敗次數(含這次)" },
+        "error_code": { "$ref": "https://giganexus.local/rustit/contracts/event.schema.json#/definitions/UpgradeErrorCode" },
+        "error_message": { "type": "string", "maxLength": 300 }
+      }
+    },
+    "UpgradeTarget": {
+      "description": "一個元件的目標版本(P6):下載 url(經 :9443、支援 Range)→ 比對 size_bytes 與 sha256 → 驗 Authenticode,簽章者 SHA-1 指紋必須同時在 signer_thumbprints 與端點本機信任清單內",
+      "type": "object",
+      "required": ["version", "url", "sha256", "size_bytes", "signer_thumbprints"],
+      "properties": {
+        "version": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "url": {
+          "type": "string",
+          "pattern": "^/agent/v1/releases/(agent|watchdog)/[0-9]{1,4}[.][0-9]{1,4}[.][0-9]{1,4}(-[0-9A-Za-z.-]{1,20})?/[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$",
+          "description": "相對路徑,以 agent.toml 的 Gateway 位址組成完整網址"
+        },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "size_bytes": { "type": "integer", "minimum": 1 },
+        "signer_thumbprints": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "type": "string", "pattern": "^[0-9a-f]{40}$" } }
+      }
+    }
+  }
+}

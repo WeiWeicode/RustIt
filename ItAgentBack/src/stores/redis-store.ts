@@ -55,6 +55,10 @@ export class RedisStateStore implements StateStore {
     await this.redis.set(this.key('hash', deviceId), hash, 'EX', HASH_TTL_SEC);
   }
 
+  async clearHash(deviceId: string): Promise<void> {
+    await this.redis.del(this.key('hash', deviceId));
+  }
+
   async close(): Promise<void> {
     this.redis.disconnect();
   }

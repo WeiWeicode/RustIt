@@ -1,0 +1,33 @@
+[package]
+name = "rustit-watchdog"
+version = "0.2.0"
+edition = "2024"
+description = "GigaNexus 端點 Watchdog:看守 Agent 服務(重啟、卡住、被停止 / 改設定)並自己經 :9443 上報;升級 Agent(下載、驗證、替換、失敗還原)(RustIt PLATFORM-PLAN P5、P6,ENDPOINT-AGENT-GUIDE §7)"
+
+[dependencies]
+# 設定、憑證與連線、退避、信封、停止訊號、檔案日誌、路徑、服務控制與本機管道(與 Agent 共用,PLATFORM-PLAN §3.1)
+rustit-common = { path = "../common" }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "net", "io-util"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+log = "0.4"
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
+# 本機紀錄 state\watchdog.db:待送事件(不加密,只有服務狀態與版本;需求方 2026-10-19 決定,P5-MONITOR-DESIGN §9-4)
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+uuid = { version = "1.28.0", features = ["v4"] }
+# 升級檔 SHA-256(P6-2;與 rustit-common 相同版本)
+sha2 = "0.10"
+hex = "0.4"
+
+[build-dependencies]
+# exe 版本資源(ProductVersion):升級前比對下載檔的版本(P6-UPGRADE-DESIGN §8.2);已在 Cargo.lock(Tauri 用),不另下載
+embed-resource = "3.0.11"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+jsonschema = { version = "0.58", default-features = false }
+
+[target."cfg(windows)".dependencies]
+# Windows 服務 GigaNexusWatchdog:SCM 進入點(指南 §7.1)
+windows-service = "0.8.1"

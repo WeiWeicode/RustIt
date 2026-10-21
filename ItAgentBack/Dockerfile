@@ -18,6 +18,8 @@ COPY --from=build /app/dist dist/
 COPY ItAgentBack/package.json ./
 COPY ItAgentBack/db/migrations/ db/migrations/
 COPY docs/contracts/*.schema.json contracts/
+# 指令附檔目錄(volume ita_command_files 掛在這裡;新建的具名 volume 沿用此目錄的擁有者,node 才能寫入)
+RUN mkdir -p /data/command-files && chown node:node /data/command-files
 USER node
 EXPOSE 51240 51241
 HEALTHCHECK --interval=10s --timeout=3s --retries=5 CMD wget -qO- http://127.0.0.1:51240/healthz >/dev/null || exit 1

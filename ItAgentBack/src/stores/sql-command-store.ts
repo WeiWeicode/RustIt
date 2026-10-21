@@ -1,15 +1,29 @@
 /**
- * 指令儲存(SQL Server 2012,migration 0003;PLATFORM-PLAN P4、ENDPOINT-AGENT-GUIDE §8.4–§8.5):ita.command、ita.command_batch。
+ * 指令儲存(SQL Server 2012,migration 0003;PLATFORM-PLAN P4、ENDPOINT-AGENT-GUIDE §8.4–§8.5):ita.command、ita.command_batch、
+ * ita.command_file(指令附檔索引,P4-2;檔案本身在 COMMAND_FILES_DIR)。
  * 與 SqlDeviceStore 共用連線池。狀態轉換一律條件更新(WHERE state IN …):多個來源同時更新時只有一個成功,狀態只能往前。
  */
 import sql from 'mssql';
-import type { BatchRecord, CommandFilter, CommandPatch, CommandRecord, CommandState, CommandStore, NewBatch, NewCommand } from './types.js';
+import { companyIn } from './sql-store.js';
+import type {
+  BatchRecord,
+  CommandFileRecord,
+  CommandFileStore,
+  CommandFilter,
+  CommandPatch,
+  CommandRecord,
+  CommandState,
+  CommandStore,
+  NewBatch,
+  NewCommand,
+  NewCommandFile,
+} from './types.js';
 
 type Row = Record<string, unknown>;
 
 const cut = (s: string | null | undefined, n: number): string | null => (s == null || s === '' ? null : s.length > n ? s.slice(0, n) : s);
 
-const COLS = `c.id, c.command_id, c.batch_ref, b.batch_id, b.max_concurrent, c.device_ref, d.device_id, d.computer_name, c.cert_dn, c.kind, c.level, c.params,
+const COLS = `c.id, c.command_id, c.batch_ref, b.batch_id, b.max_concurrent, c.device_ref, d.device_id, d.computer_name, d.company AS device_company, c.cert_dn, c.kind, c.level, c.params,
   c.state, c.progress, c.result_summary, c.error_code, c.error_message, c.expires_at, c.timeout_at, c.send_count, c.created_by_emp, c.created_by_name,
   c.request_id, c.created_at, c.sent_at, c.acked_at, c.started_at, c.finished_at`;
 const FROM = `ita.command c JOIN ita.device d ON d.id = c.device_ref LEFT JOIN ita.command_batch b ON b.id = c.batch_ref`;
@@ -28,6 +42,7 @@ function toCommand(r: Row): CommandRecord {
     deviceRef: Number(r.device_ref),
     deviceId: String(r.device_id).toLowerCase(),
     computerName: String(r.computer_name),
+    deviceCompany: r.device_company == null ? null : String(r.device_company),
     certDn: String(r.cert_dn),
     kind: String(r.kind),
     level: r.level === 'admin' ? 'admin' : 'basic',
@@ -51,7 +66,25 @@ function toCommand(r: Row): CommandRecord {
   };
 }
 
-export class SqlCommandStore implements CommandStore {
+const FILE_COLS = `f.id, f.file_id, f.command_ref, c.command_id, f.file_name, f.size_bytes, f.sha256, f.storage_path, f.created_at, f.expires_at`;
+const FILE_FROM = `ita.command_file f JOIN ita.command c ON c.id = f.command_ref`;
+
+function toFile(r: Row): CommandFileRecord {
+  return {
+    id: Number(r.id),
+    fileId: String(r.file_id).toLowerCase(),
+    commandRef: Number(r.command_ref),
+    commandId: String(r.command_id).toLowerCase(),
+    fileName: String(r.file_name),
+    sizeBytes: Number(r.size_bytes),
+    sha256: String(r.sha256),
+    storagePath: String(r.storage_path),
+    createdAt: r.created_at as Date,
+    expiresAt: r.expires_at as Date,
+  };
+}
+
+export class SqlCommandStore implements CommandStore, CommandFileStore {
   constructor(private readonly pool: () => Promise<sql.ConnectionPool>) {}
 
   private async request(): Promise<sql.Request> {
@@ -161,6 +194,13 @@ export class SqlCommandStore implements CommandStore {
     return this.batchWhere('b.batch_id = @bid', (r) => r.input('bid', sql.UniqueIdentifier, batchId));
   }
 
+  async batchCompanies(batchRef: number): Promise<(string | null)[]> {
+    const r = await (await this.request())
+      .input('batch', sql.BigInt, batchRef)
+      .query(`SELECT DISTINCT d.company FROM ita.command c JOIN ita.device d ON d.id = c.device_ref WHERE c.batch_ref = @batch`);
+    return (r.recordset as Row[]).map((x) => (x.company == null ? null : String(x.company)));
+  }
+
   async listCommands(f: CommandFilter): Promise<CommandRecord[]> {
     const req = (await this.request()).input('limit', sql.Int, f.limit);
     const where: string[] = [];
@@ -184,6 +224,7 @@ export class SqlCommandStore implements CommandStore {
       where.push('c.id < @before');
       req.input('before', sql.BigInt, f.beforeId);
     }
+    if (f.companies) where.push(companyIn(req, f.companies));
     const r = await req.query(`SELECT TOP (@limit) ${COLS} FROM ${FROM} ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY c.id DESC`);
     return (r.recordset as Row[]).map(toCommand);
   }
@@ -199,7 +240,8 @@ export class SqlCommandStore implements CommandStore {
       .input('result', sql.NVarChar(4000), p.resultSummary ?? null)
       .input('code', sql.VarChar(64), cut(p.errorCode, 64))
       .input('msg', sql.NVarChar(1000), cut(p.errorMessage, 1000))
-      .input('timeout', sql.DateTime2(3), p.timeoutAt ?? null);
+      .input('timeout', sql.DateTime2(3), p.timeoutAt ?? null)
+      .input('markStarted', sql.Bit, p.markStarted === true);
     const states = from.map((s, k) => {
       req.input(`f${k}`, sql.VarChar(16), s);
       return `@f${k}`;
@@ -216,7 +258,8 @@ export class SqlCommandStore implements CommandStore {
         send_count = CASE WHEN @state = 'sent' THEN send_count + 1 ELSE send_count END,
         sent_at = CASE WHEN @state = 'sent' THEN @at ELSE sent_at END,
         acked_at = CASE WHEN @state IN ('acked', 'running', 'succeeded', 'failed') AND acked_at IS NULL AND sent_at IS NOT NULL THEN @at ELSE acked_at END,
-        started_at = CASE WHEN @state = 'running' AND started_at IS NULL THEN @at ELSE started_at END,
+        started_at = CASE WHEN started_at IS NOT NULL THEN started_at WHEN @state = 'running' THEN @at
+          WHEN @markStarted = 1 THEN COALESCE(acked_at, @at) ELSE started_at END,
         finished_at = CASE WHEN @state IN ('succeeded', 'failed', 'canceled', 'expired') THEN @at ELSE finished_at END,
         updated_at = SYSUTCDATETIME()
       WHERE id = @id AND state IN (${states.join(', ')})`);
@@ -268,5 +311,46 @@ export class SqlCommandStore implements CommandStore {
       WHERE (c.state IN ('queued', 'sent') AND c.expires_at <= @now) OR (c.state IN ('acked', 'running') AND c.timeout_at <= @now)
       ORDER BY c.id`);
     return (r.recordset as Row[]).map(toCommand);
+  }
+
+  // ---------- 指令附檔 ----------
+
+  async addFile(f: NewCommandFile): Promise<void> {
+    await (await this.request())
+      .input('fid', sql.UniqueIdentifier, f.fileId)
+      .input('cmd', sql.BigInt, f.commandRef)
+      .input('name', sql.NVarChar(255), f.fileName)
+      .input('size', sql.BigInt, f.sizeBytes)
+      .input('sha', sql.Char(64), f.sha256)
+      .input('path', sql.NVarChar(400), f.storagePath)
+      .input('at', sql.DateTime2(3), f.createdAt)
+      .input('exp', sql.DateTime2(3), f.expiresAt)
+      .query(`INSERT INTO ita.command_file (file_id, command_ref, file_name, size_bytes, sha256, storage_path, created_at, expires_at)
+        VALUES (@fid, @cmd, @name, @size, @sha, @path, @at, @exp)`);
+  }
+
+  async listFiles(commandRef: number): Promise<CommandFileRecord[]> {
+    const r = await (await this.request())
+      .input('cmd', sql.BigInt, commandRef)
+      .query(`SELECT ${FILE_COLS} FROM ${FILE_FROM} WHERE f.command_ref = @cmd ORDER BY f.id`);
+    return (r.recordset as Row[]).map(toFile);
+  }
+
+  async getFile(fileId: string): Promise<CommandFileRecord | null> {
+    const r = await (await this.request()).input('fid', sql.UniqueIdentifier, fileId).query(`SELECT ${FILE_COLS} FROM ${FILE_FROM} WHERE f.file_id = @fid`);
+    const row = r.recordset[0] as Row | undefined;
+    return row ? toFile(row) : null;
+  }
+
+  async expiredFiles(now: Date, limit: number): Promise<CommandFileRecord[]> {
+    const r = await (await this.request())
+      .input('now', sql.DateTime2(3), now)
+      .input('limit', sql.Int, limit)
+      .query(`SELECT TOP (@limit) ${FILE_COLS} FROM ${FILE_FROM} WHERE f.expires_at <= @now ORDER BY f.expires_at`);
+    return (r.recordset as Row[]).map(toFile);
+  }
+
+  async deleteFile(id: number): Promise<void> {
+    await (await this.request()).input('id', sql.BigInt, id).query(`DELETE FROM ita.command_file WHERE id = @id`);
   }
 }

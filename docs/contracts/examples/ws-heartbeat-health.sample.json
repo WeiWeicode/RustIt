@@ -1,0 +1,18 @@
+{
+  "v": 1,
+  "type": "heartbeat",
+  "id": "7d3e9a2b-1c4f-4e8a-b5d6-2f0a9c8b7e13",
+  "body": {
+    "outbox_pending": 0,
+    "events_pending": 0,
+    "last_inventory_seq": 1791273600001,
+    "health": {
+      "cpu_pct": 12,
+      "mem_used_pct": 63,
+      "disk_min_free_pct": 8,
+      "disk_min_free_drive": "C:",
+      "uptime_s": 86400,
+      "agent_rss_mb": 14
+    }
+  }
+}

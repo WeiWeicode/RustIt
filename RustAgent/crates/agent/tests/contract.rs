@@ -4,7 +4,7 @@
 use rustit_agent::protocol::{
     CommandBody, CommandUpdate, CommandUpdateAck, Envelope, EventOut, EventsRequest,
     EventsResponse, HelloAck, HelloBody, InventoryRequest, InventoryResponse, PrepareShutdown,
-    SyncPending, SyncRequest, SyncResponse,
+    SyncPending, SyncRequest, SyncResponse, UploadResponse, command_files_path,
 };
 use rustit_collector::{ComputerInfo, NetAdapter, Software};
 use serde_json::{Value, json};
@@ -263,4 +263,140 @@ fn command_messages_match_contract() {
         (ps.reason.as_str(), ps.reconnect_after_sec),
         ("server_restart", None)
     );
+}
+
+/// P4-2:agent.log_level 指令可解析;agent.diagnose / logs.collect 的結果範例符合 schema;附檔上傳回應可解析
+#[test]
+fn diagnose_messages_match_contract() {
+    let cmd: Envelope =
+        serde_json::from_value(read("examples/ws-command-log-level.sample.json")).unwrap();
+    let body: CommandBody = serde_json::from_value(cmd.body.unwrap()).unwrap();
+    assert_eq!(
+        (body.kind.as_str(), body.params["level"].as_str()),
+        ("agent.log_level", Some("debug"))
+    );
+    for f in ["ws-command-update-diagnose", "ws-command-update-logs"] {
+        let v = read(&format!("examples/{f}.sample.json"));
+        assert_valid("ws-envelope.schema.json", &v);
+        let env: Envelope = serde_json::from_value(v).unwrap();
+        let u: CommandUpdate = serde_json::from_value(env.body.unwrap()).unwrap();
+        assert!(
+            serde_json::to_string(&u.result).unwrap().len() <= 4000,
+            "result 4,000 字元內"
+        );
+    }
+    let sample = read("examples/command-file-response.sample.json");
+    assert_valid("command-file.schema.json", &sample);
+    let r: UploadResponse = serde_json::from_value(sample).unwrap();
+    assert_eq!(r.sha256.len(), 64);
+    assert_eq!(
+        command_files_path("5b2e8c1d-4f3a-4e6b-9d7c-1a2b3c4d5e02"),
+        "/agent/v1/commands/5b2e8c1d-4f3a-4e6b-9d7c-1a2b3c4d5e02/files"
+    );
+}
+
+/// P5:心跳健康摘要、hello 憑證到期日、agent_started 上次結束原因、主機設定 health_enabled(P5-MONITOR-DESIGN §2)
+#[test]
+fn p5_monitor_messages() {
+    // 取樣兩次(第二次才有 CPU),送出的 health 必須符合契約;數值只在記憶體中,不寫入 repo
+    let mut sampler = rustit_collector::HealthSampler::new();
+    let _ = sampler.sample();
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let health = sampler.sample();
+    let hb = Envelope::new(
+        "heartbeat",
+        json!({ "outbox_pending": 0, "events_pending": 0, "last_inventory_seq": 1, "health": health }),
+    );
+    assert_valid(
+        "ws-envelope.schema.json",
+        &serde_json::to_value(&hb).unwrap(),
+    );
+
+    let mut hello = HelloBody::from_info(&sample_info());
+    hello.cert_not_after = "2027-10-14T08:00:00Z".into();
+    let v = serde_json::to_value(Envelope::new("hello", json!(hello))).unwrap();
+    assert_valid("ws-envelope.schema.json", &v);
+    assert_eq!(v["body"]["cert_not_after"], "2027-10-14T08:00:00Z");
+    // 讀不到時不送
+    let v = serde_json::to_value(HelloBody::from_info(&sample_info())).unwrap();
+    assert!(v.get("cert_not_after").is_none());
+
+    for exit in [
+        "stop",
+        "shutdown",
+        "restart_command",
+        "unexpected",
+        "first_run",
+    ] {
+        assert_valid(
+            "event.schema.json",
+            &json!({ "events": [{ "event_id": "5f1e2d3c-4b5a-4968-8776-655443322114", "type": "agent_started",
+                "occurred_at": "2026-10-19T00:00:00.000Z",
+                "data": { "agent_version": "0.5.0", "previous_exit": exit, "boot_time": rustit_collector::boot_time() } }] }),
+        );
+    }
+
+    let ack: Envelope = serde_json::from_value(read("examples/ws-hello-ack.sample.json")).unwrap();
+    let body: HelloAck = serde_json::from_value(ack.body.unwrap()).unwrap();
+    let s = body.settings.unwrap();
+    assert_eq!(s.health_enabled, Some(true));
+    assert!(
+        rustit_agent::protocol::AgentSettings::default().health_enabled(),
+        "沒收過主機設定時預設開"
+    );
+}
+
+/// P6-2:本機管道 prepare_shutdown / ack、status.upgrade_requested;agent.upgrade 與 AGENT_UPGRADING 的 command_update
+#[test]
+fn p6_upgrade_messages() {
+    use rustit_agent::protocol::{prepare_shutdown_ack, upgrade_requested};
+    for name in [
+        "examples/pipe-prepare-shutdown.sample.json",
+        "examples/pipe-prepare-shutdown-ack.sample.json",
+        "examples/pipe-status.sample.json",
+    ] {
+        assert_valid("pipe.schema.json", &read(name));
+    }
+    let req: Envelope =
+        serde_json::from_value(read("examples/pipe-prepare-shutdown.sample.json")).unwrap();
+    let ack = Envelope::reply(
+        &req,
+        "prepare_shutdown_ack",
+        prepare_shutdown_ack(true, 0, 2, 1),
+    );
+    let v = serde_json::to_value(&ack).unwrap();
+    assert_valid("pipe.schema.json", &v);
+    assert_eq!(v["id"], json!(req.id), "回應沿用請求 id");
+    let mut st = read("examples/pipe-status.sample.json");
+    for version in [None, Some("0.7.2-broken")] {
+        st["body"]["upgrade_requested"] =
+            upgrade_requested("9f8e7d6c-5b4a-4c3d-8e2f-1a0b9c8d7e61", "watchdog", version);
+        assert_valid("pipe.schema.json", &st);
+    }
+    for (state, result, code) in [
+        (
+            "succeeded",
+            Some(json!({ "handed_to_watchdog": true })),
+            None,
+        ),
+        ("failed", None, Some("AGENT_UPGRADING")),
+    ] {
+        let u = CommandUpdate {
+            command_id: "9f8e7d6c-5b4a-4c3d-8e2f-1a0b9c8d7e61".into(),
+            state: state.into(),
+            progress: None,
+            result,
+            error_code: code.map(str::to_string),
+            error_message: None,
+            occurred_at: "2026-10-21T02:00:00.000Z".into(),
+        };
+        assert_valid(
+            "ws-envelope.schema.json",
+            &serde_json::to_value(Envelope::new(
+                "command_update",
+                serde_json::to_value(&u).unwrap(),
+            ))
+            .unwrap(),
+        );
+    }
 }

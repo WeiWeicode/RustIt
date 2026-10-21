@@ -193,6 +193,23 @@ pub(crate) fn fill(info: &mut ComputerInfo, warnings: &mut Vec<String>) {
     fill_with(info, warnings, QUERY_TIMEOUT)
 }
 
+/// 遠端診斷:只查 Win32_ComputerSystem,回傳網域與耗時(crate::wmi_probe)
+pub(crate) fn probe(timeout: Duration) -> Result<crate::WmiProbe, String> {
+    let started = std::time::Instant::now();
+    let mut warnings = Vec::new();
+    let mut wmi = Wmi { timeout, unresponsive: false };
+    let cs = wmi.query::<Win32_ComputerSystem>("ComputerSystem", CIMV2, None, &mut warnings).pop();
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    match cs {
+        Some(cs) => Ok(crate::WmiProbe {
+            domain: text(cs.Domain),
+            part_of_domain: cs.PartOfDomain.unwrap_or(false),
+            elapsed_ms,
+        }),
+        None => Err(warnings.pop().unwrap_or_else(|| "WMI 沒有回傳 Win32_ComputerSystem".into())),
+    }
+}
+
 fn fill_with(info: &mut ComputerInfo, warnings: &mut Vec<String>, timeout: Duration) {
     let mut wmi = Wmi { timeout, unresponsive: false };
 

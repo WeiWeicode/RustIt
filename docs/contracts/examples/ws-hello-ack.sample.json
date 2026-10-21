@@ -10,7 +10,8 @@
     "settings_version": 1,
     "settings": {
       "inventory_interval_sec": 3600,
-      "usb_events": true
+      "usb_events": true,
+      "health_enabled": true
     }
   }
 }
