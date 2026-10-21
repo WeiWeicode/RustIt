@@ -6,6 +6,7 @@
 //! - 上報([`report`]):每 5 分鐘(主機可調)及有新事件時 `POST /agent/v1/watchdog/report`,**自己**經 `:9443` 送,不經過 Agent
 //!
 //! - 升級([`upgrade`],P6-2):上報回應帶 `target.agent` 時下載、驗證、替換 Agent,失敗還原;進行中看守暫停(維護中)
+//!   P6-3:`target.watchdog` 下載、驗證後經管道交給 Agent 替換(Watchdog 不覆寫自己),新版啟動時收尾本機紀錄
 //!
 //! 與 Agent 共用 `agent.toml`、裝置憑證與 `rustit-common`;不依賴 `rustit-agent`。失敗只記錄並重試,不影響使用者電腦(AGENT.md §5)。
 #![cfg(windows)]
@@ -19,7 +20,7 @@ pub mod upgrade;
 use crate::monitor::{AgentControl, AgentStatus, Monitor};
 use crate::outbox::Outbox;
 use crate::report::Snapshot;
-use crate::upgrade::{Outcome, Paths, UpgradeTarget, Upgrader};
+use crate::upgrade::{Outcome, Paths, Targets, Upgrader};
 use log::{info, warn};
 use rustit_common::config::Settings;
 use rustit_common::envelope::Envelope;
@@ -58,7 +59,7 @@ pub(crate) struct Shared {
     /// 升級中(維護中):看守暫停,不把升級造成的停止當成竄改(P6-UPGRADE-DESIGN §5.2 第 3 步)
     pub maintenance: AtomicBool,
     /// 上報回應最新的 Agent 目標版本(升級工作等待)
-    pub target: watch::Sender<Option<UpgradeTarget>>,
+    pub target: watch::Sender<Targets>,
     /// 升級工作正在執行(上報才帶未結束的進度)
     pub upgrade_active: AtomicBool,
 }
@@ -69,6 +70,8 @@ const MAINTENANCE_LIMIT: Duration = Duration::from_secs(20 * 60);
 const UPGRADE_COOLDOWN: Duration = Duration::from_secs(30 * 60);
 /// kv:升級冷卻到期時間(RFC 3339)、已處理的 agent.upgrade 要求 id(Watchdog 重啟後不重複重設失敗次數,審查建議 2)
 const KV_COOLDOWN: &str = "upgrade_cooldown_until";
+/// Watchdog 目標的冷卻(與 Agent 分開:一邊失敗不擋另一邊)
+const KV_COOLDOWN_WATCHDOG: &str = "upgrade_cooldown_until_watchdog";
 const KV_REQUEST_SEEN: &str = "upgrade_request_seen";
 
 /// 正式的 Agent 服務操作(SCM);維護中不動作(看守這一輪與升級同時發生時,不把升級停掉的 Agent 拉起來,審查建議 3)
@@ -162,6 +165,10 @@ where
 }
 
 pub async fn run(settings: Settings, shutdown: watch::Receiver<bool>) -> Result<(), String> {
+    // 測試用壞版本(P6-3 VM 驗收)
+    if cfg!(feature = "broken-exit") {
+        return Err(format!("broken-exit 測試版 {WATCHDOG_VERSION}:啟動即結束"));
+    }
     let service_mode = SERVICE_MODE.load(std::sync::atomic::Ordering::Relaxed);
     if service_mode {
         // 開發安裝沿用 ProgramData 預設 ACL 時,一般使用者不能預先放 watchdog.db 讓 Watchdog 以裝置憑證送出(資安稽核 L5)
@@ -183,7 +190,7 @@ pub async fn run(settings: Settings, shutdown: watch::Receiver<bool>) -> Result<
         .ok()
         .flatten()
         .is_some_and(|r| r.state == "installing");
-    let (target_tx, target_rx) = watch::channel(None);
+    let (target_tx, target_rx) = watch::channel(Targets::default());
     let shared = Arc::new(Shared {
         outbox: Mutex::new(outbox),
         snapshot: Mutex::new(Snapshot::default()),
@@ -211,7 +218,7 @@ pub async fn run(settings: Settings, shutdown: watch::Receiver<bool>) -> Result<
 /// 只在服務模式執行(前景開發模式沒有權限停止 / 替換服務,只記錄目標)
 async fn upgrade_task(
     shared: Arc<Shared>,
-    mut targets: watch::Receiver<Option<UpgradeTarget>>,
+    mut targets: watch::Receiver<Targets>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let service_mode = SERVICE_MODE.load(Ordering::Relaxed);
@@ -224,8 +231,12 @@ async fn upgrade_task(
                 r = targets.changed() => if r.is_err() { return },
                 _ = shutdown.changed() => return,
             }
-            if let Some(t) = targets.borrow_and_update().clone() {
-                info!("主機下發 Agent 目標版本 {}(前景模式不升級)", t.version);
+            let t = targets.borrow_and_update().clone();
+            if let Some(a) = t.agent {
+                info!("主機下發 Agent 目標版本 {}(前景模式不升級)", a.version);
+            }
+            if let Some(w) = t.watchdog {
+                info!("主機下發 Watchdog 目標版本 {}(前景模式不升級)", w.version);
             }
         }
     };
@@ -234,10 +245,13 @@ async fn upgrade_task(
         |d| d.join("cache"),
     );
     // cache\ 要是一般目錄(不是 junction / 符號連結)且 ACL 套用成功才升級:否則刪舊版本、套 ACL 會跟著連結動到別處(資安 L4)
+    use rustit_common::winfile::not_reparse;
     let cache_ok = std::fs::create_dir_all(cache_dir.join(upgrade::COMPONENT))
+        .and_then(|_| std::fs::create_dir_all(cache_dir.join(upgrade::WATCHDOG_COMPONENT)))
         .map_err(|e| format!("無法建立 {}:{e}", cache_dir.display()))
         .and_then(|_| not_reparse(&cache_dir))
         .and_then(|_| not_reparse(&cache_dir.join(upgrade::COMPONENT)))
+        .and_then(|_| not_reparse(&cache_dir.join(upgrade::WATCHDOG_COMPONENT)))
         .and_then(|_| scm::protect_dir(&cache_dir));
     if let Err(e) = &cache_ok {
         warn!("{e};停用升級");
@@ -254,16 +268,24 @@ async fn upgrade_task(
         cache_dir,
     };
     shared.upgrade_active.store(true, Ordering::Relaxed);
-    let resumed = Upgrader {
+    let up = Upgrader {
         env: &env,
         paths: paths.clone(),
         trusted: shared.settings.trusted_signers.clone(),
-    }
-    .resume()
-    .await;
+    };
+    let resumed = up.resume().await;
     if let Some(o) = resumed {
         info!("中斷的升級已收尾:{o:?}");
         refresh_snapshot(&shared).await;
+    }
+    // 新版 Watchdog 啟動:收尾上次交給 Agent 的替換(P6-3;只動本機紀錄,結果事件由 Agent 上報)
+    if let Some(o) = up.resume_watchdog(WATCHDOG_VERSION) {
+        info!("Watchdog 升級紀錄已收尾:{o:?}");
+        // 換回舊版(rolled_back)比照 run_watchdog 失敗設冷卻,不在下次上報立刻再替換(審查必修 A)
+        if matches!(o, Outcome::Failed(..)) {
+            set_cooldown(&shared, KV_COOLDOWN_WATCHDOG);
+        }
+        shared.changed.notify_one();
     }
     shared.upgrade_active.store(false, Ordering::Relaxed);
     shared.maintenance.store(false, Ordering::Relaxed);
@@ -272,60 +294,88 @@ async fn upgrade_task(
             r = targets.changed() => if r.is_err() { return },
             _ = shutdown.changed() => return,
         }
-        let Some(target) = targets.borrow_and_update().clone() else {
-            continue;
-        };
-        if cache_ok.is_err() {
-            continue;
-        }
-        if let Some(until) = cooldown_until(&shared)
-            && chrono::Utc::now() < until
-        {
-            log::debug!("升級冷卻中(到 {until}),暫不升級 Agent {}", target.version);
+        let t = targets.borrow_and_update().clone();
+        if cache_ok.is_err() || (t.agent.is_none() && t.watchdog.is_none()) {
             continue;
         }
         if env.transport.is_none() {
             match rustit_common::transport::Transport::new(&shared.settings, &user_agent()) {
-                Ok(t) => env.transport = Some(t),
+                Ok(tr) => env.transport = Some(tr),
                 Err(e) => {
                     warn!("無法建立下載連線:{e};下次上報再試");
                     continue;
                 }
             }
         }
-        let current = shared
-            .snapshot
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .status
-            .as_ref()
-            .map(|s| s.version.clone());
-        let up = Upgrader {
-            env: &env,
-            paths: paths.clone(),
-            trusted: shared.settings.trusted_signers.clone(),
-        };
-        // 安裝中不理會停止訊號:被中斷時下次啟動由 resume 收尾
-        shared.upgrade_active.store(true, Ordering::Relaxed);
-        let outcome = up.run(&target, current.as_deref()).await;
-        shared.upgrade_active.store(false, Ordering::Relaxed);
-        match outcome {
-            Outcome::Skipped(why) => log::debug!("不升級 Agent {}:{why}", target.version),
-            o => {
-                info!("升級 Agent {} 結束:{o:?}", target.version);
-                if matches!(o, Outcome::Failed(..)) {
-                    let until = chrono::Utc::now()
-                        + chrono::Duration::from_std(UPGRADE_COOLDOWN).unwrap_or_default();
-                    if let Err(e) = shared
-                        .outbox
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .kv_set(KV_COOLDOWN, &until.to_rfc3339())
-                    {
-                        warn!("{e}");
+        'agent: {
+            let Some(target) = t.agent else {
+                break 'agent;
+            };
+            if let Some(until) = cooldown_until(&shared, KV_COOLDOWN)
+                && chrono::Utc::now() < until
+            {
+                log::debug!("升級冷卻中(到 {until}),暫不升級 Agent {}", target.version);
+                break 'agent;
+            }
+            let current = shared
+                .snapshot
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .status
+                .as_ref()
+                .map(|s| s.version.clone());
+            let up = Upgrader {
+                env: &env,
+                paths: paths.clone(),
+                trusted: shared.settings.trusted_signers.clone(),
+            };
+            // 安裝中不理會停止訊號:被中斷時下次啟動由 resume 收尾
+            shared.upgrade_active.store(true, Ordering::Relaxed);
+            let outcome = up.run(&target, current.as_deref()).await;
+            shared.upgrade_active.store(false, Ordering::Relaxed);
+            match outcome {
+                Outcome::Skipped(why) => log::debug!("不升級 Agent {}:{why}", target.version),
+                o => {
+                    info!("升級 Agent {} 結束:{o:?}", target.version);
+                    if matches!(o, Outcome::Failed(..)) {
+                        set_cooldown(&shared, KV_COOLDOWN);
                     }
+                    refresh_snapshot(&shared).await;
                 }
-                refresh_snapshot(&shared).await;
+            }
+        }
+        'watchdog: {
+            let Some(target) = t.watchdog else {
+                break 'watchdog;
+            };
+            if let Some(until) = cooldown_until(&shared, KV_COOLDOWN_WATCHDOG)
+                && chrono::Utc::now() < until
+            {
+                log::debug!(
+                    "升級冷卻中(到 {until}),暫不升級 Watchdog {}",
+                    target.version
+                );
+                break 'watchdog;
+            }
+            let up = Upgrader {
+                env: &env,
+                paths: paths.clone(),
+                trusted: shared.settings.trusted_signers.clone(),
+            };
+            shared.upgrade_active.store(true, Ordering::Relaxed);
+            let outcome = up.run_watchdog(&target, WATCHDOG_VERSION).await;
+            shared.upgrade_active.store(false, Ordering::Relaxed);
+            match outcome {
+                Outcome::Skipped(why) => {
+                    log::debug!("不升級 Watchdog {}:{why}", target.version)
+                }
+                o => {
+                    info!("升級 Watchdog {} 結束:{o:?}", target.version);
+                    if matches!(o, Outcome::Failed(..)) {
+                        set_cooldown(&shared, KV_COOLDOWN_WATCHDOG);
+                    }
+                    shared.changed.notify_one();
+                }
             }
         }
         // 升級期間累積的目標(每次上報都會送)丟掉,等下一次上報再判斷(審查必修 1)
@@ -333,27 +383,29 @@ async fn upgrade_task(
     }
 }
 
-fn cooldown_until(shared: &Shared) -> Option<chrono::DateTime<chrono::Utc>> {
+/// 升級失敗:冷卻 [`UPGRADE_COOLDOWN`]
+fn set_cooldown(shared: &Shared, key: &str) {
+    let until =
+        chrono::Utc::now() + chrono::Duration::from_std(UPGRADE_COOLDOWN).unwrap_or_default();
+    if let Err(e) = shared
+        .outbox
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .kv_set(key, &until.to_rfc3339())
+    {
+        warn!("{e}");
+    }
+}
+
+fn cooldown_until(shared: &Shared, key: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     let v = shared
         .outbox
         .lock()
         .unwrap_or_else(|p| p.into_inner())
-        .kv_get(KV_COOLDOWN)?;
+        .kv_get(key)?;
     chrono::DateTime::parse_from_rfc3339(&v)
         .ok()
         .map(|t| t.with_timezone(&chrono::Utc))
-}
-
-/// 目錄不可是 reparse point(junction、符號連結)
-fn not_reparse(dir: &Path) -> Result<(), String> {
-    use std::os::windows::fs::MetadataExt;
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-    let m =
-        std::fs::symlink_metadata(dir).map_err(|e| format!("無法讀取 {}:{e}", dir.display()))?;
-    if m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || !m.is_dir() {
-        return Err(format!("{} 不是一般目錄(連結)", dir.display()));
-    }
-    Ok(())
 }
 
 /// 升級結束後立即以 get_status 更新上報用的 Agent 狀態(看守暫停期間的快照已過時;主機以回報的版本核對升級成功)
@@ -465,7 +517,12 @@ async fn watch_agent(
                 warn!("{e}");
             }
             // 冷卻一併解除(IT 明確要求再試)
-            if let Err(e) = outbox.kv_set(KV_COOLDOWN, "") {
+            let cooldown_key = if req.component == upgrade::WATCHDOG_COMPONENT {
+                KV_COOLDOWN_WATCHDOG
+            } else {
+                KV_COOLDOWN
+            };
+            if let Err(e) = outbox.kv_set(cooldown_key, "") {
                 warn!("{e}");
             }
             drop(outbox);

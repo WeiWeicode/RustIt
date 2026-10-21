@@ -40,6 +40,8 @@ describe('資料契約範例', () => {
       'pipe-get-status.sample.json',
       'pipe-prepare-shutdown-ack.sample.json',
       'pipe-prepare-shutdown.sample.json',
+      'pipe-replace-watchdog-ack.sample.json',
+      'pipe-replace-watchdog.sample.json',
       'pipe-status.sample.json',
       'sync-response.sample.json',
       'sync.sample.json',
@@ -108,6 +110,22 @@ describe('資料契約範例', () => {
     assert.equal(pipe({ ...ack, body: {} }), false, 'ack 缺 flushed');
     const st = example<Record<string, any>>('pipe-status.sample.json');
     assert.equal(pipe({ ...st, body: { ...st.body, upgrade_requested: { id: 'x', component: 'desktop' } } }), false);
+  });
+
+  it('P6-3:本機管道 replace_watchdog / ack', () => {
+    check(PIPE_ID, 'pipe-replace-watchdog.sample.json');
+    check(PIPE_ID, 'pipe-replace-watchdog-ack.sample.json');
+    const pipe = ajv.getSchema(PIPE_ID)!;
+    const req = example<Record<string, any>>('pipe-replace-watchdog.sample.json');
+    assert.equal(pipe({ ...req, body: { ...req.body, sha256: 'XYZ' } }), false, 'sha256 要 64 碼小寫十六進位');
+    assert.equal(pipe({ ...req, body: { ...req.body, signer_thumbprints: [] } }), false, '至少一個預期簽章者');
+    assert.equal(pipe({ ...req, body: { ...req.body, signer_thumbprints: ['not-a-thumbprint'] } }), false, '指紋 40 碼十六進位');
+    const { path: _omit, ...noPath } = req.body;
+    assert.equal(pipe({ ...req, body: noPath }), false, '缺 path');
+    const ack = example<Record<string, any>>('pipe-replace-watchdog-ack.sample.json');
+    assert.equal(pipe({ ...ack, body: {} }), false, 'ack 缺 accepted');
+    assert.equal(pipe({ ...ack, body: { accepted: false, error_code: 'SIGNER_NOT_TRUSTED', error_message: '簽章者不在本機清單' } }), true);
+    assert.equal(pipe({ ...ack, body: { accepted: false, error_code: '<script>' } }), false, 'error_code 只能是契約內的代碼');
   });
 
   it('P6:Watchdog 上報帶 upgrade、回應 target;升級事件依類型檢查 data', () => {

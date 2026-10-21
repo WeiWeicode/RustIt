@@ -1,6 +1,6 @@
 [package]
 name = "rustit-watchdog"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "GigaNexus 端點 Watchdog:看守 Agent 服務(重啟、卡住、被停止 / 改設定)並自己經 :9443 上報;升級 Agent(下載、驗證、替換、失敗還原)(RustIt PLATFORM-PLAN P5、P6,ENDPOINT-AGENT-GUIDE §7)"
 
@@ -19,6 +19,11 @@ uuid = { version = "1.28.0", features = ["v4"] }
 # 升級檔 SHA-256(P6-2;與 rustit-common 相同版本)
 sha2 = "0.10"
 hex = "0.4"
+
+[features]
+# 測試用壞版本(P6-3 VM 驗收「故意放壞的 Watchdog → 自動還原」;只用於 VM 驗收,不可發佈到 it / all 環)
+# broken-exit:啟動即結束(Agent 替換後 2 分鐘內新 Watchdog 不會連上管道 → 還原)
+broken-exit = []
 
 [build-dependencies]
 # exe 版本資源(ProductVersion):升級前比對下載檔的版本(P6-UPGRADE-DESIGN §8.2);已在 Cargo.lock(Tauri 用),不另下載

@@ -4,6 +4,9 @@
 //!   沒有存活的執行個體時以 `first_pipe_instance` 建立(別的行程先建立同名管道時失敗並每分鐘重試,不加入別人的管道)
 //! - 每條連線一則請求、一則回應(回覆後等用戶端關閉再釋放,不直接中斷以免丟掉未讀的回應);請求 5 秒內沒送完就中斷;同時最多 [`MAX_CLIENTS`] 條,超過直接關閉
 //! - `get_status`:狀態摘要(含 agent.upgrade 的 `upgrade_requested`,P6-2)
+//! - `replace_watchdog`(P6-3,Watchdog 升級自己前;P6-UPGRADE-DESIGN §5.3):同樣只接受 Watchdog 服務的行程;Agent 再驗一次檔案
+//!   (路徑在 `cache\watchdog\`、SHA-256、Authenticode、簽章者)後回 `replace_watchdog_ack`,稍後在背景停止 Watchdog、替換、檢查、必要時還原
+//!   (`upgrade_watchdog`)。替換進行中 `get_status` 另記下以 Watchdog 服務 PID 連上來的用戶端(健康檢查依據)
 //! - `prepare_shutdown`(P6-2,Watchdog 升級 Agent 前;P6-UPGRADE-DESIGN §2.2、§9-6):只接受 Watchdog 服務的行程(用戶端 PID 比對 SCM)。
 //!   停止接新指令 → 執行中的指令等最多 60 秒(逾時記 failed AGENT_UPGRADING)→ 送完待送的 command_update 與事件(上限 20 秒)、
 //!   WebSocket 以 1000 關閉 → 回 `prepare_shutdown_ack`。5 分鐘內沒有被停止就恢復(Watchdog 中途失敗時不會一直斷線)
@@ -32,6 +35,9 @@ const CLIENT_CLOSE_WAIT: Duration = Duration::from_secs(2);
 const COMMAND_WAIT: Duration = Duration::from_secs(60);
 /// prepare_shutdown:送完待送資料、關閉 WebSocket 的上限
 const FLUSH_WAIT: Duration = Duration::from_secs(20);
+/// replace_watchdog:讀檔、雜湊、WinVerifyTrust 的上限(200 MB 上限,一般幾秒)。
+/// 大於 Agent 自己的驗證期限(`upgrade_watchdog::VALIDATE_LIMIT`,50 秒)、小於 Watchdog 等 ack 的上限(70 秒)
+const REPLACE_VERIFY_LIMIT: Duration = Duration::from_secs(60);
 /// prepare_shutdown 後多久沒被停止就恢復
 const HOLD_LIMIT: Duration = Duration::from_secs(300);
 
@@ -94,15 +100,22 @@ async fn handle(shared: Arc<Shared>, mut server: NamedPipeServer) {
         Ok(Err(e)) => return warn!("{e}"),
         Err(_) => return warn!("本機管道請求逾時,中斷連線"),
     };
-    // prepare_shutdown 要等指令與送出(最多 60 + 20 秒);其他請求 5 秒
-    let limit = if req.kind == "prepare_shutdown" {
-        COMMAND_WAIT + FLUSH_WAIT + REQUEST_TIMEOUT
-    } else {
-        REQUEST_TIMEOUT
+    // prepare_shutdown 要等指令與送出(最多 60 + 20 秒);replace_watchdog 要讀整個檔案並驗簽章;其他請求 5 秒
+    let limit = match req.kind.as_str() {
+        "prepare_shutdown" => COMMAND_WAIT + FLUSH_WAIT + REQUEST_TIMEOUT,
+        "replace_watchdog" => REPLACE_VERIFY_LIMIT,
+        _ => REQUEST_TIMEOUT,
     };
     let work = async {
         let reply = match req.kind.as_str() {
             "get_status" => {
+                // 替換 Watchdog 後的健康檢查:記下以 SCM 的 Watchdog PID 連上來的用戶端(P6-3)
+                if shared.watchdog_replacing.load(Ordering::SeqCst)
+                    && let Ok(pid) = watchdog_pid(&server).await
+                    && let Ok(mut seen) = shared.watchdog_seen.lock()
+                {
+                    *seen = Some(pid);
+                }
                 // 狀態要讀本機暫存(同步鎖):放到阻塞執行緒,逾時才管得到,也不卡住 tokio 工作執行緒
                 let s = shared.clone();
                 let body = tokio::task::spawn_blocking(move || status_body(&s))
@@ -121,6 +134,24 @@ async fn handle(shared: Arc<Shared>, mut server: NamedPipeServer) {
                     )
                 }
             },
+            "replace_watchdog" => match from_watchdog(&server).await {
+                Ok(()) => {
+                    let body = req.body.clone().unwrap_or_default();
+                    Envelope::reply(
+                        &req,
+                        "replace_watchdog_ack",
+                        crate::upgrade_watchdog::accept(&shared, body).await,
+                    )
+                }
+                Err(e) => {
+                    warn!("拒絕 replace_watchdog:{e}");
+                    Envelope::reply(
+                        &req,
+                        "unsupported",
+                        json!({ "type": "replace_watchdog", "reason": "not_watchdog" }),
+                    )
+                }
+            },
             other => Envelope::reply(&req, "unsupported", json!({ "type": other })),
         };
         write_line(&mut server, &reply).await?;
@@ -136,20 +167,25 @@ async fn handle(shared: Arc<Shared>, mut server: NamedPipeServer) {
     }
 }
 
-/// prepare_shutdown 的用戶端必須是 Watchdog 服務的行程
-async fn from_watchdog(server: &NamedPipeServer) -> Result<(), String> {
+/// 用戶端的 PID 必須是 SCM 的 Watchdog 服務行程;回傳該 PID
+async fn watchdog_pid(server: &NamedPipeServer) -> Result<u32, String> {
     let client = client_pid(server)?;
     let watchdog = tokio::task::spawn_blocking(|| scm::query(WATCHDOG_SERVICE))
         .await
         .map_err(|e| e.to_string())??
         .pid;
     if watchdog == Some(client) {
-        Ok(())
+        Ok(client)
     } else {
         Err(format!(
             "用戶端 PID {client} 不是 Watchdog 服務({watchdog:?})"
         ))
     }
+}
+
+/// prepare_shutdown、replace_watchdog 的用戶端必須是 Watchdog 服務的行程
+async fn from_watchdog(server: &NamedPipeServer) -> Result<(), String> {
+    watchdog_pid(server).await.map(|_| ())
 }
 
 /// Watchdog 升級 Agent 前的收尾(pipe.schema.json PrepareShutdown / PrepareShutdownAck)

@@ -115,15 +115,25 @@ pub struct ReportResponse {
     pub target: Option<Value>,
 }
 
-/// 回應 `target.agent`;null、沒有或格式不符回 None(格式不符記警告)
-pub fn agent_target(res: &ReportResponse) -> Option<crate::upgrade::UpgradeTarget> {
-    let v = res.target.as_ref()?.get("agent")?;
+/// 回應 `target.<component>`;null、沒有或格式不符回 None(格式不符記警告)
+fn parse_target(res: &ReportResponse, component: &str) -> Option<crate::upgrade::UpgradeTarget> {
+    let v = res.target.as_ref()?.get(component)?;
     if v.is_null() {
         return None;
     }
     serde_json::from_value(v.clone())
-        .map_err(|e| warn!("主機下發的 Agent 目標版本格式錯誤,略過:{e}"))
+        .map_err(|e| warn!("主機下發的 {component} 目標版本格式錯誤,略過:{e}"))
         .ok()
+}
+
+/// 回應 `target.agent`
+pub fn agent_target(res: &ReportResponse) -> Option<crate::upgrade::UpgradeTarget> {
+    parse_target(res, "agent")
+}
+
+/// 回應 `target.watchdog`(P6-3)
+pub fn watchdog_target(res: &ReportResponse) -> Option<crate::upgrade::UpgradeTarget> {
+    parse_target(res, "watchdog")
 }
 
 /// 由最新狀態組請求;Agent 執行中才帶 status_ok(管道最近一次是否成功)
@@ -252,7 +262,10 @@ pub(crate) async fn run(shared: Arc<Shared>, mut shutdown: watch::Receiver<bool>
                     }
                 }
                 // 最新的目標交給升級工作(沒有目標也送,讓它知道主機已不要求升級)
-                let _ = shared.target.send(agent_target(&res));
+                let _ = shared.target.send(crate::upgrade::Targets {
+                    agent: agent_target(&res),
+                    watchdog: watchdog_target(&res),
+                });
                 if n > 0 {
                     info!("Watchdog 上報完成:事件 {} 筆", res.accepted.len());
                 } else {

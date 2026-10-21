@@ -13,7 +13,11 @@
 //! - 每一步先寫本機 `watchdog.db` 的 `upgrade` 表再上報;Watchdog 在 `installing` 中途被重啟時 [`Upgrader::resume`] 依目前 exe 收尾,不停在半套
 //! - 失敗次數:同一目標版本進入失敗(含還原)加一,達 [`MAX_ATTEMPTS`] 不再自動嘗試;`agent.upgrade`(Agent 管道 `upgrade_requested`)重設
 //! - SCM / 管道 / 下載 / 簽章 / 本機紀錄經 [`UpgradeEnv`] 注入(正式 [`swap::RealEnv`],測試用假實作);檔案操作直接用檔案系統(測試用暫存目錄)
-//! - Watchdog 自己的升級(`target.watchdog`)由 Agent 替換,P6-3 才做
+//! - Watchdog 自己的升級(`target.watchdog`,P6-3):[`Upgrader::run_watchdog`] 同樣下載、驗證(SHA-256、簽章、簽章者、版本資源),
+//!   然後經管道 `replace_watchdog` 交給 Agent(Watchdog 不覆寫自己);Agent 再驗一次並替換,結果由 Agent 上報事件。
+//!   新版 Watchdog 啟動時 [`Upgrader::resume_watchdog`] 依自己的版本收尾本機紀錄(= 目標 `succeeded`,否則 `rolled_back`;
+//!   `succeeded` 後被 Agent 換回舊版也記 `rolled_back`)。交給 Agent 超過 [`WATCHDOG_REPLACE_STALE`] 仍是舊版的
+//!   `installing` 紀錄,下次目標到時記 `rolled_back`(Agent 沒動到服務的失敗路徑)
 
 pub mod download;
 pub mod swap;
@@ -32,6 +36,16 @@ use std::time::{Duration, Instant};
 
 pub const COMPONENT: &str = "agent";
 pub const AGENT_EXE: &str = "rustit-agent.exe";
+pub const WATCHDOG_COMPONENT: &str = "watchdog";
+/// 可替換成的最低 Watchdog 版本:0.3.0 起才會經管道要求替換(與 Agent 相同)
+pub const MIN_WATCHDOG_VERSION: &str = "0.3.0";
+/// replace_watchdog 等 Agent 回 ack 的上限(Agent 要讀整個檔案、驗簽章)。
+/// 大於 Agent 管道的請求上限(60 秒)與 Agent 自己的驗證期限(50 秒):Agent 驗證逾時時先回拒絕,這裡收得到明確結果
+pub const REPLACE_ACK_TIMEOUT: Duration = Duration::from_secs(70);
+/// Watchdog 紀錄停在 installing(已交給 Agent)多久仍是舊版就視為替換逾時:Agent 在沒動到服務的失敗路徑
+/// (查詢服務失敗、服務 exe 路徑不符)下不會停止這個行程,紀錄不會由 resume_watchdog 收尾(審查必修 B)。
+/// Agent 替換最長約為停止 + 2 分鐘健康檢查 + 還原 2 分鐘;從 started_at(開始下載)起算,留足餘裕
+pub const WATCHDOG_REPLACE_STALE: Duration = Duration::from_secs(15 * 60);
 /// 同一目標版本失敗幾次後不再自動嘗試(與主機相同)
 pub const MAX_ATTEMPTS: u32 = 2;
 /// 升級檔大小上限(不信任主機宣告,§8.2)
@@ -49,6 +63,29 @@ const DOWNLOAD_RETRY: [u64; 2] = [10, 30];
 /// cache\ 每個元件保留的版本數
 const KEEP_VERSIONS: usize = 2;
 
+/// 升級的元件:下載目錄、版本下限不同,下載與驗證流程相同
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Comp {
+    Agent,
+    Watchdog,
+}
+
+impl Comp {
+    pub fn name(self) -> &'static str {
+        match self {
+            Comp::Agent => COMPONENT,
+            Comp::Watchdog => WATCHDOG_COMPONENT,
+        }
+    }
+
+    fn min_version(self) -> &'static str {
+        match self {
+            Comp::Agent => MIN_AGENT_VERSION,
+            Comp::Watchdog => MIN_WATCHDOG_VERSION,
+        }
+    }
+}
+
 /// 上報回應 `target.agent`(watchdog.schema.json UpgradeTarget)
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct UpgradeTarget {
@@ -57,6 +94,13 @@ pub struct UpgradeTarget {
     pub sha256: String,
     pub size_bytes: u64,
     pub signer_thumbprints: Vec<String>,
+}
+
+/// 上報回應 `target` 的兩個元件目標(沒有 / 不要升級 = None)
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Targets {
+    pub agent: Option<UpgradeTarget>,
+    pub watchdog: Option<UpgradeTarget>,
 }
 
 /// 本機 `upgrade` 表的一列(每個元件一列)
@@ -139,11 +183,26 @@ pub trait UpgradeEnv {
     fn now(&self) -> Instant;
     /// Windows 關機中、Windows Installer 執行中:不開始安裝
     fn hands_off(&self) -> bool;
-    fn load(&self) -> Option<UpgradeRecord>;
+    fn load(&self) -> Option<UpgradeRecord> {
+        self.load_component(COMPONENT)
+    }
+    /// 指定元件的本機紀錄
+    fn load_component(&self, component: &str) -> Option<UpgradeRecord>;
     fn save(&self, rec: &UpgradeRecord);
     /// 刪除紀錄(中斷但沒動到 Agent 的升級:不算失敗,下次目標重新來)
-    fn clear(&self);
+    fn clear(&self) {
+        self.clear_component(COMPONENT);
+    }
+    fn clear_component(&self, component: &str);
     fn event(&self, kind: &'static str, data: Value);
+    /// 管道 replace_watchdog(P6-3):交給 Agent 替換 Watchdog,等它回 ack(最多 [`REPLACE_ACK_TIMEOUT`]);
+    /// 拒絕時回 (error_code, 說明)
+    async fn replace_watchdog(
+        &self,
+        agent_pid: u32,
+        target: &UpgradeTarget,
+        path: &Path,
+    ) -> Result<(), (String, String)>;
     /// 維護中:看守暫停,不把升級造成的停止當成竄改
     fn maintenance(&self, on: bool);
 }
@@ -154,6 +213,8 @@ pub enum Outcome {
     /// 不需要或不可嘗試(已是目標、失敗次數已滿、關機中)
     Skipped(&'static str),
     Succeeded,
+    /// Watchdog 目標:已交給 Agent 替換(結果由 Agent 與新版 Watchdog 上報)
+    HandedOff,
     /// 失敗(state、error_code)
     Failed(&'static str, &'static str),
 }
@@ -168,6 +229,37 @@ fn fail(code: &'static str, message: impl Into<String>) -> Failure {
         code,
         message: message.into(),
     }
+}
+
+/// 管道 `replace_watchdog` 的 body(pipe.schema.json ReplaceWatchdog,P6-3)
+pub fn replace_watchdog_body(target: &UpgradeTarget, path: &Path) -> Value {
+    json!({
+        "version": target.version,
+        "path": path.to_string_lossy(),
+        "sha256": target.sha256,
+        "signer_thumbprints": target.signer_thumbprints,
+    })
+}
+
+/// Agent 回的 error_code 轉成已知代碼(event.schema.json UpgradeErrorCode);不認得的一律 REPLACE_FAILED
+fn known_code(code: &str) -> &'static str {
+    const CODES: [&str; 10] = [
+        "DOWNLOAD_FAILED",
+        "HASH_MISMATCH",
+        "SIGNATURE_INVALID",
+        "SIGNER_NOT_TRUSTED",
+        "STOP_TIMEOUT",
+        "REPLACE_FAILED",
+        "HEALTH_CHECK_FAILED",
+        "ROLLBACK_FAILED",
+        "DISK_FULL",
+        "PREPARE_TIMEOUT",
+    ];
+    CODES
+        .iter()
+        .find(|c| **c == code)
+        .copied()
+        .unwrap_or("REPLACE_FAILED")
 }
 
 /// 檔案位置:Agent 安裝目錄(Watchdog 同目錄)與下載快取 `cache\`
@@ -187,8 +279,11 @@ impl Paths {
     fn staged(&self) -> PathBuf {
         self.install_dir.join(format!("{AGENT_EXE}.new"))
     }
-    fn version_dir(&self, v: &str) -> PathBuf {
+    pub fn version_dir(&self, v: &str) -> PathBuf {
         self.cache_dir.join(COMPONENT).join(v)
+    }
+    fn comp_dir(&self, comp: Comp, v: &str) -> PathBuf {
+        self.cache_dir.join(comp.name()).join(v)
     }
 }
 
@@ -290,15 +385,28 @@ fn same_path(a: &Path, b: &Path) -> bool {
         .eq_ignore_ascii_case(&b.to_string_lossy())
 }
 
+/// `started_at`(RFC 3339)距今超過 [`WATCHDOG_REPLACE_STALE`];解析不了也算(不讓壞紀錄永遠擋住替換)
+fn stale(started_at: &str) -> bool {
+    let limit = chrono::Duration::from_std(WATCHDOG_REPLACE_STALE).unwrap_or_default();
+    chrono::DateTime::parse_from_rfc3339(started_at)
+        .map(|t| chrono::Utc::now() - t.with_timezone(&chrono::Utc) > limit)
+        .unwrap_or(true)
+}
+
 /// 檢查主機下發的目標(§8.2);回傳下載檔名
-fn check_target(t: &UpgradeTarget) -> Result<String, String> {
-    let file = version::release_file(&t.url, COMPONENT, &t.version)?.to_string();
-    match version::compare(&t.version, MIN_AGENT_VERSION) {
+fn check_target(t: &UpgradeTarget, comp: Comp) -> Result<String, String> {
+    let file = version::release_file(&t.url, comp.name(), &t.version)?.to_string();
+    let min = comp.min_version();
+    match version::compare(&t.version, min) {
         None => return Err(format!("版本格式錯誤:{}", t.version)),
         Some(Ordering::Less) => {
             return Err(format!(
-                "不支援降版到 {MIN_AGENT_VERSION} 以前({}):舊版讀不了目前的 agent.toml",
-                t.version
+                "不支援降版到 {min} 以前({}):{}",
+                t.version,
+                match comp {
+                    Comp::Agent => "舊版讀不了目前的 agent.toml",
+                    Comp::Watchdog => "舊版不會經管道要求替換,換上去就無法再升級",
+                }
             ));
         }
         _ => {}
@@ -357,7 +465,7 @@ impl<E: UpgradeEnv> Upgrader<'_, E> {
             started_at: crate::now_rfc3339(),
         };
         // 先檢查目標再寫紀錄、日誌與事件(主機給的字串未驗證前不落地,資安 L1)
-        let file = match check_target(target) {
+        let file = match check_target(target, Comp::Agent) {
             Ok(f) => f,
             Err(e) => {
                 warn!("主機下發的 Agent 目標不合法,略過:{}", clean(&e));
@@ -380,8 +488,8 @@ impl<E: UpgradeEnv> Upgrader<'_, E> {
         self.env.save(&rec);
         self.env.event("upgrade_started", self.event_data(&rec));
         // 其他版本留下的檔案(含中斷的 .part)先清,只保留最新的另一個版本(資安 L2)
-        self.prune_cache(&target.version);
-        let path = match self.fetch(target, &file).await {
+        self.prune_cache(Comp::Agent, &target.version);
+        let path = match self.fetch(Comp::Agent, target, &file).await {
             Ok(p) => p,
             Err(f) => return self.finish(&mut rec, "failed", Some(f)),
         };
@@ -401,6 +509,189 @@ impl<E: UpgradeEnv> Upgrader<'_, E> {
         let _m = Maintenance::enter(self.env);
         let (state, f) = self.install(&path, target, rec.from_version.clone()).await;
         self.finish(&mut rec, state, f)
+    }
+
+    /// Watchdog 自己的升級(P6-3):下載、驗證後經管道交給 Agent 替換;本機紀錄(component = watchdog)記進度,
+    /// 但**不產生事件**(Watchdog 路徑的事件白名單只收 component = agent,Watchdog 的結果由 Agent 上報)
+    pub async fn run_watchdog(&self, target: &UpgradeTarget, current: &str) -> Outcome {
+        if current == target.version {
+            return Outcome::Skipped("已是目標版本");
+        }
+        let prev = self
+            .env
+            .load_component(WATCHDOG_COMPONENT)
+            .filter(|r| r.target_version == target.version);
+        if let Some(p) = &prev {
+            if p.attempts >= MAX_ATTEMPTS {
+                return Outcome::Skipped("同一目標版本已失敗,不再自動嘗試");
+            }
+            if !p.terminal() && p.state == "installing" {
+                if !stale(&p.started_at) {
+                    return Outcome::Skipped("上一次替換尚未收尾");
+                }
+                // 已交給 Agent 超過 WATCHDOG_REPLACE_STALE 仍是舊版(開頭已排除 current == 目標):
+                // Agent 沒替換也沒停止這個行程,記為還原(失敗次數加一,呼叫端設冷卻),避免永遠略過
+                let mut p = p.clone();
+                return self.fail_quiet_as(
+                    &mut p,
+                    "rolled_back",
+                    fail(
+                        "HEALTH_CHECK_FAILED",
+                        format!("替換逾時未完成(交給 Agent 後仍是 {current})"),
+                    ),
+                );
+            }
+        }
+        if self.env.hands_off() {
+            return Outcome::Skipped("Windows 關機中或安裝程式執行中");
+        }
+        let mut rec = UpgradeRecord {
+            component: WATCHDOG_COMPONENT.into(),
+            target_version: target.version.clone(),
+            target_sha256: target.sha256.clone(),
+            from_version: Some(current.to_string()),
+            state: "downloading".into(),
+            attempts: prev.map_or(0, |p| p.attempts),
+            error_code: None,
+            error_message: None,
+            started_at: crate::now_rfc3339(),
+        };
+        let file = match check_target(target, Comp::Watchdog) {
+            Ok(f) => f,
+            Err(e) => {
+                warn!("主機下發的 Watchdog 目標不合法,略過:{}", clean(&e));
+                if target.version.len() > 32 || version::core(&target.version).is_none() {
+                    return Outcome::Skipped("目標版本格式不合法");
+                }
+                rec.target_sha256 = String::new();
+                return self.fail_quiet(
+                    &mut rec,
+                    fail("DOWNLOAD_FAILED", format!("目標不合法:{}", clean(&e))),
+                );
+            }
+        };
+        info!("開始升級 Watchdog {current} → {}", target.version);
+        self.env.save(&rec);
+        self.prune_cache(Comp::Watchdog, &target.version);
+        let path = match self.fetch(Comp::Watchdog, target, &file).await {
+            Ok(p) => p,
+            Err(f) => return self.fail_quiet(&mut rec, f),
+        };
+        rec.state = "verifying".into();
+        self.env.save(&rec);
+        if let Err(f) = self.verify(target, &path).await {
+            let _ = std::fs::remove_file(&path);
+            return self.fail_quiet(&mut rec, f);
+        }
+        if self.env.hands_off() {
+            self.env.clear_component(WATCHDOG_COMPONENT);
+            return Outcome::Skipped("Windows 關機中或安裝程式執行中");
+        }
+        // 交給 Agent:Agent 必須在執行中(伺服端 PID 比對 SCM)
+        let pid = match self.env.query().await {
+            Ok(SvcInfo {
+                pid: Some(p),
+                state: rustit_common::scm::SvcState::Running,
+                ..
+            }) => p,
+            Ok(i) => {
+                return self.fail_quiet(
+                    &mut rec,
+                    fail(
+                        "REPLACE_FAILED",
+                        format!("Agent 服務 {} 中,無法交給 Agent 替換", i.state.as_str()),
+                    ),
+                );
+            }
+            Err(e) => {
+                return self.fail_quiet(
+                    &mut rec,
+                    fail("REPLACE_FAILED", format!("無法查詢 Agent 服務:{e}")),
+                );
+            }
+        };
+        // 先記 installing 再送出:Agent 回 ack 後很快就會停止這個行程,新版啟動時據此收尾(resume_watchdog)
+        rec.state = "installing".into();
+        self.env.save(&rec);
+        match self.env.replace_watchdog(pid, target, &path).await {
+            Ok(()) => {
+                info!("已交給 Agent 替換 Watchdog → {}", target.version);
+                Outcome::HandedOff
+            }
+            Err((code, message)) => self.fail_quiet(
+                &mut rec,
+                Failure {
+                    code: known_code(&code),
+                    message,
+                },
+            ),
+        }
+    }
+
+    /// 新版 Watchdog 啟動時:上次停在 installing(已交給 Agent)→ 依自己的版本收尾本機紀錄。
+    /// 版本 = 目標:`succeeded`;仍是舊版:Agent 還原或沒換成,記 `rolled_back`(失敗次數加一;Agent 已上報 `upgrade_failed` 事件)。
+    ///
+    /// 新版一啟動就記 `succeeded`,但 Agent 的 2 分鐘健康檢查此時還沒結束;之後檢查失敗、Agent 換回舊版時,
+    /// 舊版啟動看到的是 `succeeded` 且目標不是自己的版本 → 同樣記 `rolled_back`(審查必修 A:否則失敗次數不加、
+    /// 不設冷卻,下次上報又替換一次,無限循環)
+    pub fn resume_watchdog(&self, own_version: &str) -> Option<Outcome> {
+        let mut rec = self.env.load_component(WATCHDOG_COMPONENT).filter(|r| {
+            r.state == "installing" || (r.state == "succeeded" && r.target_version != own_version)
+        })?;
+        if rec.state == "succeeded" {
+            warn!(
+                "Watchdog {} 啟動後被換回 {own_version}(Agent 健康檢查未通過),記為還原",
+                rec.target_version
+            );
+            rec.state = "rolled_back".into();
+            rec.attempts += 1;
+            rec.error_code = Some("HEALTH_CHECK_FAILED".into());
+            rec.error_message = Some(cut(&format!(
+                "新版 Watchdog {} 啟動後健康檢查未通過,已還原為 {own_version}",
+                rec.target_version
+            )));
+            self.env.save(&rec);
+            return Some(Outcome::Failed("rolled_back", "HEALTH_CHECK_FAILED"));
+        }
+        if rec.target_version == own_version {
+            rec.state = "succeeded".into();
+            rec.error_code = None;
+            rec.error_message = None;
+            info!("Watchdog 已升級為 {own_version}");
+            self.env.save(&rec);
+            return Some(Outcome::Succeeded);
+        }
+        warn!(
+            "Watchdog 升級 {} 沒有成功(目前仍是 {own_version}),記為還原",
+            rec.target_version
+        );
+        rec.state = "rolled_back".into();
+        rec.attempts += 1;
+        rec.error_code = Some("HEALTH_CHECK_FAILED".into());
+        rec.error_message = Some(cut(&format!(
+            "Agent 替換 Watchdog {} 後仍是 {own_version}(已還原或未完成)",
+            rec.target_version
+        )));
+        self.env.save(&rec);
+        Some(Outcome::Failed("rolled_back", "HEALTH_CHECK_FAILED"))
+    }
+
+    /// Watchdog 目標失敗:只記本機紀錄(失敗次數加一),不產生事件
+    fn fail_quiet(&self, rec: &mut UpgradeRecord, f: Failure) -> Outcome {
+        self.fail_quiet_as(rec, "failed", f)
+    }
+
+    fn fail_quiet_as(&self, rec: &mut UpgradeRecord, state: &'static str, f: Failure) -> Outcome {
+        rec.state = state.into();
+        rec.attempts += 1;
+        rec.error_code = Some(f.code.to_string());
+        rec.error_message = Some(cut(&f.message));
+        warn!(
+            "升級 Watchdog {} 失敗({state},第 {} 次):{} {}",
+            rec.target_version, rec.attempts, f.code, f.message
+        );
+        self.env.save(rec);
+        Outcome::Failed(state, f.code)
     }
 
     /// Watchdog 啟動時:上一次停在 installing(安裝中途被重啟)→ 依目前 exe 收尾(§5.2 第 8 步)
@@ -497,8 +788,8 @@ impl<E: UpgradeEnv> Upgrader<'_, E> {
     }
 
     /// 下載(或沿用 cache 內已完整的檔案)到 `cache\agent\{版本}\{檔名}`
-    async fn fetch(&self, t: &UpgradeTarget, file: &str) -> Result<PathBuf, Failure> {
-        let dir = self.paths.version_dir(&t.version);
+    async fn fetch(&self, comp: Comp, t: &UpgradeTarget, file: &str) -> Result<PathBuf, Failure> {
+        let dir = self.paths.comp_dir(comp, &t.version);
         let done = dir.join(file);
         if done.is_file() && hash(done.clone()).await.ok().as_deref() == Some(t.sha256.as_str()) {
             info!("沿用已下載的 {}", done.display());
@@ -599,8 +890,8 @@ impl<E: UpgradeEnv> Upgrader<'_, E> {
     }
 
     /// cache\agent\ 只保留最新 2 個版本(含這次)
-    fn prune_cache(&self, keep: &str) {
-        let root = self.paths.cache_dir.join(COMPONENT);
+    fn prune_cache(&self, comp: Comp, keep: &str) {
+        let root = self.paths.cache_dir.join(comp.name());
         let Ok(rd) = std::fs::read_dir(&root) else {
             return;
         };

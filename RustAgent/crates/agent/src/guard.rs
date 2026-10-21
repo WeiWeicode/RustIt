@@ -17,7 +17,8 @@ use log::{info, warn};
 use rustit_common::scm::{self, ExitKind, StartType, SvcInfo, SvcState, WATCHDOG_SERVICE};
 use rustit_common::stop::wait;
 use serde_json::json;
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
@@ -53,6 +54,8 @@ struct Guard {
     /// 這次停止已失敗的啟動次數與下次可嘗試的時間
     start_failures: u32,
     next_start: Option<Instant>,
+    /// 上一輪 Agent 正在替換 Watchdog(P6-3)
+    replacing: bool,
 }
 
 impl Guard {
@@ -111,13 +114,29 @@ impl Guard {
         self.next_start = Some(now + Duration::from_secs(wait));
         self.start_failures <= 3 || self.start_failures.is_multiple_of(6)
     }
+
+    /// 這一輪是否暫停看守:Agent 正在替換 Watchdog(P6-3)時停止 / 啟動是升級的一部分,不當成竄改;
+    /// 替換結束後的第一輪重設狀態,重新以目前狀態為基準
+    fn paused(&mut self, replacing: bool) -> bool {
+        if replacing {
+            self.replacing = true;
+            return true;
+        }
+        if self.replacing {
+            *self = Guard::default();
+        }
+        false
+    }
 }
 
-pub async fn run(events: EventQueue, mut stop: watch::Receiver<bool>) {
+pub async fn run(events: EventQueue, replacing: Arc<AtomicBool>, mut stop: watch::Receiver<bool>) {
     let mut guard = Guard::default();
     loop {
         if wait(INTERVAL, &mut stop).await {
             return;
+        }
+        if guard.paused(replacing.load(Ordering::SeqCst)) {
+            continue;
         }
         if crate::SHUTDOWN_REQUESTED.load(Ordering::Relaxed) || scm::hands_off() {
             continue;
@@ -337,5 +356,38 @@ mod tests {
             &Action::None,
         );
         assert_eq!((g.start_failures, g.next_start), (0, None), "跑起來後重設");
+    }
+
+    #[test]
+    fn paused_while_replacing_then_restarts_from_current_state() {
+        let t = Instant::now();
+        let stopped = info(SvcState::Stopped, ExitKind::Clean, StartType::Auto);
+        let mut g = Guard {
+            binary_reported: true,
+            ..seen()
+        };
+        assert!(!g.paused(false), "沒有替換時照常看守");
+        assert!(g.seen_running && g.binary_reported, "沒有替換時不重設");
+        assert!(g.paused(true) && g.paused(true), "替換中每一輪都暫停");
+        assert!(g.seen_running, "暫停中不改狀態");
+        assert!(!g.paused(false), "替換結束後恢復看守");
+        // 重設後還沒看過新版在跑:停止不算竄改,程式路徑重新檢查
+        assert!(!g.seen_running && !g.binary_reported);
+        assert_eq!(
+            g.decide(&stopped, t),
+            Action::Start {
+                restore: false,
+                tamper: false
+            }
+        );
+        assert!(!g.paused(false));
+        g.observe(
+            &info(SvcState::Running, ExitKind::Clean, StartType::Auto),
+            &Action::None,
+        );
+        assert!(
+            !g.paused(false) && g.seen_running,
+            "只在替換結束的那一輪重設"
+        );
     }
 }

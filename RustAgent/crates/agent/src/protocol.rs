@@ -24,6 +24,18 @@ pub fn prepare_shutdown_ack(
     serde_json::json!({ "flushed": flushed, "outbox_pending": outbox_pending, "events_pending": events_pending, "commands_aborted": commands_aborted })
 }
 
+/// 本機管道 replace_watchdog_ack 的 body(pipe.schema.json ReplaceWatchdogAck,P6-3):接受,或拒絕並附代碼與說明
+pub fn replace_watchdog_ack(rejected: Option<(&str, &str)>) -> serde_json::Value {
+    match rejected {
+        None => serde_json::json!({ "accepted": true }),
+        Some((code, message)) => serde_json::json!({
+            "accepted": false,
+            "error_code": code,
+            "error_message": message.chars().take(300).collect::<String>(),
+        }),
+    }
+}
+
 /// 本機管道 status.upgrade_requested(pipe.schema.json,P6-2):agent.upgrade 的 command_id、元件、指定版本
 pub fn upgrade_requested(
     command_id: &str,
