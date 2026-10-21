@@ -162,7 +162,7 @@ export class SqlMonitorStore implements MonitorStore {
           WHERE e.device_ref = d.id AND e.event_type = 'agent_started' AND e.occurred_at >= @since AND e.data LIKE @unexp) AS restarts,
         (SELECT MIN(c.finished_at) FROM ita.command c
           WHERE c.device_ref = d.id AND c.kind IN ('software.install', 'software.uninstall') AND c.state = 'succeeded'
-            AND c.created_at >= @rbSince AND c.result_summary LIKE @rbLike AND (d.boot_time IS NULL OR c.finished_at > d.boot_time)) AS reboot_since
+            AND c.created_at >= @rbSince AND c.result_summary LIKE @rbLike AND d.boot_time IS NOT NULL AND c.finished_at > d.boot_time) AS reboot_since
       FROM ita.device d LEFT JOIN ita.device_health h ON h.device_ref = d.id
       WHERE d.status = 'active' AND d.merged_into IS NULL;
       SELECT device_ref, [rule] FROM ita.device_alert WHERE state = 'open';`);

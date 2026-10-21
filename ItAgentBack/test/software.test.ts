@@ -559,6 +559,19 @@ describe('軟體目錄、覆核與派送(SoftwareService + CommandDispatcher)', 
     assert.equal((await install(a, id)).batchState, null);
   });
 
+  it('D2-1:同一人同時送出多台單台派送,累計門檻不會被競態繞過', async () => {
+    env = setupSoftware({ approvalThreshold: 2 });
+    pilot = await addDevice('PC-PILOT', 1);
+    env.store.ringOf.set(pilot.id, 'pilot');
+    env.dir.put(FILE, CONTENT);
+    const id = await published(); // IT 在 pilot 派過 1 台
+    const devices = [];
+    for (let i = 0; i < 5; i++) devices.push(await addDevice(`PC-RACE-${i}`, 300 + i));
+    const views = await Promise.all(devices.map((d) => install(d, id)));
+    assert.equal(views.filter((v) => v.batchState === null).length, 1, '累計 2 台以內只有 1 台不需核可');
+    assert.equal(views.filter((v) => v.batchState === 'pending_approval').length, 4);
+  });
+
   it('M3:大量電腦同時重連,全域並行上限不會被超過', async () => {
     env = setupSoftware({ approvalThreshold: 10_000, maxConcurrent: 2 });
     pilot = await addDevice('PC-PILOT', 1);

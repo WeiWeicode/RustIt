@@ -811,7 +811,7 @@ export class MemoryCommandStore extends Failable implements CommandStore, Comman
   async approveBatch(batchRef: number, actor: Actor, at: Date, expiresAt: Date) {
     this.hit('approveBatch');
     const b = this.batches.find((x) => x.id === batchRef);
-    if (!b || b.state !== 'pending_approval' || b.createdByEmp === actor.emp) return false;
+    if (!b || b.state !== 'pending_approval' || b.createdByEmp === actor.emp || at.getTime() - b.createdAt.getTime() >= 24 * 3_600_000) return false;
     Object.assign(b, { state: 'running', approvedByEmp: actor.emp, approvedByName: actor.name, approvedAt: at });
     for (const c of this.commands) if (c.batchRef === batchRef && c.state === 'queued') c.expiresAt = expiresAt;
     return true;

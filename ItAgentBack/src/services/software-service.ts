@@ -37,7 +37,7 @@ export const REBOOT_POLICIES: readonly RebootPolicy[] = ['never', 'required'];
 export const PACKAGE_STATUSES: readonly PackageStatus[] = ['draft', 'tested', 'published', 'revoked'];
 
 /** 安裝 / 移除額外參數的字元白名單(§2.3):不含 & | ; < > ^ ` $ \ @ [ ] ~ ? 與換行;路徑用 /;( ) 只為 Program Files (x86);+ 為資料夾名稱(Notepad++) */
-export const ARGS_RE = /^[A-Za-z0-9 /\-_=.:,"{}%()+]*$/;
+export const ARGS_RE = /^[A-Za-z0-9 /\-_=.:,"{}()+]*$/;
 export const ARGS_MAX = 500;
 /** 參數不可指到其他可執行檔、轉換檔、回應檔、設定檔(§2.3、D3) */
 const ARGS_FILE = /\.(msi|msp|mst|exe|dll|bat|cmd|ps1|vbs|js|inf|iss|ini|xml|txt|log|reg|cfg|json)\b/i;
@@ -54,6 +54,8 @@ const BANNED_PROPS =
  */
 const BANNED_SWITCH =
   /^(log|l[*!+voiwearucmpx]*|loadinf|saveinf|f1|f2|r|v|b|z|y|i|p|t|a|j.*|x|update|package|uninstall|repair|modify|layout|parent.*|burn\..*|config|configure|settings|response|unattend|answerfile|password|restartexitcode|debugwnd|silent|ncrc|ini)$/i;
+/** exe / burn / 未指定類型:名稱含這些字的開關多半是寫檔(記錄、輸出、傾印)或指定路徑,一律拒絕(/DIR、/D 由路徑規則處理) */
+const WRITE_SWITCH = /(log|out|file|dump|trace|save|path|report)/i;
 /** 屬性名稱 */
 const PROP_NAME = /^[A-Za-z_][A-Za-z0-9_.]*$/;
 /** 一個參數:名稱(不含引號與 =)+ 可選的 =值(值可用引號包住整個值) */
@@ -104,6 +106,7 @@ function argsGrammarError(v: string, installerType: InstallerType | undefined): 
       const sw = name.replace(/^(--|[/-])/, '');
       const swName = sw.split(':')[0]!;
       if (BANNED_SWITCH.test(swName)) return `不可使用 ${name}(會讀寫外部檔案、轉交其他安裝程式或改變安裝方式)`;
+      if (installerType !== 'inno' && installerType !== 'nsis' && WRITE_SWITCH.test(swName)) return `不可使用 ${name}(可能以 SYSTEM 寫檔)`;
       // /switch:value 的值同樣檢查
       const err = argsValueError(sw.includes(':') ? sw.slice(sw.indexOf(':') + 1) : '') ?? argsValueError(value);
       if (err) return err;

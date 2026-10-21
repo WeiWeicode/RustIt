@@ -334,7 +334,7 @@ export class CommandDispatcher {
   private readonly gateLocks = new Map<string, Promise<unknown>>();
 
   private serialized<T>(emp: string, kind: string, fn: () => Promise<T>): Promise<T> {
-    const group = GATED_GROUPS[kind];
+    const group = Object.hasOwn(GATED_GROUPS, kind) ? GATED_GROUPS[kind] : undefined;
     if (!group) return fn();
     const key = `${emp.toUpperCase()}|${group.join(',')}`;
     const prev = this.gateLocks.get(key) ?? Promise.resolve();
@@ -349,7 +349,7 @@ export class CommandDispatcher {
 
   /** D2-1:加上這次的台數後,此人 24 小時內累計是否超過門檻 */
   private async overGate(ctx: Ctx, emp: string, kind: string, adding: number): Promise<{ over: boolean; recent: number }> {
-    const group = GATED_GROUPS[kind];
+    const group = Object.hasOwn(GATED_GROUPS, kind) ? GATED_GROUPS[kind] : undefined;
     if (!group) return { over: false, recent: 0 };
     const since = new Date(this.now().getTime() - GATE_WINDOW_MS);
     const recent = await this.sqlDo(ctx, 'command.recentGated', () => this.store.recentGatedTargets(emp, group, since));
@@ -679,16 +679,17 @@ export class CommandDispatcher {
 
   // ---------- 推送 ----------
 
-  /** queued 且未逾期、裝置在線、批次未達上限 → 改 sent 後送出;回傳送出後的紀錄(沒送回 null)。失敗只記錄,留在 queued */
-  /** 有上限的指令送出前的「計數 → 改為 sent」序列化(M3) */
+  /** 有上限的指令(批次、軟體派送)送出前的「計數 → 改為 sent」序列化鏈(單一實例;M3) */
   private sendGate: Promise<unknown> = Promise.resolve();
 
+  /** 在序列化鏈上執行 fn;fn 失敗不會卡住後面的送出 */
   private reserve(fn: () => Promise<boolean>): Promise<boolean> {
     const run = this.sendGate.then(fn, fn);
     this.sendGate = run.catch(() => undefined);
     return run;
   }
 
+  /** queued 且未逾期、裝置在線、批次未達上限 → 改 sent 後送出;回傳送出後的紀錄(沒送回 null)。失敗只記錄,留在 queued */
   private async trySend(ctx: Ctx, cmd: CommandRecord): Promise<CommandRecord | null> {
     const at = this.now();
     if (cmd.state !== 'queued' || cmd.expiresAt <= at || !this.channel.isOnline(cmd.deviceId)) return null;

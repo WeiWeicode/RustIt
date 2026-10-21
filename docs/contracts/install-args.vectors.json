@@ -63,6 +63,11 @@
     { "installer_type": "burn", "args": "-burn.clean.room=x", "why": "Burn 內部參數" },
     { "installer_type": "burn", "args": "/layout x", "why": "改變動作" },
     { "installer_type": "burn", "args": "/uninstall", "why": "改變動作" },
+    { "installer_type": "exe", "args": "/logfile=out", "why": "寫檔(名稱含 log)" },
+    { "installer_type": "exe", "args": "/out=x", "why": "寫檔(名稱含 out)" },
+    { "installer_type": null, "args": "/dump=x", "why": "寫檔(名稱含 dump)" },
+    { "installer_type": "burn", "args": "-logpath=x", "why": "寫檔(名稱含 log / path)" },
+    { "installer_type": "msi", "args": "INSTALLDIR=%TEMP%", "why": "% 不在字元集(環境變數)" },
     { "installer_type": null, "args": "/i other.msi", "why": "指到其他檔案" },
     { "installer_type": null, "args": "RUN=calc.exe", "why": "指到其他檔案" },
     { "installer_type": null, "args": "x.ps1", "why": "指令檔" }
