@@ -40,7 +40,9 @@
 | `UNINSTALL_NOT_SUPPORTED` | Agent | P7:找得到項目,但沒有可用的移除指令 |
 | `DEFERRED_TIMEOUT` | Agent | P7:電池 / 計量網路延後下載超過上限(預設 4 小時) |
 
-主機取消指令(`canceled`)時的 `error_code`(P7 起,只出現在管理 API,不送到 Agent):`PACKAGE_REVOKED`(套件撤回時尚未送出的安裝)、`BATCH_REJECTED`(批次被駁回)、`APPROVAL_EXPIRED`(批次 24 小時無人核可)。
+主機取消指令(`canceled`)時的 `error_code`(P7 起,只出現在管理 API,不送到 Agent):`PACKAGE_REVOKED`(套件撤回時尚未送出的安裝)、`BATCH_REJECTED`(批次被駁回)、`APPROVAL_EXPIRED`(批次 24 小時無人核可)、`PACKAGE_CHANGED`(套件退回 `draft`、改了安裝參數 / 偵測規則 / 重開機政策,尚未送出的舊快照指令取消)、`PACKAGE_FILE_CHANGED`(軟體庫的安裝檔被換掉、與登錄的 SHA-256 不符,該套件排隊中的安裝一併取消,需重新登錄新版本;同時開 `software_file_tampered` 告警)。
+
+管理 API 新增錯誤(P7;HTTP 狀態與代碼):`403 ITA_REVIEWER_SAME_AS_CREATOR`(發佈人 = 登錄人)、`403 ITA_REVIEWER_SAME_AS_EDITOR`(發佈人是上次發佈以來修改過安裝參數 / 偵測規則 / 重開機政策的人,D2-2)、`403 ITA_REVIEWER_NOT_PERSON`(發佈者沒有工號,例如系統 client)、`403 ITA_SCOPE_ALL_REQUIRED`(尚未發佈的套件派到測試機,需可管理所有公司的角色)、`409 ITA_PACKAGE_NOT_PUBLISHED`(也用於「未曾發佈就撤回」的套件派送移除到非 pilot)。
 
 ## 類型
 
@@ -148,13 +150,14 @@
 | `url` | string | 固定 `/agent/v1/packages/{package_id}`;以同一組 mTLS 連線下載,不跟隨重新導向 |
 | `sha256`、`size_bytes` | string(64 碼小寫)、integer | 驗整個檔案;不符 `HASH_MISMATCH`,不啟動安裝程式 |
 | `installer_type` | `msi` / `inno` / `nsis` / `burn` / `exe` | 決定 Agent 寫死的命令列(P7-SOFTWARE-DESIGN §5.3) |
-| `install_args` | string ≤ 500 | 額外參數(可為空字串);字元白名單 `[A-Za-z0-9 /\-_=.:,"{}%]`,不可指到其他檔案(`.msi` / `.exe` / `.mst` 等)、不可含 `password=` / `key=` 類字樣;Agent 執行前再驗,不符 `INVALID_PARAMS`。**不經 cmd.exe / PowerShell** |
+| `install_args` | string ≤ 500 | 額外參數(可為空字串);字元白名單 `[A-Za-z0-9 /\-_=.:,"{}%()+]`(路徑用 `/`),**再依 `installer_type` 逐一檢查每個參數**(D3):MSI 只接受 `屬性=值`、禁用讀外部檔案或改變安裝方式的屬性與開關(`TRANSFORMS`、`PATCH`、`REBOOT`、`/LOG`、`/LOADINF`、`/SILENT` 等)、路徑只限 `C:/Program Files/` 與 `C:/Program Files (x86)/` 底下、不可含 UNC / `..`。規則細節以測試向量 [`install-args.vectors.json`](install-args.vectors.json) 為準(ItAgentBack 與 Agent P7-2 吃同一份);Agent 執行前再驗,不符 `INVALID_PARAMS`。**不經 cmd.exe / PowerShell** |
 | `signer_thumbprints` | string[](40 碼小寫 SHA-1) | 預期簽章者;**`draft` 套件(只會派到 pilot 測試機)為空陣列**:Agent 仍須簽章有效(`Valid`)並回報實際簽章者,不採信空清單放行;非空時實際簽章者須同時在此清單與本機 `trusted_signers` |
 | `detect` | `{ type: "msi_product_code" \| "display_name", value }` | 「已安裝」判斷;`display_name` 為登錄檔 DisplayName 的 `LIKE` 樣式(`%` 萬用字元) |
 | `timeout_sec` | integer | 安裝本身的逾時,預設 1800 |
 | `reboot_policy` | `never` / `required` | |
 | `ignore_power` | boolean(選填) | 略過電池延後(不略過計量網路) |
 
+- 單台派送也累計(D2-1):同一人 24 小時內 `software.install` / `software.uninstall`(一組)累計涉及的電腦台數 + 這次 > `BATCH_APPROVAL_THRESHOLD`(20)時,該單台指令放進一個**待核可的單台批次**(`CommandView.batchState = pending_approval`,回應仍是 `CommandView`),需第二人核可後才送出;`system.reboot` 另算一組。已由第二人核可的批次不計入累計,已取消的單台照計。
 - 主機檢查(不符就不建立指令):套件存在(`404 ITA_PACKAGE_NOT_FOUND`)、未撤回(`409 ITA_PACKAGE_REVOKED`)、`draft` / `tested` 只能派到 **pilot 環**(`409 ITA_PACKAGE_NOT_PUBLISHED`)、已發佈套件的授權數(`409 ITA_LICENSE_EXCEEDED`)。
 - `result`(序列化後 4,000 字元內;範例 `ws-command-update-software-install.sample.json`):`exit_code`、`reboot_required`、`signer`(實際簽章者 SHA-1 指紋)、`signer_subject`、`duration_ms`、`detected`、`already_installed`、`log_tail`(安裝記錄最後 20 行,經 `logs.collect` 同一套遮罩)。結束代碼 `0` 成功;`3010` / `1641` 成功且 `reboot_required = true`;`1638` 視為 `already_installed`;其餘 `INSTALL_FAILED`。`detect` 已通過時直接 `succeeded` + `already_installed = true`。
 - 測試機(pilot)回報的 `signer` 是 IT 標記 `tested` 的依據:`mark-tested` 填的簽章者必須等於回報值。
@@ -182,11 +185,13 @@
 
 | 情況 | 行為 |
 | --- | --- |
-| admin 批次 > `BATCH_APPROVAL_THRESHOLD`(20)台 | 批次 `state = pending_approval`,指令 `queued` 不送出(重連補送也不送) |
+| admin 批次 > `BATCH_APPROVAL_THRESHOLD`(20)台,**或同一人 24 小時內累計(含逐台與多批小批次)超過門檻**(D2-1;軟體安裝 / 移除一組、`system.reboot` 一組) | 批次 `state = pending_approval`,指令 `queued` 不送出(重連補送也不送);累計超過門檻的單台指令進單台批次,`CommandView.batchState` 為 `pending_approval` |
 | `POST /api/endpoint/batches/{batchId}/approve`(`endpoint.software.manage`) | 建立人以外、資料範圍涵蓋批次全部電腦的人核可 → `running`,指令有效期限自核可時起算並開始送出;核可人 = 建立人 `403 ITA_APPROVER_SAME_AS_CREATOR`;不是待核可或已超過 24 小時 `409 ITA_BATCH_NOT_PENDING` |
 | `POST /api/endpoint/batches/{batchId}/reject`(`reason` 必填) | `rejected`,指令 `canceled`(`BATCH_REJECTED`);建立人也可撤回自己的批次 |
 | 24 小時無人核可 | 每分鐘掃描 → `expired`,指令 `canceled`(`APPROVAL_EXPIRED`) |
 | ≤ 門檻 | 不需核可(`running`),一樣寫稽核 |
+
+`CommandView.batchState`(`pending_approval` / `running` / `done` / `rejected` / `expired`,不屬於批次為 `null`)讓清單直接看出單台指令是否在等核可。
 
 `GET /api/endpoint/batches/{batchId}` 回 `state`(`pending_approval` / `running` / `done` / `rejected` / `expired`)、`requiresApproval`、`approvalExpiresAt`、`approvedBy` / `approvedAt`、`rejectedBy` / `rejectedAt` / `rejectReason`。
 
