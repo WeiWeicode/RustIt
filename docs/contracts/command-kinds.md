@@ -53,9 +53,9 @@
 | `logs.collect` | basic | 1 小時 / 15 分鐘 | 否 | P4-2 |
 | `agent.log_level` | basic | 1 小時 / 1 分鐘 | 否 | P4-2 |
 | `agent.upgrade` | admin | 1 小時 / 5 分鐘 | 是 | P6 |
-| `software.install` | admin | 24 小時 / 4 小時 | 是 | P7(Agent 0.8.0) |
-| `software.uninstall` | admin | 24 小時 / 1 小時 | 是 | P7(Agent 0.8.0) |
-| `system.reboot` | admin | 4 小時 / 30 分鐘 | 是 | P7(Agent 0.8.0) |
+| `software.install` | admin | 24 小時 / 4 小時 | 是 | P7(Agent 0.9.0) |
+| `software.uninstall` | admin | 24 小時 / 1 小時 | 是 | P7(Agent 0.9.0) |
+| `system.reboot` | admin | 4 小時 / 30 分鐘 | 是 | P7(Agent 0.9.0) |
 
 > `software.install` 的逾時含下載與電池延後(安裝本身由 `timeout_sec` 控制,預設 30 分鐘);有效期限 24 小時 = 離線太久回來不再執行過期的安裝。待核可批次的指令有效期限自核可時起算。
 

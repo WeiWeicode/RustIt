@@ -2,7 +2,7 @@
 
 > 草案 2026-10-20,分支 `docs/p7-software-design`(從 develop `948adf1` 開,P6-2 已合併)。依據:PLATFORM-PLAN §4.4、§4.6、§4.10 A6、§5、§8 P7 列、§8 B1;[ADR 0002](decisions/0002-software-deployment.md)(採方案 B)、[ADR 0003](decisions/0003-code-signing-pki.md);`P4-COMMAND-DESIGN.md`(指令通道、批次);`P6-UPGRADE-DESIGN.md`(`authenticode`、本機信任清單、版本檔目錄、下載 API 模式);`contracts/command-kinds.md`。
 > **狀態**:2026-10-20 需求方確認 §9 全部:第 2 項依建議(未簽章套件由公司憑證加簽),第 11 項先用需求方自己的本機電腦(開發機)加 VM `RUSTIT-P34`,另一台 IT 同意的電腦之後再補;其餘照建議。可開工 P7-1。
-> **進度(2026-10-20 收工,P7-1 未完成)**:分支 `feature/p7-1-software-catalog`(從本設計分支開,worktree `../RustIt-p7-1`)已推到 gitlab / origin,**MR 尚未開**。P7-1 後端實作完成:migration 0008(**只套用整合測試庫 `_poc_test`**)、軟體目錄與兩人覆核、`software.*` / `system.reboot` 指令與參數快照、套件下載、批次第二人核可、全域並行上限;`npm test` 200/200、`test:int` 13/13、typecheck / build 通過。code-reviewer 審查已處理(§8.1);**security-auditor 的報告未完整取得,明天先重跑並處理**(見 §8.1「明天接手」)。
+> **進度(2026-10-21,P7-1 未完成)**:P6 已於 2026-10-21 完成,P7 接續。分支 `feature/p7-1-software-catalog`(從本設計分支開,worktree `../RustIt-p7-1`)已推到 gitlab / origin,2026-10-21 已合併 develop(P6 完成),**MR 尚未開**。P7-1 後端實作完成:migration 0008(**只套用整合測試庫 `_poc_test`**)、軟體目錄與兩人覆核、`software.*` / `system.reboot` 指令與參數快照、套件下載、批次第二人核可、全域並行上限;`npm test` 200/200、`test:int` 13/13、typecheck / build 通過。code-reviewer 審查已處理(§8.1);**security-auditor 的報告未完整取得,下一步先重跑並處理**(見 §8.1.1「接手」)。
 > 設計當時的現況:Agent 0.7.0、Watchdog 0.2.0(P6-2 已合併 develop);`rustit-common::authenticode`(WinVerifyTrust + 簽章者指紋)與 `agent.toml` `[upgrade] trusted_signers` 已有;`ita.command_batch` 已有 `requires_approval` / `approved_by_*` 欄位(P4 預留、無邏輯);`kindHooks`、批次 `max_concurrent` 補送(`refillBatch`)已有;`ita.device_software`(P3)有每台最新軟體清單;**NAS `RustIT\` 未掛載、軟體目錄與 `software.*` 指令都還沒有**。`RustAgent/crates/demo/src/deploy.rs`(536 行,Firefox / WinRAR 單機版)是移植來源。
 
 ## 0. 分批
@@ -10,8 +10,8 @@
 | 批 | 內容 | 版本 | 需要同意 |
 | --- | --- | --- | --- |
 | **P7-1 軟體目錄與下載(後端)** | migration `0008_software.sql`;`software-service`(目錄、狀態機、兩人覆核);管理 API(登錄、測試完成、發佈、撤回、挑檔);Agent 下載 API `GET /agent/v1/packages/{packageId}`(Range、僅限被指派);`software.install` / `software.uninstall` 指令類型(admin、參數快照);派送 API(單台、批次)與授權數檢查 | — | migration 套用 `giganexus_It_Agent_test`;軟體庫目錄(§9-3);合併 develop |
-| **P7-2 Agent `software` 模組** | 從 `deploy.rs` 移植:下載(續傳、本機快取)→ 驗 SHA-256 與簽章者 → 靜默安裝 / 移除(SYSTEM、逾時、1618 重試)→ 輪詢登錄檔確認 → 立即重新蒐集;A6 電池 / 計量網路延後;回報簽章者(測試機用) | Agent **0.8.0** | VM 驗收;測試簽章憑證沿用 P6 |
-| **P7-3 `system.reboot` 與批次核可** | `system.reboot`(先提示使用者、可延後、強制期限);批次第二人核可(B1:> 20 台);`3010` 之後的 `reboot_required` 顯示與一鍵重開機 | Agent 0.8.0 | VM 驗收 |
+| **P7-2 Agent `software` 模組** | 從 `deploy.rs` 移植:下載(續傳、本機快取)→ 驗 SHA-256 與簽章者 → 靜默安裝 / 移除(SYSTEM、逾時、1618 重試)→ 輪詢登錄檔確認 → 立即重新蒐集;A6 電池 / 計量網路延後;回報簽章者(測試機用) | Agent **0.9.0** | VM 驗收;測試簽章憑證沿用 P6 |
+| **P7-3 `system.reboot` 與批次核可** | `system.reboot`(先提示使用者、可延後、強制期限);批次第二人核可(B1:> 20 台);`3010` 之後的 `reboot_required` 顯示與一鍵重開機 | Agent 0.9.0 | VM 驗收 |
 | **P7-4 NAS 唯讀掛載** | `endpoint-server` 以 CIFS 唯讀掛載 `RustIT\`(`releases\` 與 `software\` 共用);正式區 `main` 部署前必須完成 | — | NAS 帳密機密腳本由需求方執行(AI 不經手);`docker-compose.yml`、主機 2 修改 |
 | **P7-5 GigaItApp「軟體派送」頁** | 軟體目錄 / 派送工作兩個 Tab;電腦詳情「派送軟體」「重新開機」按鈕;`gateway-rbac.yaml` | — | **GigaItApp、`gateway-rbac.yaml`:動手前另外確認**(OpenAPI 註冊、IT 發佈後才綁 `includes`) |
 | P7-6 收尾 | 指南回寫(§8.3 指令類型、§5 套件下載)、`command-kinds.md`、根目錄 `workspace.json` / `PROJECT-MAP.md`、甘特圖 W6-20、測試報告、RUNBOOK「軟體派送失敗處理」 | — | Gateway / 根目錄 repo 修改前確認 |
@@ -194,7 +194,7 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
 - 測試區在 NAS 帳密到位前:主機 2 `/srv/giganexus/ita-software/`(root 擁有、唯讀 bind mount 到 `SOFTWARE_DIR`),由需求方或 Claude 經 `ssh host2` 複製(§9-3)。**NAS 帳密只給後端**:由需求方執行的機密腳本寫入主機 2 `/srv/giganexus/ita-secrets/`,AI 不經手;Agent 不拿 NAS 帳密、不直接連 NAS。
 - 容量與備份:軟體庫是 IT 工作區,不是唯一副本;安裝檔的原始來源(廠商網址、取得日期)記在 `notes`。
 
-## 5. Agent(0.8.0)
+## 5. Agent(0.9.0)
 
 ### 5.1 新模組(`crates/agent/src/software/`)
 
@@ -302,11 +302,11 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
   - 告警規則 `software_install_failed`、`reboot_pending`(§3.1)**尚未做**;套件被換掉只記 error 日誌、回 503,未開告警。
 - **code-reviewer(無必修,已處理)**:全域補送分頁掃描(避免最舊 200 筆都是離線電腦時餓死);LIKE 樣式參數 800 字;`markTested` 服務層擋空簽章者、實際簽章者不截斷;`rooted-files` 只有不存在回 null,權限 / 掛載錯誤回 503 `ITA_FILES_UNAVAILABLE`(P6 版本檔目錄同樣受惠);`params LIKE` 以 `created_at` 收斂(撤回 7 天、測試結果 180 天);重讀批次失敗記 warn;補測試(核可人範圍 404、空簽章者)。另自行修正:同一個 Idempotency-Key 用在另一個套件回 422(批次與單台)。
 - **security-auditor(報告未完整取得)**:只收到摘要——H1 安裝參數白名單可能擋不住「讓 msiexec / 安裝程式讀外部檔案」(需在 VM 驗證);兩人覆核與批次核可可由同一人以合法 API 繞過(例如:以單台 admin-commands 逐台派送避開 > 20 台核可;登錄後改參數再由他人發佈等路徑待確認);deploy 實際只檢查 `endpoint.command.admin`。
-- **明天接手**:
+- **接手**:
   1. 在 worktree `D:\檔案分享\程式碼\GigaNexusAI\RustIt-p7-1` 重跑 security-auditor(diff `d345dda..HEAD`),取得完整報告後修正高 / 中項目,結果補進本節。
   2. 重跑 `npm run typecheck`、`npm test`、`npm run test:int`(`npx tsx --env-file=../../RustIt/ItAgentBack/.env --test test/int/*.int.test.ts`,只讀原檢出的 `.env`、不複製;Mongo / Redis 為 127.0.0.1,DB 守門只允許 `*_poc_test`)。
   3. 用 `GITLAB_TOKEN` 開 MR → develop(只開不合併),描述註明:依賴 MR !39 先合併;**部署前必須先套用 migration 0008**(新版所有指令查詢讀 `command_batch.state`);migration 0008 內容請需求方先看,再經同意套用 `giganexus_It_Agent_test`;測試區 compose 已加 `SOFTWARE_DIR=/srv/software`。
-  4. 需求方正在測試區測 P6:不部署、不動主機 2 / VM / `giganexus_It_Agent_test`,不推送或合併 develop / main。
+  4. P6 已完成(2026-10-21),但部署前仍須先套用 migration 0008(需求方看過並同意);不推送或合併 develop / main。
 
 ### 8.2 風險與已知限制(實作前先看)
 
@@ -319,7 +319,7 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
 
 ### 8.3 測試區 VM 驗收步驟(草案,`RUSTIT-P34` + 另 2 台 IT 同意的電腦;VM 內指令由需求方執行)
 
-**前置**:P7-1 已合併 develop 並部署測試區、migration 0008 已套用 `giganexus_It_Agent_test`、Gateway OpenAPI 草稿批次已發佈、主機 2 `/srv/giganexus/ita-software/` 已建立並放入兩個套件(`7-Zip\<版本>\*.msi`,以測試憑證簽章;`Notepad++\<版本>\*.exe`)、VM 已裝 Agent 0.8.0、Notepad++ 的簽章者指紋已加入該機 `trusted_signers`、VM 設為 `pilot` 環。
+**前置**:P7-1 已合併 develop 並部署測試區、migration 0008 已套用 `giganexus_It_Agent_test`、Gateway OpenAPI 草稿批次已發佈、主機 2 `/srv/giganexus/ita-software/` 已建立並放入兩個套件(`7-Zip\<版本>\*.msi`,以測試憑證簽章;`Notepad++\<版本>\*.exe`)、VM 已裝 Agent 0.9.0、Notepad++ 的簽章者指紋已加入該機 `trusted_signers`、VM 設為 `pilot` 環。
 
 | # | 步驟 | 通過條件 |
 | --- | --- | --- |
@@ -342,7 +342,7 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
 
 > 全部已確認(2026-10-20)。第 11 項調整:先以需求方本機電腦 + VM 驗收(2 台),完成標準的第 3 台 IT 電腦待同意後補測。
 
-1. ✅ **套件版本號**:Agent 0.8.0(P7-2 / P7-3 一起發;Watchdog 不變 0.2.0)。(建議:同意)
+1. ✅ **套件版本號**:Agent **0.9.0**(P7-2 / P7-3 一起發;Watchdog 不變,目前 0.3.2)。(建議:同意)2026-10-21 調整:原訂 0.8.0,但 0.8.0~0.8.2 已被 P6-3 與 rustls 修補使用,改為 0.9.0。
 2. ✅ **未簽章 / 簽章不在本機清單的套件**:所有套件必須有有效 Authenticode 簽章,且簽章者在本機信任清單內;廠商沒簽的檔案(例如 7-Zip MSI)由 IT 以**公司程式碼簽章憑證**簽章後再登錄(沿用 P6-4 簽章流程,MSI 加簽不改內容)。/ 允許目錄標記「未簽章但雜湊釘選」,由本機 GPO 清單列入雜湊(每個新版都要更新 GPO,維運負擔大)。/ 允許未簽章套件只憑主機雜湊(**不建議**:主機被入侵即可推任意程式)。(建議:第一個)
 3. ✅ **軟體庫目錄**:NAS 帳密到位前,測試區先用主機 2 `/srv/giganexus/ita-software/`;NAS 掛載(P7-4,含 P6 的 `releases\`)等你提供帳密後做。(建議:同意)
 4. ✅ **覆核規則**:`published_by ≠ created_by`(第二人);`tested_by` 可以是建立人。/ 三者都需不同人(IT 人少時太嚴)。(建議:第一個)
