@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-21 cargo audit:rustls / rustls-webpki 弱點,升 Agent 0.8.2 / Watchdog 0.3.2
+- 內容:主機 2 Windows Runner 第一次跑 `audit:rust`(RustSec 1,348 筆,develop `09c66b8`)查到 6 個弱點:rustls 0.23.45(RUSTSEC-2026-0346 / 0347 / 0348 / 0349)、rustls-webpki 0.103.15(RUSTSEC-2026-0382,憑證驗證可能接受已撤銷信任的中繼憑證)、webpki-root-certs 1.0.9(RUSTSEC-2026-0383)。影響評估:0382 在 Agent / Watchdog 驗 Gateway 憑證的路徑上(但只信任自己的 Agent CA,風險低);0346 需本機高權限;0347(ECH)、0348(rustls 未開 brotli)、0349(`ring` 無後量子金鑰交換)用不到;webpki-root-certs 不在 Windows 建置的相依中。只改 `Cargo.lock` 升到相容修補版(rustls 0.23.46、rustls-webpki 0.103.16、webpki-root-certs 1.0.10),不改程式;Agent 0.8.0 → **0.8.2**、Watchdog 0.3.0 → **0.3.2**(測試區已登錄過 P6-3 驗收用的 0.8.1 / 0.3.1,不重用)。`MIN_WATCHDOG_VERSION` 與測試資料的 `0.3.0` 不變。剩下 2 個警告(glib unsound、proc-macro-error unmaintained)只在 demo(Tauri)的 Linux 相依,不出貨。
+- 檔案:`RustAgent/Cargo.lock`、`RustAgent/crates/agent/Cargo.toml`、`RustAgent/crates/watchdog/Cargo.toml`
+- 驗證:`cargo test --locked -p rustit-common -p rustit-agent -p rustit-watchdog` 158 通過、0 失敗(1 個原本就略過);新的 `Cargo.lock` 在主機 2 以同一份 advisory-db 重跑 `cargo audit`:弱點 0、警告 2(同上)
+
 ## 2026-10-19 裝置停用後重新啟用,Agent 最多要等 10 分鐘才恢復
 - 內容:測試區在 VM 上停用再啟用(01:07:13 停用、01:07:24 啟用)後,Agent 要等滿 10 分鐘才重連,期間下的指令只能排隊。原因是停用(403 `ITA_DEVICE_DISABLED`、close 4403)和憑證錯誤共用 `CERT_RETRY`(10 分鐘)。需求方決定(2026-10-19,方案 A):停用改成每 1 分鐘 ±20% 重試,退役(403 `ITA_DEVICE_RETIRED`)和其他憑證類錯誤維持 10 分鐘。主機停用和退役都用 close 4403 關閉,所以退役時 Agent 會先在 1 分鐘後重試一次,收到 403 `ITA_DEVICE_RETIRED` 後才改回 10 分鐘。停用的裝置每分鐘重連一次,只多一次 TLS 握手和一個 403,台數少,負載可忽略。主機端不用改。rustit-agent 升為 0.4.2。
 - 檔案:`RustAgent/crates/common/src/{backoff,transport}.rs`、`RustAgent/crates/agent/Cargo.toml`、`RustAgent/Cargo.lock`
