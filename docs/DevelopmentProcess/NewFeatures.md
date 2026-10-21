@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-21 P6-4 主機 2 Windows Runner 上線與設定文件回寫
+- 內容:MR !45(發版流水線)合併後,在主機 2 Windows 本機裝建置工具並註冊 project runner `host2-windows`(#4,tag `windows`、鎖定 RustIt、服務帳號 `gitlab-runner-svc`、`concurrent = 1`)。實裝與原文件不同處回寫 `WINDOWS-RUNNER-SETUP.md` §2、§3,並新增 §6 維護:Runner shell 必須 `pwsh`(`powershell` 5.1 在 CP950 系統解析 Runner 產生的腳本失敗,`exit status 0xfffd0000`);主機 2 無 D 槽,建置目錄 `C:\ci`;工具全機共用安裝(`C:\Rust`、`C:\Tools\wix`)、`CARGO_HOME` 由 Runner 設定指到 `C:\ci\cargo-home`;`gitlab-runner install --user` 不會授予 `SeServiceLogonRight`,要另外授予;`config.toml` ACL 限縮;服務帳號密碼重設方式。新增 `install-runner-tools.ps1`(可重跑,含 gitlab-runner SHA256 與 PowerShell MSI 簽章檢查);補專案地圖 P6-4 檔案。
+- 檔案:`docs/WINDOWS-RUNNER-SETUP.md`、`RustAgent/installer/install-runner-tools.ps1`(新)、`docs/PROJECT-MAP.md`、`docs/HANDOFF.md`
+- 驗證:主機 2 `cargo build --release` 試編(MSVC 14.44)通過;pipeline 378 `build:release`(重試後 job 1075,develop `ecca9dcd`)成功:`agent/0.8.0/rustit-agent.exe`、`watchdog/0.3.0/rustit-watchdog.exe` ProductVersion 相符、未簽章、雜湊與 `SHA256SUMS.txt` 相符;第一次 job 1073 因 shell `powershell` 失敗(見上)
+
 ## 2026-10-21 P6-3 測試區 VM 驗收完成
 - 內容:MR !43 已合併 develop;測試區 VM `RUSTIT-P34` 完成設計 §8.6 步驟 0~6:Watchdog 0.3.0 → 0.3.1 升級成功、壞版 0.3.2-broken 自動還原、未簽章 / 第二張憑證在 Watchdog 驗證階段被擋、降版 0.3.0、替換中重開機由 Agent `resume` 收尾、Agent 0.8.0 → 0.8.1 回歸。
 - 檔案:`docs/test-reports/2026-10-21-p6-3-replace-watchdog.md`(新)、`docs/P6-UPGRADE-DESIGN.md`、`docs/HANDOFF.md`
