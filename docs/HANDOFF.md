@@ -19,7 +19,7 @@
 
 ## 2. 下一步
 
-0. **目前階段:P7 軟體派送(P6 已於 2026-10-21 完成)**:[P7-SOFTWARE-DESIGN.md](P7-SOFTWARE-DESIGN.md) §9 全部已確認(MR !39)。**P7-1 後端程式與文件完成,待開 MR**:分支 `feature/p7-1-software-catalog`(worktree `../RustIt-p7-1`)已推送、MR 未開;2026-10-21 需求方決定 D1~D6 全部照建議,資安稽核已修大部分(設計 §8.1.1),`npm test` 210/210、`test:int` 13/13(測試報告 `test-reports/2026-10-21-p7-1-backend.md`)。**下一步:主工作階段處理 code-reviewer 結果後,再開 MR(1-6)。** migration 0008 只套用 `_poc_test`,尚未給需求方看、未套用 `giganexus_It_Agent_test`。P7-2 Agent 版本號改為 **0.9.0**(0.8.x 已被 P6 使用,見設計 §9-1)。
+0. **目前階段:P7 軟體派送(P6 已於 2026-10-21 完成)**:[P7-SOFTWARE-DESIGN.md](P7-SOFTWARE-DESIGN.md) §9 全部已確認(MR !39)。**P7-1 後端程式與文件完成,待開 MR**:分支 `feature/p7-1-software-catalog`(worktree `../RustIt-p7-1`)已推送、MR 未開;2026-10-21 需求方決定 D1~D6 全部照建議,資安稽核已修大部分(設計 §8.1.1),`npm test` 210/210、`test:int` 13/13(測試報告 `test-reports/2026-10-21-p7-1-backend.md`)。**下一步:主工作階段處理 code-reviewer 結果後,再開 MR(1-6)。** code-reviewer 建議 1、3、4、5、9 與 D2-1 競態測試已處理(`d2e84d8`);待辦:第 7 點(直接取消的指令所屬批次是否會收尾)、第 10 點(新 SQL 的整合測試覆蓋)。 migration 0008 只套用 `_poc_test`,尚未給需求方看、未套用 `giganexus_It_Agent_test`。P7-2 Agent 版本號改為 **0.9.0**(0.8.x 已被 P6 使用,見設計 §9-1)。
    - **P7 工作項目(2026-10-21)**。分工:**Claude 主工作階段只寫程式與規劃**;測試、寫文件、需要需求方操作的步驟一律開 **Sonnet 子任務**(另開工作階段);下表「子任務」即指 Sonnet 子任務。
      - **P7-1 軟體目錄與下載(後端)🟡 程式完成,待收尾**
        | # | 工作 | 負責 | 前置 |

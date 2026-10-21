@@ -303,7 +303,7 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
   - **D4**:新增告警規則 `software_install_failed`(warn;安裝失敗開,同一台再派送同一套件成功自動關)、`reboot_pending`(warn;自動類,成功且 `reboot_required` 的 `software.*` 之後開機時間沒變新超過 7 天)、`software_file_tampered`(critical;下載時發現軟體庫安裝檔與登錄雜湊不符,開在要求下載的裝置上,不自動關閉)。
   - **D5**:Agent 版本 0.9.0(P7-2 / P7-3 一起發)。
   - **D6**:驗收先用 2 台(需求方本機電腦 + VM `RUSTIT-P34`),第 3 台待同意後補測。
-- **code-reviewer(2026-10-20,無必修,已處理)**:全域補送分頁掃描(避免最舊 200 筆都是離線電腦時餓死);LIKE 樣式參數 800 字;`markTested` 服務層擋空簽章者、實際簽章者不截斷;`rooted-files` 只有不存在回 null,權限 / 掛載錯誤回 503 `ITA_FILES_UNAVAILABLE`;`params LIKE` 以 `created_at` 收斂(撤回 7 天、測試結果 180 天);重讀批次失敗記 warn;同一個 Idempotency-Key 用在另一個套件回 422。2026-10-21 再次審查建議(管控類型查表防原型鏈、`reboot_since` 開機時間未知不算、exe 寫檔類開關與 `%` 禁止等)已於 `d2e84d8` 處理,主工作階段仍在處理其餘結果。
+- **code-reviewer(2026-10-20,無必修,已處理)**:全域補送分頁掃描(避免最舊 200 筆都是離線電腦時餓死);LIKE 樣式參數 800 字;`markTested` 服務層擋空簽章者、實際簽章者不截斷;`rooted-files` 只有不存在回 null,權限 / 掛載錯誤回 503 `ITA_FILES_UNAVAILABLE`;`params LIKE` 以 `created_at` 收斂(撤回 7 天、測試結果 180 天);重讀批次失敗記 warn;同一個 Idempotency-Key 用在另一個套件回 422。2026-10-21 再次審查建議(管控類型查表防原型鏈、`reboot_since` 開機時間未知不算、exe 寫檔類開關與 `%` 禁止等)已於 `d2e84d8` 處理(建議修正 1、3、4、5、9 與 D2-1 競態測試)。**待辦**:第 7 點「直接取消的指令所屬批次是否會收尾」、第 10 點「新 SQL 的整合測試覆蓋」。
 - **資安稽核(security-auditor,2026-10-21 重跑)已修**:
 
   | 編號 | 內容 | 修法 |
