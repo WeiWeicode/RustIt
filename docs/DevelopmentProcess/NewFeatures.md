@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-21 P6-6 收尾:P6 升級測試區完成
+- 內容:依設計 §0「P6-6 收尾」:RUNBOOK 新增 §2 版本回滾(撤回止血、設回舊版需 `force`、版本下限 Agent 0.7.0 / Watchdog 0.3.0、單台 `agent.upgrade`、`ROLLBACK_FAILED` 處理),§1 上架指令補必填 `-Environment`;HANDOFF 目前狀態改為 Agent 0.8.2 / Watchdog 0.3.2、P6 完成與上線前待辦、修正 P6-5 狀態(GigaItApp MR !9 已上測試區);設計文件加完成摘要。跨 repo(需求方同意):Gateway `ENDPOINT-AGENT-GUIDE.md` v0.11(giga-api-gateway-bff MR !7,`978334b`)、根目錄 `workspace.json` / `PROJECT-MAP.md` / 甘特圖 seed W6-19 100% done(giganexusai MR !8,`94a5d40`;甘特圖 DB 已經 API 更新)。`command-kinds.md` 已有 `agent.upgrade`,不需修改。
+- 檔案:`docs/RUNBOOK.md`、`docs/HANDOFF.md`、`docs/P6-UPGRADE-DESIGN.md`
+- 驗證:文件;根目錄 `npm run arch:check` 通過。未做:測試痕跡清理(測試區版本登錄撤回需瀏覽器登入、主機 2 測試版本檔要等撤回後再刪、VM 測試根憑證由需求方在 VM 移除),列在 HANDOFF §2 第 0 項
+
 ## 2026-10-21 P6-4 第一次正式發版流程(Agent 0.8.2 / Watchdog 0.3.2)測試區完成
 - 內容:以 MR !47(rustls 弱點修補)為第一個正式流程版本:Windows Runner `build:release` → 需求方以測試憑證執行 `sign-release.ps1` → `publish-release.ps1 -Environment test` 上架主機 2 → 測試區登錄草稿 → pilot 環 VM `RUSTIT-P34` 自動升級(Agent 44 秒、Watchdog 22 秒)→ 需求方在 GigaItApp 發佈並清空 pilot 目標。
 - 檔案:`docs/test-reports/2026-10-21-p6-4-first-release.md`(新)、`docs/HANDOFF.md`
