@@ -53,7 +53,7 @@ else
     echo "已唯讀掛載 $NAS_SHARE → $MNT"
   fi
   for d in releases software; do
-    [ -d "$MNT/$d" ] && echo "找到 $MNT/$d" || echo "警告:NAS 上沒有 RustIT\\$d\\,請建立(IT 寫入帳號)後再切換" >&2
+    if [ -d "$MNT/$d" ]; then echo "找到 $MNT/$d"; else printf '警告:NAS 上沒有 RustIT\\%s\\,請建立(IT 寫入帳號)後再切換\n' "$d" >&2; fi
   done
   # 確認真的唯讀(寫入應失敗)
   if ( : > "$MNT/.rw-probe" ) 2>/dev/null; then
