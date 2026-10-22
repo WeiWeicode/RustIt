@@ -145,6 +145,7 @@ RustIt/
    ├─ deploy/docker-compose.dev.yml 本機 Mongo 7 / Redis 7(只綁 127.0.0.1)
    ├─ deploy/docker-compose.yml     測試區:endpoint-server(Gateway 網路,volume ita_command_files、版本檔目錄唯讀掛載 /srv/releases、軟體庫唯讀掛載 /srv/software)+ ita-mongo / ita-redis(內部網路)
    ├─ deploy/host2-set-secrets.sh   主機 2 機密、臨時憑證、Gateway API Key、ita.env(需求方執行)
+   ├─ deploy/host2-set-nas-credentials.sh   主機 2 NAS RustIT\ 唯讀掛載帳密與 CIFS 掛載(P7-4,需求方執行)
    ├─ Dockerfile                    建置 context 為 RustIt 根目錄(含 docs/contracts;根目錄 .dockerignore 白名單)
    ├─ test/                         單元與契約測試(記憶體儲存);test/int/ 整合測試(真實三種儲存)
    └─ docs/DB_SCHEMA.md             資料結構與寫入順序

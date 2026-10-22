@@ -65,7 +65,7 @@
        | V-3 | 登錄 → `tested` → 第二人 `published` → 派送 → 移除;狀態、結束代碼、`software_installed` / `software_removed` 事件 |
        | V-4 | 雜湊不符(`HASH_MISMATCH`)、簽章者不在本機清單(`SIGNER_NOT_TRUSTED`)、安裝中斷線重連結果正確 |
        | V-5 | 補第 3 台測試電腦(目前開發機 + VM;需求方找 IT) |
-     - **P7-4 NAS 唯讀掛載 ⏸ 等 NAS 帳密**:4-1 NAS 帳密機密腳本(需求方執行,AI 不經手);4-2 `endpoint-server` CIFS 唯讀掛載 `RustIT\`(`releases\`、`software\` 共用)(Claude 改 compose,子任務上主機 2)。正式區部署前必須完成。
+     - **P7-4 NAS 唯讀掛載 ⏸ 等 NAS 帳密**:4-1 NAS 帳密機密腳本 `ItAgentBack/deploy/host2-set-nas-credentials.sh` 已寫好(需求方在主機 2 以 sudo 執行,AI 不經手;尚未執行);4-2 `endpoint-server` CIFS 唯讀掛載 `RustIT\`(`releases\`、`software\` 共用)(Claude 改 compose,子任務上主機 2)。正式區部署前必須完成。
      - **P7-5 GigaItApp「軟體派送」頁 ⬜(動手前先確認)**:5-1 軟體目錄 / 派送工作兩個 Tab(批次進度、核可);5-2 電腦詳情「派送軟體」「重新開機」按鈕;5-3 `gateway-rbac.yaml`(選單、按鈕、`endpoint.software.manage`,IT 發佈後才綁 `includes`)。Claude 寫程式;前置 1-8、1-9。
      - **P7-6 收尾 ⬜(Gateway / 根目錄 repo 修改前確認)**:全部子任務。Gateway `ENDPOINT-AGENT-GUIDE.md`(§8.3 指令類型、§5 套件下載)、`command-kinds.md` 校對、RUNBOOK「軟體派送失敗處理」與廠商簽章者憑證換新流程(B10)、根目錄 `workspace.json` / `PROJECT-MAP.md`、甘特圖 W6-20、測試報告。
      - **順序**:1-1~1-3(同時需求方看 1-5)→ 1-4、1-6 → 1-7 → 等部署期間開新分支寫 P7-2 → P7-1 上測試區後做 P7-5 → P7-2 / P7-3 完成後 VM 驗收 → P7-6;P7-4 帳密到位隨時插入。
