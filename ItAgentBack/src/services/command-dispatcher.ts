@@ -695,6 +695,23 @@ export class CommandDispatcher {
     return batchView(await this.scopedBatch(ctx, batchId));
   }
 
+  /**
+   * 批次清單,新到舊(P7-5 待核可清單);含範圍外裝置的批次略過(同 getBatch)。
+   * 篩 pending_approval 時只列 24 小時核可期限內的(逾期的等每分鐘掃描設為 expired);游標取自掃描到的最後一筆,過濾後本頁可能少於 limit
+   */
+  async listBatches(ctx: MgmtCtx, q: { state?: BatchState; cursor?: string; limit?: number }): Promise<{ items: BatchView[]; nextCursor: string | null }> {
+    const limit = Math.min(Math.max(q.limit ?? 50, 1), 100);
+    const companies = scopeCompanies(ctx.scope);
+    if (companies?.length === 0) return { items: [], nextCursor: null };
+    const beforeId = q.cursor && /^\d+$/.test(q.cursor) ? Number(q.cursor) : undefined;
+    const createdAfter = q.state === 'pending_approval' ? new Date(this.now().getTime() - APPROVAL_WINDOW_MS) : undefined;
+    const rows = await this.sqlDo(ctx, 'batch.list', () => this.store.listBatches({ state: q.state, createdAfter, beforeId, limit: limit + 1 }));
+    const page = rows.slice(0, limit);
+    const items: BatchView[] = [];
+    for (const b of page) if (await this.batchInScope(ctx, b.id)) items.push(batchView(b));
+    return { items, nextCursor: rows.length > limit ? String(page[page.length - 1]!.id) : null };
+  }
+
   // ---------- 推送 ----------
 
   /** 有上限的指令(批次、軟體派送)送出前的「計數 → 改為 sent」序列化鏈(單一實例;M3) */

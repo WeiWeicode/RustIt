@@ -21,6 +21,7 @@ import type {
   AlertRecord,
   AlertRule,
   BatchRecord,
+  BatchFilter,
   BatchState,
   CompanyChange,
   CompanySource,
@@ -728,6 +729,19 @@ export class MemoryCommandStore extends Failable implements CommandStore, Comman
     this.hit('getBatch');
     const b = this.batches.find((x) => x.batchId === batchId);
     return b ? this.batchRec(b) : null;
+  }
+  async listBatches(f: BatchFilter) {
+    this.hit('listBatches');
+    return this.batches
+      .filter(
+        (b) =>
+          (!f.state || b.state === f.state) &&
+          (!f.createdAfter || b.createdAt > f.createdAfter) &&
+          (f.beforeId === undefined || b.id < f.beforeId),
+      )
+      .sort((a, b) => b.id - a.id)
+      .slice(0, f.limit)
+      .map((b) => this.batchRec(b));
   }
   async batchCompanies(batchRef: number) {
     this.hit('batchCompanies');

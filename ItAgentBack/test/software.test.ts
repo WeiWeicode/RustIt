@@ -512,6 +512,40 @@ describe('軟體目錄、覆核與派送(SoftwareService + CommandDispatcher)', 
     );
   });
 
+  it('批次清單(P7-5):state=pending_approval 只列核可期限內的待核可批次;新到舊分頁;範圍外的批次不列出', async () => {
+    env = setupSoftware({ approvalThreshold: 1 });
+    pilot = await addDevice('PC-PILOT', 1);
+    other = await addDevice('PC-OTHER', 2);
+    env.store.ringOf.set(pilot.id, 'pilot');
+    env.dir.put(FILE, CONTENT);
+    const id = await published();
+    const targets = [pilot.deviceId, other.deviceId];
+    const old = await env.software.deploy(ctx, IT, id, { action: 'uninstall', deviceIds: targets });
+    env.clock.advance(APPROVAL_WINDOW_MS / 1000 + 60); // old 超過 24 小時核可期限(尚未被掃描設為 expired)
+    const a = await env.software.deploy(ctx, IT, id, { action: 'install', deviceIds: targets });
+    const b = await env.software.deploy(ctx, IT, id, { action: 'uninstall', deviceIds: targets });
+    const pending = await env.commands.listBatches(ctx, { state: 'pending_approval' });
+    assert.deepEqual(
+      pending.items.map((x) => x.batchId),
+      [b.batchId, a.batchId],
+      '新到舊,不含逾期的',
+    );
+    assert.deepEqual([pending.items[0]!.state, pending.items[0]!.counts, pending.nextCursor], ['pending_approval', { queued: 2 }, null]);
+    // 分頁
+    const p1 = await env.commands.listBatches(ctx, { state: 'pending_approval', limit: 1 });
+    assert.deepEqual([p1.items.map((x) => x.batchId), p1.nextCursor !== null], [[b.batchId], true]);
+    const p2 = await env.commands.listBatches(ctx, { state: 'pending_approval', limit: 1, cursor: p1.nextCursor! });
+    assert.deepEqual([p2.items.map((x) => x.batchId), p2.nextCursor], [[a.batchId], null]);
+    // 不篩狀態:含逾期的 old
+    assert.equal((await env.commands.listBatches(ctx, {})).items.length, 3);
+    assert.ok(old.batchId);
+    // 駁回後不再列在待核可
+    await env.commands.rejectBatch(ctx, IT, a.batchId, '目標有誤', 'software');
+    assert.deepEqual((await env.commands.listBatches(ctx, { state: 'pending_approval' })).items.map((x) => x.batchId), [b.batchId]);
+    // 這兩台沒有指定公司:只有全部公司的資料範圍看得到
+    assert.deepEqual((await env.commands.listBatches({ ...ctx, scope: only('甲公司') }, { state: 'pending_approval' })).items, []);
+  });
+
   it('全域並行上限(SOFTWARE_MAX_CONCURRENT):達上限留在 queued,有一筆結束再補送;批次全部結束 → done', async () => {
     env = setupSoftware({ maxConcurrent: 1 });
     pilot = await addDevice('PC-PILOT', 1);

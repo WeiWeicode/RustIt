@@ -12,6 +12,7 @@ import type {
   BatchState,
   CommandFileRecord,
   CommandFileStore,
+  BatchFilter,
   CommandFilter,
   CommandPatch,
   CommandRecord,
@@ -166,18 +167,13 @@ export class SqlCommandStore implements CommandStore, CommandFileStore {
     );
   }
 
-  private async batchWhere(where: string, bind: (r: sql.Request) => sql.Request): Promise<BatchRecord | null> {
-    const r = await bind(await this.request()).query(`
-      SELECT b.id, b.batch_id, b.kind, b.level, b.params, b.target_count, b.max_concurrent, b.state, b.requires_approval,
+  private static readonly BATCH_COLS = `b.id, b.batch_id, b.kind, b.level, b.params, b.target_count, b.max_concurrent, b.state, b.requires_approval,
         b.approved_by_emp, b.approved_by_name, b.approved_at, b.rejected_by_emp, b.rejected_by_name, b.rejected_at, b.reject_reason,
-        b.created_by_emp, b.created_by_name, b.created_at
-      FROM ita.command_batch b WHERE ${where};
-      SELECT c.state, COUNT(*) AS n FROM ita.command c JOIN ita.command_batch b ON b.id = c.batch_ref WHERE ${where} GROUP BY c.state;`);
-    const sets = r.recordsets as unknown as Row[][];
-    const row = sets[0]?.[0];
-    if (!row) return null;
+        b.created_by_emp, b.created_by_name, b.created_at`;
+
+  private toBatch(row: Row, countRows: Row[]): BatchRecord {
     const counts: BatchRecord['counts'] = {};
-    for (const s of sets[1] ?? []) counts[s.state as CommandState] = Number(s.n);
+    for (const s of countRows) counts[s.state as CommandState] = Number(s.n);
     return {
       id: Number(row.id),
       batchId: String(row.batch_id).toLowerCase(),
@@ -200,6 +196,48 @@ export class SqlCommandStore implements CommandStore, CommandFileStore {
       createdAt: row.created_at as Date,
       counts,
     };
+  }
+
+  private async batchWhere(where: string, bind: (r: sql.Request) => sql.Request): Promise<BatchRecord | null> {
+    const r = await bind(await this.request()).query(`
+      SELECT ${SqlCommandStore.BATCH_COLS}
+      FROM ita.command_batch b WHERE ${where};
+      SELECT c.state, COUNT(*) AS n FROM ita.command c JOIN ita.command_batch b ON b.id = c.batch_ref WHERE ${where} GROUP BY c.state;`);
+    const sets = r.recordsets as unknown as Row[][];
+    const row = sets[0]?.[0];
+    return row ? this.toBatch(row, sets[1] ?? []) : null;
+  }
+
+  async listBatches(f: BatchFilter): Promise<BatchRecord[]> {
+    const req = (await this.request()).input('limit', sql.Int, f.limit);
+    const where: string[] = [];
+    if (f.state) {
+      where.push('b.state = @state');
+      req.input('state', sql.VarChar(16), f.state);
+    }
+    if (f.createdAfter) {
+      where.push('b.created_at > @after');
+      req.input('after', sql.DateTime2(3), f.createdAfter);
+    }
+    if (f.beforeId !== undefined) {
+      where.push('b.id < @before');
+      req.input('before', sql.BigInt, f.beforeId);
+    }
+    const r = await req.query(
+      `SELECT TOP (@limit) ${SqlCommandStore.BATCH_COLS} FROM ita.command_batch b ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY b.id DESC`,
+    );
+    const rows = r.recordset as Row[];
+    if (!rows.length) return [];
+    // 這一頁批次的各狀態台數(id 皆為資料庫讀回的數字,可直接組入 IN)
+    const ids = rows.map((row) => Number(row.id)).join(',');
+    const c = await (await this.request()).query(`SELECT c.batch_ref, c.state, COUNT(*) AS n FROM ita.command c WHERE c.batch_ref IN (${ids}) GROUP BY c.batch_ref, c.state`);
+    const counts = c.recordset as Row[];
+    return rows.map((row) =>
+      this.toBatch(
+        row,
+        counts.filter((x) => Number(x.batch_ref) === Number(row.id)),
+      ),
+    );
   }
 
   findBatchByIdempotency(emp: string, key: string): Promise<BatchRecord | null> {

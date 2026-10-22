@@ -719,5 +719,26 @@ describe('SQL Server + Mongo + Redis', () => {
     const ex = (await cmds.getBatch(b3.batchId))!;
     assert.deepEqual([ex.state, ex.counts], ['expired', { canceled: 1 }]);
     assert.equal(await cmds.expirePendingBatches(new Date(Date.now() - 24 * 3_600_000), new Date()), 0);
+
+    // 批次清單(P7-5):新到舊、可依狀態與建立時間篩、游標分頁、含各狀態台數
+    const b4 = newBatch(new Date());
+    await cmds.createCommands(b4, [un(d.id, d.certDn), un(d2.id, d2.certDn)]);
+    const pend = await cmds.listBatches({ state: 'pending_approval', createdAfter: new Date(Date.now() - 24 * 3_600_000), limit: 10 });
+    assert.deepEqual(
+      pend.map((x) => [x.batchId, x.counts]),
+      [[b4.batchId, { queued: 2 }]],
+    );
+    const all = await cmds.listBatches({ limit: 10 });
+    assert.deepEqual(
+      all.map((x) => [x.batchId, x.state]),
+      [
+        [b4.batchId, 'pending_approval'],
+        [b3.batchId, 'expired'],
+        [g2.batchId, 'rejected'],
+        [g1.batchId, 'done'],
+      ],
+    );
+    assert.deepEqual(all[2]!.counts, { canceled: 1 });
+    assert.deepEqual((await cmds.listBatches({ beforeId: all[1]!.id, limit: 1 })).map((x) => x.batchId), [g2.batchId]);
   });
 });

@@ -208,6 +208,8 @@
 
 `CommandView.batchState`(`pending_approval` / `running` / `done` / `rejected` / `expired`,不屬於批次為 `null`)讓清單直接看出單台指令是否在等核可。
 
+`GET /api/endpoint/batches?state=&cursor=&limit=`(`endpoint.device.read`,P7-5)回 `{ items: [批次], nextCursor }`,新到舊;`state=pending_approval` 只列 24 小時核可期限內的待核可批次(給 GigaItApp 核可清單);含資料範圍外電腦的批次不列出(同 `GET /batches/{batchId}` 視同不存在);各台明細以 `GET /commands?batchId=` 查詢。
+
 `GET /api/endpoint/batches/{batchId}` 回 `state`(`pending_approval` / `running` / `done` / `rejected` / `expired`)、`requiresApproval`、`approvalExpiresAt`、`approvedBy` / `approvedAt`、`rejectedBy` / `rejectedAt` / `rejectReason`。
 
 ## 指令附檔(P4-2)
