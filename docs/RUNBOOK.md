@@ -1,6 +1,6 @@
 # RustIt 端點平台維運手冊(RUNBOOK)
 
-> PLATFORM-PLAN §8 B10。目前有發版(§1,P6-4)與版本回滾(§2,P6-6);大量離線、憑證過期、手動解除安裝、NAS 無法掛載等章節上線前補。
+> PLATFORM-PLAN §8 B10。目前有發版(§1,P6-4)、版本回滾(§2,P6-6)、軟體派送失敗處理(§3,P7-6)與廠商簽章者憑證換新(§4,P7-6);大量離線、憑證過期、手動解除安裝、NAS 無法掛載等章節上線前補。
 
 ## 1. 發版:建置 → 簽章 → 上架 → 登錄 → 逐環推進
 
@@ -24,7 +24,7 @@
 **簽章的注意事項**
 - 簽章在簽章人員的電腦執行,**CI 與 Runner 沒有私鑰**;不要把憑證或私鑰放進 CI 變數、repo 或 Runner。
 - 一旦簽過的版本檔就不要重建同版本號:要修東西就升版本號(版本檔目錄不允許覆蓋既有版本)。
-- 簽章者換憑證時,新版本登錄時把新舊指紋並列在「預期簽章者」,並確認端點本機信任清單(`agent.toml [upgrade] trusted_signers`,由 MSI 或 GPO 寫入)也有新指紋,否則端點會以 `SIGNER_NOT_TRUSTED` 拒絕。
+- 簽章者換憑證時,新版本登錄時把新舊指紋並列在「預期簽章者」,並確認端點本機信任清單(`agent.toml [upgrade] trusted_signers`,由 MSI 或 GPO 寫入)也有新指紋,否則端點會以 `SIGNER_NOT_TRUSTED` 拒絕。軟體派送的套件另用 `[software] trusted_signers`(§4)。
 
 ## 2. 版本回滾
 
@@ -47,3 +47,58 @@
 **`ROLLBACK_FAILED`(還原也失敗)**:critical 告警,主機不再對該台下發;看守恢復照常拉起服務。先用 `agent.diagnose` / `logs.collect` 查原因(需要 Agent 還能連線),不行就到現場以系統管理員解除安裝後重新安裝監控 MSI(Windows Installer 依檔案版本決定是否覆蓋,較新的 exe 不一定會被修復蓋回,所以用解除安裝 + 安裝;之後再由發佈環升到目標版本)。此流程尚未在 VM 演練。
 
 **Watchdog 回滾**:流程相同(元件選 `watchdog`)。Watchdog 由 Agent 替換,Agent 必須在執行中;Agent 本身異常時先處理 Agent。
+
+## 3. 軟體派送失敗處理(P7-6)
+
+適用:`software.install` / `software.uninstall` / `system.reboot` 失敗。角色:**IT 管理員**(GigaItApp 端點管理的軟體派送(P7-5 進行中)與電腦詳情「指令」,或直接呼叫 `/api/endpoint/*`)。錯誤代碼定義見 [`contracts/command-kinds.md`](contracts/command-kinds.md);指令 `result.log_tail` 是安裝記錄最後 20 行,完整記錄在該機 `C:\ProgramData\GigaNexus\Agent\logs\software\*.log`(`-Encoding UTF8`,系統管理員)。
+
+**原則**:先看錯誤代碼、再看 `result` 與日誌;**驗證類失敗(雜湊、簽章)不要用「重派」硬過**,先查原因;同一套件在多台同時失敗,先**停止派送**(套件「撤回」會取消尚未送出的安裝,`PACKAGE_REVOKED`),再查。
+
+| 錯誤代碼 | 意義 | 處置 |
+| --- | --- | --- |
+| `DOWNLOAD_FAILED` | 下載失敗(連線、主機拒絕、軟體庫讀不到 `503 ITA_PACKAGE_UNAVAILABLE`) | 單台:確認在線與 `:9443` 連通後重派。多台:查主機的軟體庫(`SOFTWARE_DIR`,測試區 `/srv/giganexus/ita-software/`)與磁碟、NAS 掛載;主機拒絕(4xx)Agent 不重試,指令不再屬於該裝置時 `404 ITA_PACKAGE_NOT_FOUND` |
+| `HASH_MISMATCH` | 下載的檔案 SHA-256 與快照不符,**未啟動安裝程式** | 重派一次排除傳輸錯誤;仍失敗代表軟體庫檔案被換掉或損毀:主機會以 `PACKAGE_FILE_CHANGED` 取消排隊中的安裝並開 `software_file_tampered`(critical),**先通報資安**,不要重登錄同一個檔案;確認來源後以新版本號重新登錄 |
+| `SIGNATURE_INVALID` | Authenticode 無效或未簽章 | 確認安裝檔簽章(`Get-AuthenticodeSignature`);廠商未簽章的檔案由 IT 以公司憑證加簽後以新版本登錄(P7-SOFTWARE-DESIGN §9-2);時間戳記 / 根憑證未信任時檢查該機根憑證 |
+| `SIGNER_NOT_TRUSTED` | 實際簽章者不在「主機 `signer_thumbprints` ∩ 本機 `[software] trusted_signers`」 | 比對 `result.signer` 與兩份清單;廠商換憑證見 §4;本機清單空白 = 不接受任何套件。`draft` 套件主機清單為空,但仍需在本機清單內 |
+| `DISK_FULL` | 磁碟不足(需求 = 安裝檔 × 2 + 1 GB) | 請使用者清理,或先對該機派 `logs.collect` 看磁碟;不要放寬門檻 |
+| `INSTALL_FAILED` | 安裝 / 移除程式結束代碼不是成功碼(`result.exit_code`) | 查 `log_tail` 與廠商的結束代碼表;3010 / 1641 屬成功(`reboot_required`),1638 屬已安裝。參數錯誤時修正安裝參數:套件會退回 `draft` 並重新覆核,舊快照的排隊指令被取消(`PACKAGE_CHANGED`) |
+| `INSTALL_TIMEOUT` | 超過 `timeout_sec`,已結束行程樹 | 軟體安裝時間長就調高 `timeout_sec`(同樣會退回 `draft`);MSI 逾時後 msiserver 可能仍在作業,下一筆可能遇到 `INSTALL_BUSY`,稍後重派。不靜默的安裝程式會卡在視窗 → 回到 `draft` 測試機找出靜默參數 |
+| `INSTALL_BUSY` | 結束代碼 1618(另一個安裝進行中),60 秒間隔重試 3 次仍失敗 | 等該機其他安裝 / Windows Update 完成後重派 |
+| `DETECT_FAILED` | 結束代碼成功但登錄檔找不到(安裝)或 120 秒內仍存在(移除) | 檢查套件的「偵測規則」(MSI 產品代碼或 DisplayName 樣式)是否寫對;規則錯誤 → 修正後重新覆核;該機實際狀況以登錄檔為準 |
+| `UNINSTALL_NOT_SUPPORTED` | 沒有可用的移除指令,或項目在不可移除清單(GigaNexus / RustIt、防毒 / EDR),或移除程式位置不安全 | 不可移除清單是設計行為,不要繞過;其餘請到現場處理 |
+| `DEFERRED_TIMEOUT` | 電池 / 計量網路延後下載超過 4 小時 | 等插電後重派;確認要略過電池時派送帶 `ignorePower`(計量網路不可略過) |
+| `REBOOT_PENDING` | 重新開機倒數中,安裝 / 移除 / 升級 / 重啟 Agent 被拒 | 重開機完成後重派;不要等了可對該機派 `system.reboot.cancel` 再重派 |
+| `REBOOT_LIMITED` | `system.reboot` 超過本機上限(開機未滿 30 分鐘、24 小時內已 3 次、有人登入倒數 < 60 秒) | 設計行為(防止反覆重開機),`force` 也不能繞過;隔天或延長 `delay_sec` |
+| `EXPIRED` / `TIMEOUT` | 離線太久超過有效期限(安裝 24 小時、重開機 4 小時)/ 執行逾時 | 電腦上線後重派 |
+| `AGENT_UPGRADING` | Watchdog 升級 Agent 時收到 | 升級完成後重派;升級與派送避開同時段(升級會中斷進行中的安裝) |
+| `UNSUPPORTED_COMMAND` | Agent 版本低於 0.9.0 | 先升級 Agent(發佈環,§1) |
+| `INVALID_PARAMS` | Agent 驗證安裝參數不符(版本差異) | 修正安裝參數,重新覆核後重派 |
+
+**取消待核可 / 排隊中的派送**:待核可批次由建立人「撤回」或第二人「駁回」(`BATCH_REJECTED`);24 小時無人核可自動 `expired`(`APPROVAL_EXPIRED`)。已核可但 Agent 離線的指令,有效期限 24 小時(自核可起算)。
+
+**重開機未完成**:`reboot_required` 的電腦超過 7 天沒重開機會開告警 `reboot_pending`。到畫面對該機派 `system.reboot`(預設 5 分鐘倒數;`force` 需二次確認);人在座位旁不想被重開機,派 `system.reboot.cancel`。重開機本身沒有 `result` 之後的回報:Agent 重開機後補送 `succeeded`(`rebooted: true`)。
+
+**批次大量失敗**:(1)撤回套件止血;(2)對失敗清單依錯誤代碼分類(指令清單篩選 `kind`、`batchId`);(3)只有「下載 / 忙碌 / 逾時 / 過期」這類暫時性失敗才整批重派;(4)驗證類(`HASH_MISMATCH`、`SIGNATURE_INVALID`、`SIGNER_NOT_TRUSTED`)與 `INSTALL_FAILED` 先找出原因;(5)修好後走新的版本登錄 → `draft` 測試機 → `tested` → 第二人發佈。
+
+**告警**:`software_install_failed`(warn,同一台再派同一套件成功自動關)、`reboot_pending`(warn)、`software_file_tampered`(critical,不自動關閉,確認後由 IT 手動關閉)。每台每條規則只留一筆開啟中的告警,同一台多個套件失敗時 detail 只留最近一次。
+
+## 4. 廠商簽章者憑證換新流程(B10)
+
+適用:廠商(Notepad++、7-Zip 加簽用的公司憑證等)的程式碼簽章憑證續約或更換,新版安裝檔的簽章者指紋(葉憑證 SHA-1)改變。端點以**葉憑證指紋**比對,換憑證後若本機清單沒有新指紋,新版會以 `SIGNER_NOT_TRUSTED` 被拒;若提早拿掉舊指紋,舊版重派也會被拒。角色:**IT 管理員**(登錄套件)、**GPO 管理者 / 簽章人員**(本機清單)。
+
+信任模型:實際簽章者必須**同時**在 (1) 主機套件的 `signer_thumbprints`(登錄時填)與 (2) 端點 `agent.toml` 的 `[software] trusted_signers`(與升級用的 `[upgrade] trusted_signers` 分開)。兩邊都要換,**順序是先本機、再主機**,因為主機清單可以隨時改,本機清單散佈到全公司需要時間。
+
+| 步驟 | 誰 | 做什麼 |
+| --- | --- | --- |
+| 1. 取得新指紋 | IT 管理員 | 向廠商或從新版安裝檔取得簽章者指紋(`Get-AuthenticodeSignature <檔> \| Select -Expand SignerCertificate \| Select Thumbprint`);用官方管道核對,不要只相信下載頁面。公司加簽的檔案則是新的公司程式碼簽章憑證(§1) |
+| 2. 本機清單加入新指紋(舊的**保留**) | GPO 管理者 | 以 MSI(`build-agent-msi.ps1 -SoftwareSigners "<舊>,<新>"`)或 GPO 把 `[software] trusted_signers` 更新為「舊 + 新」。**含 `[software]` 區段的 `agent.toml` 不可給 0.9.0 以前的 Agent 讀**(設定結構會讓舊版啟動失敗),先確認發佈環已將 Agent 全數升到 0.9.0 以上 |
+| 3. 確認散佈完成 | IT 管理員 | 抽查各環電腦的 `agent.toml`(或 `agent.diagnose`、事件);GPO 套用有延遲,至少等一個 GPO 更新週期,並確認 pilot 測試機已有新指紋 |
+| 4. 主機清單新舊並列 | IT 管理員 | 新版套件登錄時,`signer_thumbprints` 填「新 + 舊」(新舊並列);舊版套件維持原清單 |
+| 5. draft 測試 | IT 管理員 | 新版套件(`draft`)派到 pilot 測試機(VM);`result.signer` 應為新指紋 → `mark-tested`(填實際簽章者)→ 第二人發佈(§3 後半) |
+| 6. 汰除舊指紋 | IT 管理員 / GPO 管理者 | 確認不再需要舊簽章的版本(舊版套件已撤回或改用新版)後,先從主機清單、再從本機 `[software] trusted_signers` 移除舊指紋;一般至少保留一個季度 |
+
+**注意**
+- 本機清單**空白 = 不接受任何套件**,也不是「接受全部」;移除指紋前確認沒有仍要派送的舊版套件。
+- 不要把測試憑證指紋留在正式區本機清單:正式區上線時只列正式指紋(P6 檢查清單)。
+- 緊急撤銷(憑證外洩):先把該指紋從本機 `[software] trusted_signers` 移除(GPO / MSI,散佈後端點即拒絕),同時在主機撤回相關套件並移除主機清單的該指紋,阻止新的派送。
+- 此流程尚未在正式區演練;測試區以 7-Zip 測試簽章與 Notepad++ 簽章者驗證(待 VM 驗收,見 [`test-reports/`](test-reports/) 的 P7 VM 驗收報告 <!-- TODO(P7-6):報告完成後補上檔名與結果 -->)。
