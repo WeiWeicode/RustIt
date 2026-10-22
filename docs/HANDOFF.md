@@ -19,20 +19,19 @@
 
 ## 2. 下一步
 
-0. **目前階段:P7 軟體派送(P6 已於 2026-10-21 完成)**:[P7-SOFTWARE-DESIGN.md](P7-SOFTWARE-DESIGN.md) §9 全部已確認。**明天新討論串從這裡接手。**
-   - **現況(2026-10-21 收工)**:
-     - 分支 `feature/p7-1-software-catalog`(worktree `D:\檔案分享\程式碼\GigaNexusAI\RustIt-p7-1`)已推 gitlab / origin,**MR 尚未開**;程式最新 commit `07d5307`(`git log` 為準)。單元測試 211/211;整合測試 13/13(`c5c3d17` 時;之後 `07d5307` 只動路由與服務層,未重跑 `test:int`)。報告 `test-reports/2026-10-21-p7-1-backend.md`。
-     - 需求方已決定並實作:D1~D6 全部照建議(設計 §8.1.1);**`system.reboot` 等非軟體批次的核可改走 `POST /v1/batches/{id}/approve-command`、`/reject-command`(`endpoint.command.admin`)**,軟體批次仍走 `/approve`、`/reject`(`endpoint.software.manage`),不符 `403 ITA_APPROVAL_ROUTE_MISMATCH`(`07d5307`)。
-     - 資安稽核已修:C1、H1、H2、H3、M1(部分)、M2~M6、L1~L3、L6~L9;code-reviewer 建議 1、3、4、5、9 與 D2-1 競態測試已處理(`d2e84d8`)。migration 0008 **只套用過 `_poc_test`**,尚未給需求方看、未套用 `giganexus_It_Agent_test`。Agent 版本 **0.9.0**。
+0. **目前階段:P7 軟體派送(P6 已於 2026-10-21 完成)**:[P7-SOFTWARE-DESIGN.md](P7-SOFTWARE-DESIGN.md) §9 全部已確認。**新討論串從這裡接手。**
+   - **現況(2026-10-22 收工)**:
+     - **P7-1 已合併(MR !50)並上測試區**:migration 0008 已套用 `giganexus_It_Agent_test`、Gateway OpenAPI v56 已發佈(含 `approve-command`、`reject-command`)、主機 2 `ita-software` 已唯讀掛載(`SOFTWARE_DIR=/srv/software`)。P7-1 資安稽核剩餘項目見下方「P7-1 待辦」。
+     - **P7-2 Agent `software` 模組程式完成**(Agent 0.9.0):分支 `feature/p7-2-agent-software`(worktree `D:\檔案分享\程式碼\GigaNexusAI\RustIt-p7-2`)已推 gitlab / origin,最新 commit `f3af32d`(`git log` 為準),**MR 尚未開**。`software.install` / `software.uninstall`、A6 電池 / 計量網路延後;已通過 code-reviewer 與 security-auditor 並修正;`cargo test -p rustit-agent` 116/116。**VM 驗收尚未做**。與設計的差異、需求方決定(C2、H1、H2、M3)、稽核已修與未修(L2、L3)、code-reviewer 未處理建議、Watchdog 升級中斷安裝的風險,全部記在設計 §8.1.2;Agent 修改紀錄 `DevelopmentProcess/AgentCorrection.md`。
+     - 需求方 2026-10-22 決定:**C2** draft 套件也必須在本機 `trusted_signers` 內(VM 測 draft 套件前,要先把簽章者指紋加進 `trusted_signers`);**H1** 移除程式 ACL 檢查;**H2** 內建不可移除清單(監控本身、防毒 / EDR);**M3** 另設 `[software] trusted_signers`,與 P7-3 MSI 0.9.0 一起做,**尚未實作**。
    - **下一步(依序)**:
-     1. **開 MR → develop**(Sonnet 子任務做,只開不合併)。描述註明:依賴 MR !39 先合併;**部署前必須先套用 migration 0008**(新版所有指令查詢讀 `command_batch.state`;0008 含 `editors`、`revoked_from`、`ix_command_creator`);0008 只套過 `_poc_test`;測試區 compose 已加 `SOFTWARE_DIR=/srv/software`。
-     2. **需求方看 migration 0008**,同意後套用 `giganexus_It_Agent_test`。
-     3. **需求方合併 MR、部署測試區**;Gateway OpenAPI 草稿批次發佈(**新增 `approve-command`、`reject-command` 兩個 operation**);主機 2 建 `/srv/giganexus/ita-software/`。
-     4. **主工作階段(Opus)開始 P7-2 Agent `software` 模組**(Agent 0.9.0;新分支從 develop 開,可在 MR 審核期間先做)。Agent 必須通過 `docs/contracts/install-args.vectors.json` 全部向量;注意 `UninstallString` 只讀 HKLM、不經 `cmd /c`、不展開 `%`。
+     1. **P7-3 `system.reboot`**(Agent 0.9.0,主工作階段 Opus 在 `RustIt-p7-2` worktree 繼續)**與 M3**(`[software] trusted_signers`)一起做。
+     2. **開 P7-2 MR → develop**(只開不合併):等 P7-3 一起開,或先開 P7-2,由需求方決定。
+     3. **VM 驗收前置**:VM `RUSTIT-P34` 的 `trusted_signers` 要加 7-Zip 測試簽章(P6 測試憑證)與 Notepad++ 簽章者指紋(需求方在 VM 操作);套件放入主機 2 `ita-software/`;MSI 0.9.0 走正式發版流程(P7-3 3-3)。驗收步驟見設計 §8.3。
    - **P7-1 待辦(未修)**:M1 主動定期重算軟體庫雜湊(目前只在下載時複驗)、L4 下載 TOCTOU、L5 單台下載併發上限、L10 補送鏈累積、L11 冪等鍵比對目標電腦;code-reviewer 第 7 點「直接取消的指令其所屬批次是否會收尾」;第 10 點新 SQL 的整合測試覆蓋(`recentGatedTargets`、`cancelQueuedInstalls`、`revoked_from`、`reboot_since`);`software_install_failed` 每台只有一筆開啟中的告警(多套件失敗只留最近一次)的取捨已記在設計 §8.1.1。L12 接受、L13 不屬 P7。
    - **分工提醒**:程式與規劃由 Opus 主工作階段;測試執行、文件、需要需求方操作的步驟開 Sonnet 子任務。
    - **P7 工作項目(2026-10-21)**。分工:**Claude 主工作階段只寫程式與規劃**;測試、寫文件、需要需求方操作的步驟一律開 **Sonnet 子任務**(另開工作階段);下表「子任務」即指 Sonnet 子任務。
-     - **P7-1 軟體目錄與下載(後端)🟡 程式完成,待收尾**
+     - **P7-1 軟體目錄與下載(後端)✅ 已合併(MR !50)並上測試區(2026-10-22)**
        | # | 工作 | 負責 | 前置 |
        | --- | --- | --- | --- |
        | 1-1 | 重跑 security-auditor(diff `d345dda..HEAD`),取得完整報告 | Claude | — ✅ 2026-10-21 |
@@ -40,17 +39,17 @@
        | 1-3 | 告警規則 `software_install_failed`、`reboot_pending`、`software_file_tampered` | Claude | — ✅ 2026-10-21 |
        | 1-4 | `typecheck`、`test`、`test:int`(需本機 Docker Desktop) | 子任務 | 1-2、1-3 ✅ 2026-10-21:typecheck 通過、`test` 210/210、`test:int` 13/13(第一次 12/13:`boot_time` 欄位錯誤,已於 `c5c3d17` 修正;報告見 test-reports) |
        | 1-5 | 確認實作與設計的 7 個差異(設計 §8.1.1) | 需求方 | — ✅ 2026-10-21(D1) |
-       | 1-6 | 開 MR → develop(只開不合併) | 子任務 | 1-4 |
-       | 1-7 | 需求方看過 migration 0008 並同意後,套用 `giganexus_It_Agent_test` | 需求方看;子任務套用 | 1-6 |
-       | 1-8 | 合併 MR、部署測試區(**必須先套 0008**) | 需求方 | 1-7 |
-       | 1-9 | Gateway OpenAPI 草稿批次發佈(含 `approve-command`、`reject-command`) | 子任務(寫入測試區先取得同意) | 1-8 |
-       | 1-10 | 主機 2 建 `/srv/giganexus/ita-software/` | 子任務(`ssh host2`) | 1-8 |
-     - **P7-2 Agent `software` 模組(Agent 0.9.0)⬜**
+       | 1-6 | 開 MR → develop(只開不合併) | 子任務 | 1-4 ✅ 2026-10-22 |
+       | 1-7 | 需求方看過 migration 0008 並同意後,套用 `giganexus_It_Agent_test` | 需求方看;子任務套用 | 1-6 ✅ 2026-10-22 |
+       | 1-8 | 合併 MR、部署測試區(**必須先套 0008**) | 需求方 | 1-7 ✅ 2026-10-22 |
+       | 1-9 | Gateway OpenAPI 草稿批次發佈(含 `approve-command`、`reject-command`) | 子任務(寫入測試區先取得同意) | 1-8 ✅ 2026-10-22 |
+       | 1-10 | 主機 2 建 `/srv/giganexus/ita-software/` | 子任務(`ssh host2`) | 1-8 ✅ 2026-10-22 |
+     - **P7-2 Agent `software` 模組(Agent 0.9.0)🟡 程式完成(`f3af32d`),VM 驗收待做**
        | # | 工作 | 負責 | 前置 |
        | --- | --- | --- | --- |
-       | 2-1 | 從 `demo/src/deploy.rs` 移植到 `agent/src/software/`:下載(續傳、本機快取)→ 驗 SHA-256 與簽章者 → SYSTEM 靜默安裝 / 移除(逾時、1618 重試)→ 登錄檔確認 → 立即重新蒐集 | Claude | 1-2 修完即可開工,不必等部署 |
-       | 2-2 | A6:電池 / 計量網路延後下載 | Claude | 2-1 |
-       | 2-3 | 單元 / 契約測試(Claude 寫)、執行測試、code-reviewer、security-auditor | Claude 寫測試;子任務執行 | 2-1 |
+       | 2-1 | 從 `demo/src/deploy.rs` 移植到 `agent/src/software/`:下載(續傳、本機快取)→ 驗 SHA-256 與簽章者 → SYSTEM 靜默安裝 / 移除(逾時、1618 重試)→ 登錄檔確認 → 立即重新蒐集 | Claude | 1-2 修完即可開工,不必等部署 ✅ |
+       | 2-2 | A6:電池 / 計量網路延後下載 | Claude | 2-1 ✅ |
+       | 2-3 | 單元 / 契約測試(Claude 寫)、執行測試、code-reviewer、security-auditor | Claude 寫測試;子任務執行 | 2-1 單元測試完成(116/116)、code-reviewer 與 security-auditor 已修;VM 驗收待做 |
      - **P7-3 `system.reboot` 與批次核可 ⬜**
        | # | 工作 | 負責 | 前置 |
        | --- | --- | --- | --- |
