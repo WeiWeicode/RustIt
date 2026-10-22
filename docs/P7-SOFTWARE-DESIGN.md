@@ -403,6 +403,7 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
 - **未處理**:
   - `SeShutdownPrivilege` 啟用後沒有還原(只影響 Agent 行程,影響小)。
   - 以 `reboot_policy` 觸發的重開機尚無自動排程:需求方決定只標記 `reboot_required`,由 IT 在畫面按「重新開機」。
+- **測試與建置(主工作階段於 `1b383f7` 執行)**:`cargo test -p rustit-agent -p rustit-common`:Agent 124/124(`1b383f7` 時);`rustit-common` 單獨執行會因 `log::set_boxed_logger` 編譯失敗(既有問題),與 Agent 一起編譯時設定測試 `software_signers_are_separate`、`trusted_signers_are_validated` 通過;`cargo build -p rustit-watchdog` 通過。ItAgentBack:`npm run typecheck` 通過,`npm test` 211/211(`1b383f7` 時,主工作階段執行)。測試區 MSI `GigaNexusAgent-0.9.0-test.msi`,SHA-256 `589309dfaa6a846e0dd996ec0918e069cd199221119d52b81571ce6cf4e060ec`(Agent 0.9.0、Watchdog 0.3.2);`[upgrade] trusted_signers` = 第一張測試憑證 `bb8ced00c84798f6e098581e50f41b2ee4247cd3`,`[software] trusted_signers` = 第二張測試憑證 `2953e8c04eabefd6c6fb35491de6671dd808b46b`。VM 驗收尚未做。
 - **部署注意**:含 `[software]` 區段的 `agent.toml` 不可給 0.9.0 以前的 Agent 讀(設定結構 `deny_unknown_fields`,舊版會啟動失敗),Agent 版本與設定要一起換。
 - **待辦**:ItAgentBack 新類型(`system.reboot.cancel`)要在 P7-2 MR 合併、部署後才能在 GigaItApp 使用;GigaItApp P7-5 要加「取消重新開機」按鈕。
 
