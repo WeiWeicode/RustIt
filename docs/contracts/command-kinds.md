@@ -151,7 +151,7 @@
 | `sha256`、`size_bytes` | string(64 碼小寫)、integer | 驗整個檔案;不符 `HASH_MISMATCH`,不啟動安裝程式 |
 | `installer_type` | `msi` / `inno` / `nsis` / `burn` / `exe` | 決定 Agent 寫死的命令列(P7-SOFTWARE-DESIGN §5.3) |
 | `install_args` | string ≤ 500 | 額外參數(可為空字串);字元白名單 `[A-Za-z0-9 /\-_=.:,"{}%()+]`(路徑用 `/`),**再依 `installer_type` 逐一檢查每個參數**(D3):MSI 只接受 `屬性=值`、禁用讀外部檔案或改變安裝方式的屬性與開關(`TRANSFORMS`、`PATCH`、`REBOOT`、`/LOG`、`/LOADINF`、`/SILENT` 等)、路徑只限 `C:/Program Files/` 與 `C:/Program Files (x86)/` 底下、不可含 UNC / `..`。規則細節以測試向量 [`install-args.vectors.json`](install-args.vectors.json) 為準(ItAgentBack 與 Agent P7-2 吃同一份);Agent 執行前再驗,不符 `INVALID_PARAMS`。**不經 cmd.exe / PowerShell** |
-| `signer_thumbprints` | string[](40 碼小寫 SHA-1) | 預期簽章者;**`draft` 套件(只會派到 pilot 測試機)為空陣列**:Agent 仍須簽章有效(`Valid`)並回報實際簽章者,且**簽章者仍須在本機 `trusted_signers` 內**(本機清單空白不接受任何套件),不採信空清單放行;非空時實際簽章者須同時在此清單與本機 `trusted_signers` |
+| `signer_thumbprints` | string[](40 碼小寫 SHA-1) | 預期簽章者;**`draft` 套件(只會派到 pilot 測試機)為空陣列**:Agent 仍須簽章有效(`Valid`)並回報實際簽章者,且**簽章者仍須在本機 `[software] trusted_signers` 內**(本機清單空白不接受任何套件),不採信空清單放行;非空時實際簽章者須同時在此清單與本機 `[software] trusted_signers`(與升級用的 `[upgrade]` 分開) |
 | `detect` | `{ type: "msi_product_code" \| "display_name", value }` | 「已安裝」判斷;`display_name` 為登錄檔 DisplayName 的 `LIKE` 樣式(`%` 萬用字元) |
 | `timeout_sec` | integer | 安裝本身的逾時,預設 1800 |
 | `reboot_policy` | `never` / `required` | |

@@ -23,11 +23,11 @@
    - **現況(2026-10-22 收工)**:
      - **P7-1 已合併(MR !50)並上測試區**:migration 0008 已套用 `giganexus_It_Agent_test`、Gateway OpenAPI v56 已發佈(含 `approve-command`、`reject-command`)、主機 2 `ita-software` 已唯讀掛載(`SOFTWARE_DIR=/srv/software`)。P7-1 資安稽核剩餘項目見下方「P7-1 待辦」。
      - **P7-2 Agent `software` 模組程式完成**(Agent 0.9.0):分支 `feature/p7-2-agent-software`(worktree `D:\檔案分享\程式碼\GigaNexusAI\RustIt-p7-2`)已推 gitlab / origin,最新 commit `f3af32d`(`git log` 為準),**MR 尚未開**。`software.install` / `software.uninstall`、A6 電池 / 計量網路延後;已通過 code-reviewer 與 security-auditor 並修正;`cargo test -p rustit-agent` 116/116。**VM 驗收尚未做**。與設計的差異、需求方決定(C2、H1、H2、M3)、稽核已修與未修(L2、L3)、code-reviewer 未處理建議、Watchdog 升級中斷安裝的風險,全部記在設計 §8.1.2;Agent 修改紀錄 `DevelopmentProcess/AgentCorrection.md`。
-     - 需求方 2026-10-22 決定:**C2** draft 套件也必須在本機 `trusted_signers` 內(VM 測 draft 套件前,要先把簽章者指紋加進 `trusted_signers`);**H1** 移除程式 ACL 檢查;**H2** 內建不可移除清單(監控本身、防毒 / EDR);**M3** 另設 `[software] trusted_signers`,與 P7-3 MSI 0.9.0 一起做,**尚未實作**。
+     - 需求方 2026-10-22 決定:**C2** draft 套件也必須在本機 `trusted_signers` 內(VM 測 draft 套件前,要先把簽章者指紋加進 `[software] trusted_signers`);**H1** 移除程式 ACL 檢查;**H2** 內建不可移除清單(監控本身、防毒 / EDR);**M3** 另設 `[software] trusted_signers`,**已完成**(`b9242d6`:沒有設定 = 不接受任何派送的套件;升級與替換 Watchdog 仍用 `[upgrade]`;`build-agent-msi.ps1 -SoftwareSigners`)。
    - **下一步(依序)**:
-     1. **P7-3 `system.reboot`**(Agent 0.9.0,主工作階段 Opus 在 `RustIt-p7-2` worktree 繼續)**與 M3**(`[software] trusted_signers`)一起做。
+     1. **P7-3 `system.reboot`**(Agent 0.9.0,主工作階段 Opus 在 `RustIt-p7-2` worktree 繼續)(M3 已完成,`b9242d6`)。
      2. **開 P7-2 MR → develop**(只開不合併):等 P7-3 一起開,或先開 P7-2,由需求方決定。
-     3. **VM 驗收前置**:VM `RUSTIT-P34` 的 `trusted_signers` 要加 7-Zip 測試簽章(P6 測試憑證)與 Notepad++ 簽章者指紋(需求方在 VM 操作);套件放入主機 2 `ita-software/`;MSI 0.9.0 走正式發版流程(P7-3 3-3)。驗收步驟見設計 §8.3。
+     3. **VM 驗收前置**:7-Zip 測試簽章者與 Notepad++ 簽章者要放進 VM `RUSTIT-P34` `agent.toml` 的 `[software] trusted_signers`(不是 `[upgrade]`;需求方在 VM 操作,或建 MSI 時用 `-SoftwareSigners`);套件放入主機 2 `ita-software/`;MSI 0.9.0 走正式發版流程(P7-3 3-3)。驗收步驟見設計 §8.3。
    - **P7-1 待辦(未修)**:M1 主動定期重算軟體庫雜湊(目前只在下載時複驗)、L4 下載 TOCTOU、L5 單台下載併發上限、L10 補送鏈累積、L11 冪等鍵比對目標電腦;code-reviewer 第 7 點「直接取消的指令其所屬批次是否會收尾」;第 10 點新 SQL 的整合測試覆蓋(`recentGatedTargets`、`cancelQueuedInstalls`、`revoked_from`、`reboot_since`);`software_install_failed` 每台只有一筆開啟中的告警(多套件失敗只留最近一次)的取捨已記在設計 §8.1.1。L12 接受、L13 不屬 P7。
    - **分工提醒**:程式與規劃由 Opus 主工作階段;測試執行、文件、需要需求方操作的步驟開 Sonnet 子任務。
    - **P7 工作項目(2026-10-21)**。分工:**Claude 主工作階段只寫程式與規劃**;測試、寫文件、需要需求方操作的步驟一律開 **Sonnet 子任務**(另開工作階段);下表「子任務」即指 Sonnet 子任務。
@@ -60,7 +60,7 @@
        | # | 工作 |
        | --- | --- |
        | V-1 | 套件準備:7-Zip MSI 以測試憑證加簽(需求方)、Notepad++,放入 `ita-software/` |
-       | V-2 | VM `RUSTIT-P34` 升到 Agent 0.9.0;`trusted_signers` 加 Notepad++ 簽章者指紋(需求方在 VM) |
+       | V-2 | VM `RUSTIT-P34` 升到 Agent 0.9.0;`[software] trusted_signers` 加 7-Zip 測試簽章者與 Notepad++ 簽章者指紋(需求方在 VM) |
        | V-3 | 登錄 → `tested` → 第二人 `published` → 派送 → 移除;狀態、結束代碼、`software_installed` / `software_removed` 事件 |
        | V-4 | 雜湊不符(`HASH_MISMATCH`)、簽章者不在本機清單(`SIGNER_NOT_TRUSTED`)、安裝中斷線重連結果正確 |
        | V-5 | 補第 3 台測試電腦(目前開發機 + VM;需求方找 IT) |

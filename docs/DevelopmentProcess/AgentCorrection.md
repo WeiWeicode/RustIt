@@ -16,7 +16,8 @@
 - 審查與稽核修正(code-reviewer、security-auditor,細節與編號見設計 §8.1.2):
   - code-reviewer:`command_id` 必須是 UUID(組 staging / 記錄路徑並 `remove_dir_all`;C1);`split_command` 改 ASCII 小寫(Unicode 小寫改變長度會 panic);安裝子行程等待改用剩餘逾時;staging 複製與登錄檔查詢移到阻塞執行緒;改名前中斷的完整 `.part` 直接採用;`free_bytes` 失敗歸 `DOWNLOAD_FAILED`;MSI 移除只附加 msi 類型的屬性參數。
   - 資安稽核:M1 快取 / staging / 記錄目錄擁有者檢查;M2 安裝程式 TEMP 隔離;L6 `signer_subject` 去控制字元、最多 200 字;L7 staging 安裝檔驗證前以只允許讀取的共用模式開啟並持有到安裝程式結束。
-  - 需求方 2026-10-22 決定:**C2** draft 套件(主機簽章者清單為空)的簽章者也必須在本機 `trusted_signers` 內,本機清單空白不接受任何套件;**H1** 移除程式在 Program Files / Windows / `ProgramData\Package Cache` 以外時,做 ACL 檢查且路徑不可含 `..`;**H2** 內建不可移除清單(GigaNexus / RustIt 本身、常見防毒 / EDR),符合回 `UNINSTALL_NOT_SUPPORTED`。
-  - 未修:L2(`ACTION=` 與重開機類開關)、L3(MSI 逾時後安裝仍在 msiserver 進行);M3(分開 `[software] trusted_signers`)待 P7-3 與 MSI 0.9.0 一起做。
+  - 需求方 2026-10-22 決定:**C2** draft 套件(主機簽章者清單為空)的簽章者也必須在本機 `[software] trusted_signers` 內,本機清單空白不接受任何套件;**H1** 移除程式在 Program Files / Windows / `ProgramData\Package Cache` 以外時,做 ACL 檢查且路徑不可含 `..`;**H2** 內建不可移除清單(GigaNexus / RustIt 本身、常見防毒 / EDR),符合回 `UNINSTALL_NOT_SUPPORTED`。
+  - 未修:L2(`ACTION=` 與重開機類開關)、L3(MSI 逾時後安裝仍在 msiserver 進行);M3 已完成(`b9242d6`,見下一條)。
+- M3(`b9242d6`,P7-3 同分支):`agent.toml` 新增 `[software] trusted_signers`(格式同 `[upgrade]`,共用 `signer_list` 檢查),沒有設定 = 不接受任何派送的套件;軟體派送改用這份清單,升級與替換 Watchdog 仍用 `[upgrade]`;`RustAgent/installer/build-agent-msi.ps1` 新增 `-SoftwareSigners`。檔案:`common/src/config.rs`、`agent/src/{command,lib}.rs`、`installer/build-agent-msi.ps1`。
 - 檔案:`RustAgent/crates/agent/src/software/{mod,args,download,install,uninstall,detect,power,tests}.rs`、`agent/src/{command,lib}.rs`、`agent/Cargo.toml`(版本 0.9.0;`windows` 0.62 COM 介面、`windows-sys` 加 `Win32_System_Power`)、`RustAgent/Cargo.lock`、`collector/src/{lib,registry}.rs`、`common/src/{authenticode,scm}.rs`;文件 `docs/P7-SOFTWARE-DESIGN.md`、`docs/contracts/command-kinds.md`、`docs/HANDOFF.md`、`docs/PROJECT-MAP.md`、本檔。
 - 驗證:`cargo test -p rustit-agent` 116/116。`cargo test -p rustit-common` 單獨執行會因 `log::set_boxed_logger` 編譯失敗(既有問題,與本次修改無關);與 Agent 一起編譯(`cargo test -p rustit-agent`)正常。VM 驗收(設計 §8.3)尚未做。

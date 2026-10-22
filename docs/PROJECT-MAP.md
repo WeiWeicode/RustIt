@@ -86,7 +86,7 @@ RustIt/
 │     │  ├─ src/protocol.rs         Agent 契約型別(inventory、hello / hello_ack、sync、events、AgentSettings)、content_hash、hw_fingerprint、通道路徑與 User-Agent
 │     │  └─ tests/contract.rs       以 docs/contracts 的 JSON Schema 驗證送出的 JSON
 │     ├─ common/                    rustit-common:Agent 與 Watchdog 共用(PLATFORM-PLAN §3.1;P2 加入本機持久化、P5 加入具名管道)
-│     │  ├─ src/config.rs           agent.toml 解析與檢查(http 只允許本機、dev 模擬憑證標頭、選用 log_level;[tls] 裝置憑證 PEM 檔或 store_issuer 二選一;[upgrade] trusted_signers,P6-2)
+│     │  ├─ src/config.rs           agent.toml 解析與檢查(http 只允許本機、dev 模擬憑證標頭、選用 log_level;[tls] 裝置憑證 PEM 檔或 store_issuer 二選一;[upgrade] trusted_signers,P6-2;[software] trusted_signers,軟體派送專用,M3)
 │     │  ├─ src/authenticode.rs     WinVerifyTrust + 簽章者 SHA-1 指紋;signer_allowed(主機清單 ∩ 本機清單)(P6-2;P6-3、P7 共用);`signer_details`:簽章者指紋 + 主體名稱(P7-2)
 │     │  ├─ src/version.rs          版本號比較、下載路徑的元件 / 版本段 / 檔名檢查(P6-2)
 │     │  ├─ src/winfile.rs          磁碟剩餘空間、exe ProductVersion(P6-2,Windows);`not_reparse` / `plain_file`(升級快取不可是連結,P6-3)
