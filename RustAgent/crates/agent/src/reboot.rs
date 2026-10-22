@@ -5,6 +5,11 @@
 //!   另以 `WTSSendMessage` 送一則「【IT 部門通知】」訊息框(沒有登入者就不送)。`force = false` 時應用程式可拒絕關閉
 //! - 只在服務模式執行(前景開發模式不重新開機開發機);與軟體派送串行(呼叫端持有串行鎖,安裝中不重開機)
 //! - 排程成功即 `succeeded`(關機後無法再回報);主機以下次 `agent_started.boot_time` 變新判斷已重開機
+//! - **本機上限**(不靠主機,資安 P7-3 H1,需求方 2026-10-22 決定):開機未滿 30 分鐘不接受;24 小時內最多排程 3 次
+//!   (取消的也算);有人登入時倒數至少 60 秒(`force` 也一樣)。超過回 `REBOOT_LIMITED`
+//! - **倒數中**(資安 M1):排程後到重新開機前(開機時間變新,或倒數 + 5 分鐘仍未重開機),`software.*`、`agent.upgrade`、
+//!   `agent.restart` 回 `REBOOT_PENDING`,不在重開機前開始會被中斷的工作
+//! - `system.reboot.cancel`(資安 M2):`AbortSystemShutdownW` 取消倒數並清除倒數旗標
 
 use serde_json::{Value, json};
 
@@ -14,6 +19,76 @@ pub const MAX_DELAY_SEC: u64 = 86_400;
 const MESSAGE_MAX: usize = 200;
 /// 與 message.show 相同的固定前綴(不可由操作人覆寫)
 const PREFIX: &str = "【IT 部門通知】";
+
+/// 開機後多久內不接受重新開機(避免開機即重開的循環)
+pub const MIN_UPTIME_SEC: u64 = 30 * 60;
+/// 24 小時內最多排程幾次
+pub const MAX_PER_DAY: usize = 3;
+const DAY_SEC: i64 = 24 * 3600;
+/// 有人登入時的最短倒數
+pub const MIN_DELAY_WITH_USER: u64 = 60;
+/// 倒數結束後多久仍視為「重開機中」(應用程式拒絕關閉等情況,之後自動解除)
+pub const PENDING_GRACE_SEC: i64 = 300;
+
+/// 本機上限檢查:回傳不允許的原因。`history` 為過去排程的 Unix 秒
+pub fn limit_error(now: i64, boot: u64, history: &[i64]) -> Option<String> {
+    let uptime = now.saturating_sub(boot as i64).max(0) as u64;
+    if uptime < MIN_UPTIME_SEC {
+        return Some(format!(
+            "開機未滿 {} 分鐘(已開機 {} 分鐘),不接受重新開機",
+            MIN_UPTIME_SEC / 60,
+            uptime / 60
+        ));
+    }
+    let recent = history.iter().filter(|t| now - **t < DAY_SEC).count();
+    if recent >= MAX_PER_DAY {
+        return Some(format!(
+            "24 小時內已排程 {recent} 次重新開機,達本機上限 {MAX_PER_DAY} 次"
+        ));
+    }
+    None
+}
+
+/// 只留 24 小時內的紀錄,加上這一次
+pub fn record(now: i64, history: &[i64]) -> Vec<i64> {
+    let mut h: Vec<i64> = history
+        .iter()
+        .copied()
+        .filter(|t| now - *t < DAY_SEC)
+        .collect();
+    h.push(now);
+    h
+}
+
+/// 有人登入時倒數至少 [`MIN_DELAY_WITH_USER`] 秒
+pub fn effective_delay(delay: u64, user_present: bool) -> u64 {
+    if user_present {
+        delay.max(MIN_DELAY_WITH_USER)
+    } else {
+        delay
+    }
+}
+
+/// 倒數旗標(本機 kv):排程時間與失效時間(Unix 秒)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Pending {
+    pub scheduled_at: i64,
+    pub until: i64,
+}
+
+impl Pending {
+    pub fn new(now: i64, delay_sec: u64) -> Self {
+        Self {
+            scheduled_at: now,
+            until: now + delay_sec as i64 + PENDING_GRACE_SEC,
+        }
+    }
+
+    /// 仍在倒數中:未過失效時間,且排程之後沒有重新開機過
+    pub fn active(&self, now: i64, boot: u64) -> bool {
+        now < self.until && (boot as i64) < self.scheduled_at
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Params {
@@ -95,20 +170,15 @@ pub fn result(p: &Params, notified: bool) -> Value {
     })
 }
 
-/// 排程重新開機(阻塞):啟用 SeShutdownPrivilege → InitiateSystemShutdownExW(重新開機、計畫性、原因:其他)
+/// 啟用本行程權杖的 SeShutdownPrivilege(SYSTEM 有此權限但預設停用)
 #[cfg(windows)]
-pub fn schedule(p: &Params, text: &str) -> Result<(), String> {
+fn enable_shutdown_privilege() -> Result<(), String> {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LUID};
     use windows_sys::Win32::Security::{
         AdjustTokenPrivileges, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
         TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
     };
-    use windows_sys::Win32::System::Shutdown::{
-        InitiateSystemShutdownExW, SHTDN_REASON_FLAG_PLANNED, SHTDN_REASON_MAJOR_OTHER,
-        SHTDN_REASON_MINOR_OTHER,
-    };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-
     let name: Vec<u16> = "SeShutdownPrivilege"
         .encode_utf16()
         .chain(std::iter::once(0))
@@ -166,6 +236,17 @@ pub fn schedule(p: &Params, text: &str) -> Result<(), String> {
         };
         return Err(format!("無法啟用關機權限:{e}{hint}"));
     }
+    Ok(())
+}
+
+/// 排程重新開機(阻塞):啟用 SeShutdownPrivilege → InitiateSystemShutdownExW(重新開機、計畫性、原因:其他)
+#[cfg(windows)]
+pub fn schedule(p: &Params, text: &str) -> Result<(), String> {
+    use windows_sys::Win32::System::Shutdown::{
+        InitiateSystemShutdownExW, SHTDN_REASON_FLAG_PLANNED, SHTDN_REASON_MAJOR_OTHER,
+        SHTDN_REASON_MINOR_OTHER,
+    };
+    enable_shutdown_privilege()?;
     let msg: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     // SAFETY:msg 以 NUL 結尾;本機(lpMachineName = NULL)
     let ok = unsafe {
@@ -191,9 +272,58 @@ pub fn schedule(p: &Params, text: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// 取消倒數中的重新開機(阻塞);回傳是否真的取消了(沒有進行中的關機回 false)
+#[cfg(windows)]
+pub fn abort() -> Result<bool, String> {
+    use windows_sys::Win32::System::Shutdown::AbortSystemShutdownW;
+    enable_shutdown_privilege()?;
+    // SAFETY:本機(NULL)
+    if unsafe { AbortSystemShutdownW(std::ptr::null()) } != 0 {
+        return Ok(true);
+    }
+    let e = std::io::Error::last_os_error();
+    match e.raw_os_error() {
+        // ERROR_NO_SHUTDOWN_IN_PROGRESS
+        Some(1116) => Ok(false),
+        _ => Err(format!("無法取消重新開機:{e}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_limits() {
+        let now = 1_800_000_000;
+        let boot = (now - 3600) as u64;
+        assert!(limit_error(now, boot, &[]).is_none());
+        assert!(
+            limit_error(now, (now - 600) as u64, &[])
+                .unwrap()
+                .contains("開機未滿")
+        );
+        let three = [now - 100, now - 200, now - 300];
+        assert!(limit_error(now, boot, &three).unwrap().contains("上限"));
+        let old = [now - DAY_SEC - 1, now - 200, now - 300];
+        assert!(limit_error(now, boot, &old).is_none(), "超過 24 小時的不算");
+        assert_eq!(record(now, &old), vec![now - 200, now - 300, now]);
+        assert_eq!(effective_delay(0, true), 60);
+        assert_eq!(effective_delay(0, false), 0);
+        assert_eq!(effective_delay(300, true), 300);
+    }
+
+    #[test]
+    fn pending_flag() {
+        let now = 1_800_000_000;
+        let p = Pending::new(now, 300);
+        assert!(p.active(now + 10, (now - 3600) as u64));
+        assert!(!p.active(now + 10, (now + 5) as u64), "已重開機");
+        assert!(
+            !p.active(now + 300 + PENDING_GRACE_SEC, (now - 3600) as u64),
+            "倒數 + 5 分鐘後自動解除"
+        );
+    }
 
     #[test]
     fn params() {

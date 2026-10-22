@@ -11,7 +11,8 @@
 //!   `agent.log_level`(暫時調整日誌等級,記在本機 kv,重啟後仍有效直到到期):P4-2,PLATFORM-PLAN A4。
 //! - `agent.upgrade`(P6-2):只記下要求,經本機管道 `status.upgrade_requested` 交給 Watchdog(結果 `handed_to_watchdog`);
 //!   升級中(Watchdog 已送 `prepare_shutdown`)收到的新指令回 `failed AGENT_UPGRADING`。
-//! - `system.reboot`(P7-3,[`crate::reboot`]):服務模式才執行;取得串行鎖(安裝中不重開機)→ 訊息框 → 排程重新開機,排程成功即 `succeeded`。
+//! - `system.reboot`(P7-3,[`crate::reboot`]):服務模式才執行;取得串行鎖(安裝中不重開機)→ 本機上限(`REBOOT_LIMITED`)→ 排程 → 訊息框,
+//!   排程成功即 `succeeded`;倒數中 `software.*` / `agent.upgrade` / `agent.restart` 回 `REBOOT_PENDING`。`system.reboot.cancel` 取消倒數。
 //! - `software.install` / `software.uninstall`(P7-2,[`crate::software`]):取得串行鎖後執行;失敗時 `result` 也帶摘要(結束代碼、記錄)。
 
 use crate::Shared;
@@ -30,7 +31,7 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 
 /// 本版支援的類型(與 command-kinds.md 一致)
-pub const KINDS: [&str; 10] = [
+pub const KINDS: [&str; 11] = [
     "inventory.collect",
     "agent.restart",
     "message.show",
@@ -41,6 +42,7 @@ pub const KINDS: [&str; 10] = [
     "software.install",
     "software.uninstall",
     "system.reboot",
+    "system.reboot.cancel",
 ];
 /// agent.upgrade 交給 Watchdog 的要求有效多久(與指令有效期限相同)
 pub const UPGRADE_REQUEST_TTL: Duration = Duration::from_secs(3600);
@@ -54,6 +56,17 @@ const UPLOAD_ATTEMPTS: u32 = 3;
 const RESTART_KEY: &str = "restart_command";
 /// kv:已排程的 system.reboot 指令(排程前寫入;重開機後回報 succeeded,不誤報為中途停止)
 const REBOOT_KEY: &str = "reboot_command";
+/// kv:24 小時內排程重新開機的時間(Unix 秒 JSON 陣列;本機上限,資安 P7-3 H1)
+const REBOOT_HISTORY_KEY: &str = "reboot_history";
+/// kv:倒數旗標 `reboot::Pending`(倒數中拒絕會被中斷的指令,資安 P7-3 M1)
+const REBOOT_PENDING_KEY: &str = "reboot_pending";
+/// 倒數中拒絕的類型(重開機會中斷)
+const BLOCKED_WHILE_REBOOTING: [&str; 4] = [
+    "software.install",
+    "software.uninstall",
+    "agent.upgrade",
+    "agent.restart",
+];
 /// 已回報的指令紀錄保留天數(大於最長有效期限 1 天,才能去重)
 pub const COMMAND_LOG_DAYS: i64 = 7;
 /// 訊息框標題固定前綴(不可由操作人覆寫,避免偽裝成系統或其他程式的對話框)
@@ -243,6 +256,16 @@ async fn execute(shared: Arc<Shared>, cmd: CommandBody) {
             ),
         );
     }
+    if BLOCKED_WHILE_REBOOTING.contains(&cmd.kind.as_str()) && reboot_pending(&shared) {
+        return report_failure(
+            &shared,
+            &id,
+            fail(
+                "REBOOT_PENDING",
+                "已排程重新開機,倒數期間不執行;重新開機後請重新下達",
+            ),
+        );
+    }
     report(&shared, &id, "acked", |_| {});
     let outcome = match cmd.kind.as_str() {
         "inventory.collect" => {
@@ -283,6 +306,10 @@ async fn execute(shared: Arc<Shared>, cmd: CommandBody) {
                 &cmd.expires_at,
             )
             .await
+        }
+        "system.reboot.cancel" => {
+            report(&shared, &id, "running", |_| {});
+            system_reboot_cancel(&shared, &id).await
         }
         "agent.restart" => return agent_restart(&shared, &id).await,
         _ => Err(fail("UNSUPPORTED_COMMAND", cmd.kind.clone())),
@@ -446,6 +473,30 @@ async fn system_reboot(
     if expired(shared, expires_at)? {
         return Err(fail("EXPIRED", "等待前一個指令時已超過有效期限,不執行"));
     }
+    let mut params = params;
+    let now = chrono::Utc::now().timestamp();
+    let history: Vec<i64> = shared
+        .store
+        .lock()
+        .get(REBOOT_HISTORY_KEY)
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default();
+    if let Some(why) = reboot::limit_error(now, rustit_collector::boot_time(), &history) {
+        return Err(fail("REBOOT_LIMITED", why));
+    }
+    let user = tokio::task::spawn_blocking(wts::user_present)
+        .await
+        .unwrap_or(true);
+    let delay = reboot::effective_delay(params.delay_sec, user);
+    if delay != params.delay_sec {
+        info!(
+            "指令 {id}:有使用者登入,倒數由 {} 秒改為 {delay} 秒",
+            params.delay_sec
+        );
+        params.delay_sec = delay;
+    }
     let (title, text) = reboot::notice(&params, issued_by);
     // 先排程,成功後才顯示訊息框:已有排程(1190)或關機中(1115)而失敗時,不讓使用者看到不會發生的倒數
     if let Err(e) = shared.store.lock().set(REBOOT_KEY, id) {
@@ -466,6 +517,20 @@ async fn system_reboot(
         }
         return Err(fail("EXECUTION_FAILED", e));
     }
+    {
+        let store = shared.store.lock();
+        let saved = serde_json::to_string(&reboot::record(now, &history))
+            .map_err(|e| e.to_string())
+            .and_then(|h| store.set(REBOOT_HISTORY_KEY, &h))
+            .and_then(|_| {
+                serde_json::to_string(&reboot::Pending::new(now, params.delay_sec))
+                    .map_err(|e| e.to_string())
+            })
+            .and_then(|p| store.set(REBOOT_PENDING_KEY, &p));
+        if let Err(e) = saved {
+            warn!("無法記錄重新開機次數 / 倒數旗標:{e}");
+        }
+    }
     // 訊息框不等待使用者按下;沒有登入者(NO_ACTIVE_SESSION)只記錄。delay 0 時系統已在關機,不顯示
     let notified = params.delay_sec > 0 && {
         let (t, x) = (title.clone(), text.clone());
@@ -481,6 +546,67 @@ async fn system_reboot(
         if notified { "已顯示" } else { "未顯示" }
     );
     Ok(reboot::result(&params, notified))
+}
+
+/// 倒數中(排程後尚未重新開機)
+fn reboot_pending(shared: &Shared) -> bool {
+    shared
+        .store
+        .lock()
+        .get(REBOOT_PENDING_KEY)
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str::<crate::reboot::Pending>(&v).ok())
+        .is_some_and(|p| {
+            p.active(
+                chrono::Utc::now().timestamp(),
+                rustit_collector::boot_time(),
+            )
+        })
+}
+
+/// system.reboot.cancel(P7-3 資安 M2):取消倒數、清除倒數旗標;不取串行鎖(長時間安裝不擋取消)
+#[cfg(windows)]
+async fn system_reboot_cancel(shared: &Arc<Shared>, id: &str) -> Result<Value, Failure> {
+    if !crate::SERVICE_MODE.load(Ordering::Relaxed) {
+        return Err(fail("NOT_RUNNING_AS_SERVICE", "前景模式不處理重新開機"));
+    }
+    let aborted = tokio::task::spawn_blocking(crate::reboot::abort)
+        .await
+        .map_err(|e| fail("EXECUTION_FAILED", e.to_string()))?
+        .map_err(|e| fail("EXECUTION_FAILED", e))?;
+    {
+        let store = shared.store.lock();
+        for key in [REBOOT_PENDING_KEY, REBOOT_KEY] {
+            if let Err(e) = store.set(key, "") {
+                warn!("無法清除 {key}:{e}");
+            }
+        }
+    }
+    if aborted {
+        let _ = tokio::task::spawn_blocking(|| {
+            wts::send_message(
+                &format!("{TITLE_PREFIX}重新開機"),
+                "先前通知的重新開機已取消。",
+                0,
+            )
+        })
+        .await;
+    }
+    info!(
+        "指令 {id}:{}",
+        if aborted {
+            "已取消排程的重新開機"
+        } else {
+            "沒有進行中的重新開機"
+        }
+    );
+    Ok(json!({ "aborted": aborted }))
+}
+
+#[cfg(not(windows))]
+async fn system_reboot_cancel(_: &Arc<Shared>, _: &str) -> Result<Value, Failure> {
+    Err(fail("EXECUTION_FAILED", "只支援 Windows"))
 }
 
 #[cfg(not(windows))]
@@ -875,6 +1001,13 @@ mod wts {
         Ok(session)
     }
 
+    /// 主控台工作階段有登入的使用者
+    pub fn user_present() -> bool {
+        // SAFETY:無參數的 Win32 呼叫
+        let session = unsafe { WTSGetActiveConsoleSessionId() };
+        session != NO_SESSION && has_user(session)
+    }
+
     fn has_user(session: u32) -> bool {
         let mut buf: *mut u16 = std::ptr::null_mut();
         let mut bytes = 0u32;
@@ -905,6 +1038,10 @@ mod wts {
 
     pub fn send_message(_: &str, _: &str, _: u32) -> Result<u32, Failure> {
         Err(fail("EXECUTION_FAILED", "只支援 Windows"))
+    }
+
+    pub fn user_present() -> bool {
+        false
     }
 }
 

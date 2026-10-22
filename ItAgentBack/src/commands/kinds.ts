@@ -138,6 +138,8 @@ export const COMMAND_KINDS: readonly CommandKind[] = [
       },
     },
   },
+  // 取消倒數中的重新開機(P7-3,資安 M2):Agent 0.9.0 起;不受串行與累計核可限制(取消不會造成破壞)
+  { kind: 'system.reboot.cancel', level: 'admin', expiresSec: 3600, timeoutSec: 300, maxPending: 1, params: NO_PARAMS },
 ];
 
 /** 建立指令時可覆寫的有效期限範圍(秒) */

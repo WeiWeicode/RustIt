@@ -55,6 +55,7 @@ describe('資料契約範例', () => {
       'ws-command-log-level.sample.json',
       'ws-command-software-install.sample.json',
       'ws-command-software-uninstall.sample.json',
+      'ws-command-system-reboot-cancel.sample.json',
       'ws-command-system-reboot.sample.json',
       'ws-command-update-ack.sample.json',
       'ws-command-update-diagnose.sample.json',
@@ -203,6 +204,7 @@ describe('資料契約範例', () => {
       'ws-command-software-install',
       'ws-command-software-uninstall',
       'ws-command-system-reboot',
+      'ws-command-system-reboot-cancel',
       'ws-command-update-software-install',
       'ws-command-update-software-failed',
     ])
@@ -230,6 +232,8 @@ describe('資料契約範例', () => {
     assert.equal(paramErrors('system.reboot', example<{ body: { params: unknown } }>('ws-command-system-reboot.sample.json').body.params), null);
     assert.notEqual(paramErrors('system.reboot', { delay_sec: 90000 }), null);
     assert.notEqual(paramErrors('system.reboot', { message: '\u202Eevil' }), null);
+    assert.equal(paramErrors('system.reboot.cancel', example<{ body: { params: unknown } }>('ws-command-system-reboot-cancel.sample.json').body.params), null);
+    assert.notEqual(paramErrors('system.reboot.cancel', { delay_sec: 1 }), null, '\u53D6\u6D88\u4E0D\u5E36\u53C3\u6578');
     const res = example<{ body: { result: Record<string, unknown> } }>('ws-command-update-software-install.sample.json').body.result;
     assert.match(String(res.signer), /^[0-9a-f]{40}$/);
     assert.ok(JSON.stringify(res).length <= 4000);
