@@ -14,13 +14,13 @@ use windows_service::service::{
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
-    ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
-    SE_FILE_OBJECT, SE_KERNEL_OBJECT, SetNamedSecurityInfoW,
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW, GetSecurityInfo,
+    SDDL_REVISION_1, SE_FILE_OBJECT, SE_KERNEL_OBJECT, SetNamedSecurityInfoW,
 };
 use windows_sys::Win32::Security::{
     ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, IsWellKnownSid,
     OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
-    WinLocalSystemSid,
+    WinBuiltinAdministratorsSid, WinLocalSystemSid,
 };
 use windows_sys::Win32::System::Services::{
     ChangeServiceConfigW, CloseServiceHandle, OpenSCManagerW, OpenServiceW, SC_MANAGER_CONNECT,
@@ -501,6 +501,41 @@ pub fn protect_dir(dir: &std::path::Path) -> Result<(), String> {
         LocalFree(sd as _);
         if rc != 0 {
             return Err(format!("無法套用 {} 的 ACL(錯誤 {rc})", dir.display()));
+        }
+    }
+    Ok(())
+}
+
+/// 目錄擁有者必須是 SYSTEM 或 Administrators:擁有者可以事後改回 ACL,一般使用者預先建立的目錄即使套了
+/// [`protect_dir`] 也不可信(軟體派送的快取與 staging,P7-2 資安 M1)
+pub fn owner_is_admin(dir: &std::path::Path) -> Result<(), String> {
+    let path = wide(&dir.to_string_lossy());
+    let mut owner: PSID = std::ptr::null_mut();
+    let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY:路徑以 NUL 結尾;owner 指向 sd 內部,sd 以 LocalFree 釋放,釋放前使用完畢
+    unsafe {
+        let rc = GetNamedSecurityInfoW(
+            path.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut sd,
+        );
+        if rc != 0 {
+            return Err(format!("無法讀取 {} 的擁有者(錯誤 {rc})", dir.display()));
+        }
+        let ok = !owner.is_null()
+            && (IsWellKnownSid(owner, WinLocalSystemSid) != 0
+                || IsWellKnownSid(owner, WinBuiltinAdministratorsSid) != 0);
+        LocalFree(sd as _);
+        if !ok {
+            return Err(format!(
+                "{} 的擁有者不是 SYSTEM 或 Administrators",
+                dir.display()
+            ));
         }
     }
     Ok(())

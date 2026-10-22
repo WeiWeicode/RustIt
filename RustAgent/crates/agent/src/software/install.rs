@@ -19,6 +19,8 @@ pub const DRAIN_MAX: Duration = Duration::from_secs(300);
 pub struct CmdLine {
     pub program: PathBuf,
     pub args: String,
+    /// 安裝程式的 TEMP / TMP;None = 沿用 Agent 的環境
+    pub temp: Option<PathBuf>,
 }
 
 impl CmdLine {
@@ -59,6 +61,7 @@ pub fn install_cmdline(
     match kind {
         Installer::Msi => CmdLine {
             program: msiexec.to_path_buf(),
+            temp: None,
             args: join(&[
                 "/i",
                 &quoted(file),
@@ -70,18 +73,22 @@ pub fn install_cmdline(
         Installer::Inno => CmdLine {
             program: file.to_path_buf(),
             args: join(&["/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-", extra]),
+            temp: None,
         },
         Installer::Nsis => CmdLine {
             program: file.to_path_buf(),
             args: join(&["/S", extra]),
+            temp: None,
         },
         Installer::Burn => CmdLine {
             program: file.to_path_buf(),
             args: join(&["/quiet /norestart", extra]),
+            temp: None,
         },
         Installer::Exe => CmdLine {
             program: file.to_path_buf(),
             args: extra.to_string(),
+            temp: None,
         },
     }
 }
@@ -113,8 +120,9 @@ pub fn run_job(cmd: &CmdLine, timeout: Duration, drain_max: Duration) -> Result<
         QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
     };
     use windows_sys::Win32::System::Threading::{
-        CREATE_NO_WINDOW, CREATE_SUSPENDED, CreateProcessW, GetExitCodeProcess,
-        PROCESS_INFORMATION, ResumeThread, STARTUPINFOW, TerminateProcess, WaitForSingleObject,
+        CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
+        GetExitCodeProcess, PROCESS_INFORMATION, ResumeThread, STARTUPINFOW, TerminateProcess,
+        WaitForSingleObject,
     };
 
     /// 結束時一定關閉(Job 關閉時 KILL_ON_JOB_CLOSE 結束仍在跑的行程)
@@ -166,6 +174,28 @@ pub fn run_job(cmd: &CmdLine, timeout: Duration, drain_max: Duration) -> Result<
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
+    // TEMP / TMP 換成指定目錄的環境區塊(UTF-16,KEY=VALUE\0…\0\0;CREATE_UNICODE_ENVIRONMENT)
+    let env_block: Option<Vec<u16>> = cmd.temp.as_ref().map(|t| {
+        let mut block = Vec::new();
+        for (k, v) in std::env::vars_os() {
+            let key = k.to_string_lossy().to_ascii_uppercase();
+            if key == "TEMP" || key == "TMP" {
+                continue;
+            }
+            block.extend(k.encode_wide());
+            block.push(u16::from(b'='));
+            block.extend(v.encode_wide());
+            block.push(0);
+        }
+        for key in ["TEMP", "TMP"] {
+            block.extend(std::ffi::OsStr::new(key).encode_wide());
+            block.push(u16::from(b'='));
+            block.extend(t.as_os_str().encode_wide());
+            block.push(0);
+        }
+        block.push(0);
+        block
+    });
     let si = STARTUPINFOW {
         cb: std::mem::size_of::<STARTUPINFOW>() as u32,
         ..Default::default()
@@ -179,8 +209,10 @@ pub fn run_job(cmd: &CmdLine, timeout: Duration, drain_max: Duration) -> Result<
             std::ptr::null(),
             std::ptr::null(),
             0,
-            CREATE_SUSPENDED | CREATE_NO_WINDOW,
-            std::ptr::null(),
+            CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+            env_block
+                .as_ref()
+                .map_or(std::ptr::null(), |b| b.as_ptr() as *const _),
             std::ptr::null(),
             &si,
             &mut pi,
@@ -320,6 +352,7 @@ mod tests {
         let cmd = CmdLine {
             program: system.join("where.exe"),
             args: "/Q rustit-no-such-file-xyz".into(),
+            temp: None,
         };
         assert_eq!(
             run_job(&cmd, Duration::from_secs(30), DRAIN_MAX).unwrap(),
@@ -328,6 +361,7 @@ mod tests {
         let missing = CmdLine {
             program: system.join("rustit-missing.exe"),
             args: String::new(),
+            temp: None,
         };
         assert!(run_job(&missing, Duration::from_secs(5), DRAIN_MAX).is_err());
     }
@@ -340,6 +374,7 @@ mod tests {
         let cmd = CmdLine {
             program: system.join("PING.EXE"),
             args: "-n 30 127.0.0.1".into(),
+            temp: None,
         };
         let started = std::time::Instant::now();
         assert_eq!(
@@ -347,5 +382,25 @@ mod tests {
             Exit::Timeout
         );
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn temp_is_replaced_for_installer() {
+        let system = msiexec_path().parent().unwrap().to_path_buf();
+        let dir = tempfile::tempdir().unwrap();
+        // 測試用 cmd.exe 讀 %TEMP%(正式流程不經 cmd)
+        let cmd = CmdLine {
+            program: system.join("cmd.exe"),
+            args: format!(
+                "/d /c if /i \"%TEMP%\"==\"{}\" (exit 7) else (exit 3)",
+                dir.path().display()
+            ),
+            temp: Some(dir.path().to_path_buf()),
+        };
+        assert_eq!(
+            run_job(&cmd, Duration::from_secs(30), DRAIN_MAX).unwrap(),
+            Exit::Code(7)
+        );
     }
 }

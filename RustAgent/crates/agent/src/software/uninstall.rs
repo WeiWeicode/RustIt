@@ -81,6 +81,7 @@ pub fn uninstall_cmdline(
             return Ok(CmdLine {
                 program: msiexec.to_path_buf(),
                 args,
+                temp: None,
             });
         }
         if msi_string {
@@ -125,7 +126,11 @@ pub fn uninstall_cmdline(
     } else {
         format!("{rest} {extra}").trim().to_string()
     };
-    Ok(CmdLine { program, args })
+    Ok(CmdLine {
+        program,
+        args,
+        temp: None,
+    })
 }
 
 #[cfg(test)]

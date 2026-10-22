@@ -392,6 +392,17 @@ impl Drop for Cleanup {
     }
 }
 
+/// 以拒絕他人寫入 / 刪除的共用模式開啟(他人仍可讀取與執行)
+#[cfg(windows)]
+fn hold_readonly(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 0x1;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(path)
+}
+
 fn older_than(path: &Path, age: Duration) -> bool {
     std::fs::symlink_metadata(path)
         .and_then(|m| m.modified())
@@ -547,6 +558,12 @@ fn check_signer(
     let (signer, subject) = env
         .signer(file)
         .map_err(|e| fail("SIGNATURE_INVALID", format!("{e},未執行安裝程式")))?;
+    // 憑證主體名稱由簽章者決定:去掉控制字元與雙向文字控制字元(GigaItApp 顯示時不可偽裝,資安 L6)
+    let subject: String = subject
+        .chars()
+        .filter(|c| !unsafe_text(&c.to_string()))
+        .take(200)
+        .collect();
     if p.signers.is_empty() {
         // draft 套件(只派到 pilot 測試機):回報實際簽章者,不採信空清單放行其他檢查(§5.2)
         info!(
@@ -651,9 +668,10 @@ pub async fn install(
     info!("下載 {} {}({} bytes)", p.name, p.version, p.size_bytes);
     let file = download::fetch(env, &pkg_dir, p).await?;
     let staging = paths.staging(command_id);
-    // 從這裡起,結束時刪除安裝檔與 staging
-    let _cleanup = Cleanup(vec![staging.clone(), file.clone()]);
+    // 從這裡起,結束時刪除安裝檔;staging 確認安全之後才登記刪除
+    let mut cleanup = Cleanup(vec![file.clone()]);
     env.prepare_dir(&staging).map_err(unsafe_dir)?;
+    cleanup.0.push(staging.clone());
     env.progress(82);
     // TOCTOU:複製到僅 SYSTEM / Administrators 可寫的 staging,在目的地再驗雜湊與簽章,從該位置執行(§5.6)
     let staged = staging.join(p.installer.file_name());
@@ -662,11 +680,19 @@ pub async fn install(
         .await
         .map_err(|e| fail("EXECUTION_FAILED", format!("背景工作異常:{e}")))?
         .map_err(|e| fail("EXECUTION_FAILED", format!("無法複製安裝檔到 staging:{e}")))?;
+    // 驗證前先以「只允許他人讀取」開啟並持有到安裝程式結束:驗證後到執行之間無法改寫(資安 L7,縱深防禦)
+    let _hold = hold_readonly(&staged)
+        .map_err(|e| fail("EXECUTION_FAILED", format!("無法鎖定 staging 的安裝檔:{e}")))?;
     download::verify(&staged, p).await?;
     let (signer, subject) = check_signer(env, &staged, p, trusted)?;
     env.prepare_dir(&paths.logs).map_err(unsafe_dir)?;
     let log = paths.log(command_id);
-    let cmd = install::install_cmdline(p.installer, &staged, &log, &p.install_args, &env.msiexec());
+    let mut cmd =
+        install::install_cmdline(p.installer, &staged, &log, &p.install_args, &env.msiexec());
+    // 安裝程式解壓用的 TEMP 不用 C:\Windows\Temp(一般使用者可在那裡建立檔案,資安 M2)
+    let temp = staging.join("tmp");
+    env.prepare_dir(&temp).map_err(unsafe_dir)?;
+    cmd.temp = Some(temp);
     env.progress(85);
     info!("安裝 {} {}:{}", p.name, p.version, cmd.command_line());
     let code = run_installer(env, &cmd, p.timeout, p.timeout).await?;
@@ -805,7 +831,8 @@ impl Env for RealEnv {
         }
         std::fs::create_dir_all(dir).map_err(|e| format!("無法建立 {}:{e}", dir.display()))?;
         not_reparse(dir)?;
-        rustit_common::scm::protect_dir(dir)
+        rustit_common::scm::protect_dir(dir)?;
+        rustit_common::scm::owner_is_admin(dir)
     }
 
     fn free_bytes(&self, dir: &Path) -> Result<u64, String> {

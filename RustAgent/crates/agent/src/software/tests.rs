@@ -901,3 +901,50 @@ fn purge_removes_stale_entries() {
     );
     assert!(fresh_log.exists());
 }
+
+#[test]
+fn held_installer_cannot_be_rewritten() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("installer.exe");
+    std::fs::write(&f, b"MZ").unwrap();
+    let hold = hold_readonly(&f).unwrap();
+    assert!(
+        std::fs::OpenOptions::new().write(true).open(&f).is_err(),
+        "持有期間不可寫入"
+    );
+    assert!(std::fs::remove_file(&f).is_err(), "持有期間不可刪除");
+    assert_eq!(std::fs::read(&f).unwrap(), b"MZ", "仍可讀取");
+    drop(hold);
+    assert!(std::fs::OpenOptions::new().write(true).open(&f).is_ok());
+}
+
+#[tokio::test]
+async fn installer_gets_private_temp() {
+    let content = b"temp";
+    let env = Fake::new(content);
+    let (_d, paths) = paths();
+    run_install(&env, &install_params(content, &[SIGNER]), &paths)
+        .await
+        .unwrap();
+    let temp = env.runs.lock().unwrap()[0].temp.clone();
+    assert_eq!(temp, Some(paths.staging(CMD).join("tmp")));
+}
+
+#[test]
+fn held_exe_can_still_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join("installer.exe");
+    let system = install::msiexec_path().parent().unwrap().to_path_buf();
+    std::fs::copy(system.join("where.exe"), &exe).unwrap();
+    let _hold = hold_readonly(&exe).unwrap();
+    let cmd = CmdLine {
+        program: exe.clone(),
+        args: "/Q rustit-no-such-file-xyz".into(),
+        temp: None,
+    };
+    assert_eq!(
+        install::run_job(&cmd, Duration::from_secs(30), install::DRAIN_MAX).unwrap(),
+        Exit::Code(1),
+        "持有拒寫控制代碼時仍可執行"
+    );
+}
