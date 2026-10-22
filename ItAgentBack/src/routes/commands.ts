@@ -14,7 +14,7 @@ import { COMMAND_KINDS, EXPIRES_MAX_SEC, EXPIRES_MIN_SEC } from '../commands/kin
 import { AppError } from '../errors.js';
 import { BATCH_MAX_DEVICES, type ApprovalRoute, type CommandDispatcher } from '../services/command-dispatcher.js';
 import type { CommandFileService } from '../services/command-files.js';
-import type { CommandState } from '../stores/types.js';
+import type { BatchState, CommandState } from '../stores/types.js';
 import { mgmtCtx } from './mgmt-ctx.js';
 
 const STATES = ['queued', 'sent', 'acked', 'running', 'succeeded', 'failed', 'canceled', 'expired'] as const;
@@ -401,6 +401,37 @@ export function commandRoutes(commands: CommandDispatcher, files?: CommandFileSe
         },
       },
       async (req) => commands.list(ctx(req), { ...req.query, batchId: req.query.batchId?.toLowerCase() }),
+    );
+
+    app.get<{ Querystring: { state?: BatchState; cursor?: string; limit?: number } }>(
+      '/v1/batches',
+      {
+        schema: {
+          operationId: 'endpoint.command.batch.list',
+          summary: '批次清單',
+          description:
+            '指令批次,新到舊;可依狀態篩選(待核可清單用 state=pending_approval,只列 24 小時核可期限內的),以 nextCursor 取下一頁。含資料範圍外電腦的批次不列出。各台明細以 GET /commands?batchId= 查詢。',
+          tags: ['端點指令'],
+          'x-permission': 'endpoint.device.read',
+          'x-gherkin': [
+            '場景: 列出待核可的批次',
+            '  假如 有一個 21 台的軟體派送批次為 pending_approval',
+            '  當 呼叫 GET /api/endpoint/batches?state=pending_approval',
+            '  那麼 回應 200',
+            '  而且 items 包含該批次,state 為 "pending_approval"',
+          ].join('\n'),
+          querystring: {
+            type: 'object',
+            properties: {
+              state: { type: 'string', enum: BATCH_STATES },
+              cursor: { type: 'string', pattern: '^\\d+$', description: '上一頁回傳的 nextCursor' },
+              limit: { type: 'integer', minimum: 1, maximum: 100, default: 50 },
+            },
+          },
+          response: { 200: { type: 'object', properties: { items: { type: 'array', items: batchSchema }, nextCursor: strOrNull } } },
+        },
+      },
+      async (req) => commands.listBatches(ctx(req), req.query),
     );
 
     app.get<{ Params: { batchId: string } }>(

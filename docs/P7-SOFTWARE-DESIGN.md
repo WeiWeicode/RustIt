@@ -187,6 +187,7 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
 | `POST` | `/software/{packageId}/deploy` | `endpoint.software.manage` + `endpoint.command.admin` | 批次派送:`{ action: "install" \| "uninstall", deviceIds: [...], maxConcurrent? }` → 建立 `command_batch`(> `BATCH_APPROVAL_THRESHOLD` 台進入 `pending_approval`,§6) |
 | `POST` | `/batches/{batchId}/approve`、`/reject` | `endpoint.software.manage` | 軟體派送批次(`software.*`)第二人核可 / 駁回(§6) |
 | `POST` | `/batches/{batchId}/approve-command`、`/reject-command` | `endpoint.command.admin` | 軟體派送以外的批次(`system.reboot` 等)第二人核可 / 駁回(§6);批次類型與路由不符 `403 ITA_APPROVAL_ROUTE_MISMATCH` |
+| `GET` | `/batches` | `endpoint.device.read` | 批次清單(P7-5 補):`state`(待核可清單用 `pending_approval`,只列 24 小時核可期限內的)、`cursor`、`limit`;含範圍外電腦的批次不列出 |
 | `GET` | `/command-batches/{batchId}` | `endpoint.device.read` | 批次進度(沿用 P4 `GET /batches/{id}`,加 `state`、核可資訊) |
 
 - 全部依 E6 資料範圍過濾裝置。**軟體目錄是全公司共用**,與 P6 版本一樣:登錄 / 修改 / 發佈 / 撤回需 `ENDPOINT_SCOPE_ALL_ROLES` 角色,其他回 `403 ITA_SCOPE_ALL_REQUIRED`(§9-5)。

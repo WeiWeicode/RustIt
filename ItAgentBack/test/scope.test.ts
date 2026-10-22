@@ -271,6 +271,10 @@ describe('管理 API 的資料範圍(:51240)', () => {
     assert.deepEqual((await call(tokens.a!, 'GET', `/v1/commands?batchId=${batchB}`)).json().items, []);
     assert.equal((await call(tokens.b!, 'GET', `/v1/commands/${cmdB}`)).json().files.length, 1);
     assert.equal((await call(tokens.b!, 'GET', `/v1/batches/${batchB}`)).statusCode, 200);
+    // 批次清單:含範圍外裝置的批次不列出(同 GET /batches/{id} 視同不存在)
+    const batchIds = async (t: string) => ((await call(t, 'GET', '/v1/batches')).json().items as { batchId: string }[]).map((b) => b.batchId);
+    assert.ok(!(await batchIds(tokens.a!)).includes(batchB));
+    assert.ok((await batchIds(tokens.b!)).includes(batchB));
     assert.ok(((await call(tokens.b!, 'GET', '/v1/commands')).json().items as unknown[]).length >= 2);
   });
 
@@ -463,6 +467,7 @@ describe('管理 API 的資料範圍(:51240)', () => {
       'endpoint.command.batch.approve',
       'endpoint.command.batch.approve-command',
       'endpoint.command.batch.get',
+      'endpoint.command.batch.list',
       'endpoint.command.batch.reject',
       'endpoint.command.batch.reject-command',
       'endpoint.command.cancel',

@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。本檔自 P7-1 起記錄 `ItAgentBack/` 的修改,先前的後端變更記在 `NewFeatures.md` / `BugFix.md`。
 
+## 2026-10-22 P7-5 新增 GET /batches 批次清單(給 GigaItApp 待核可清單)
+- 內容:GigaItApp 軟體派送畫面需要「待核可批次清單」,原有 API 只能 `GET /batches/{id}`、`GET /commands`(無批次狀態篩選)。新增 `GET /v1/batches`(`endpoint.command.batch.list`,`endpoint.device.read`):`state`、`cursor`、`limit`(≤100)、新到舊;`state=pending_approval` 另限 24 小時核可期限內(逾期的等每分鐘掃描設為 expired);含資料範圍外電腦的批次略過(同 `getBatch`,E6),游標取自掃描到的最後一筆。需求方 2026-10-22 同意跨 repo 修改。部署後 Gateway 需再發佈 OpenAPI 批次。
+- 檔案:`ItAgentBack/src/routes/commands.ts`、`src/services/command-dispatcher.ts`(`listBatches`)、`src/stores/{types,sql-command-store}.ts`(`listBatches`、抽出 `toBatch`)、`test/{helpers,software,scope}.test.ts`、`test/int/stores.int.test.ts`、`docs/contracts/command-kinds.md`、`docs/P7-SOFTWARE-DESIGN.md` §3.5
+- 驗證:`npm run typecheck` 通過、`npm test` 212/212。**`test:int`(SQL 版 `listBatches`)尚未執行**:本機 Docker 未啟動,整合測試需要本機 Mongo / Redis;int 測試已寫在 `stores.int.test.ts` 批次核可案例末段,待能啟動 Docker 的環境執行。
+
 ## 2026-10-22 P7-4-1 NAS 唯讀掛載帳密腳本
 - 內容:新增 `host2-set-nas-credentials.sh`(需求方在主機 2 WSL 以 sudo 執行,AI 不經手帳密):帳密以隱藏輸入寫入 root 專屬的 `/srv/giganexus/nas-secrets/rustit-nas.cred`(0400,不放 `ita-secrets`,避免被 chown 給容器內 node);以 CIFS 唯讀(`ro,nosuid,nodev,noexec`)掛載 `//10.10.130.31/docker-folder/RustIT` 到 `/srv/giganexus/nas-rustit`,檢查 `releases/`、`software/` 並做寫入測試確認唯讀;印出 `ita.env` 的 `ITA_RELEASES_HOST_DIR` / `ITA_SOFTWARE_HOST_DIR` 與 fstab 建議行,不自動改 `ita.env`、fstab 與 compose(compose 已支援這兩個變數,切換由需求方決定)。
 - 檔案:`ItAgentBack/deploy/host2-set-nas-credentials.sh`、`docs/PROJECT-MAP.md`、`docs/HANDOFF.md`

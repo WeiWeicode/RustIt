@@ -391,6 +391,15 @@ export interface CommandPatch {
   markStarted?: boolean;
 }
 
+/** 批次清單篩選(新到舊;P7-5 待核可清單) */
+export interface BatchFilter {
+  state?: BatchState;
+  /** created_at 晚於此時間(待核可只列 24 小時核可期限內的) */
+  createdAfter?: Date;
+  beforeId?: number;
+  limit: number;
+}
+
 export interface CommandFilter {
   deviceRef?: number;
   batchRef?: number;
@@ -410,6 +419,8 @@ export interface CommandStore {
   findByIdempotency(emp: string, key: string): Promise<CommandRecord | null>;
   findBatchByIdempotency(emp: string, key: string): Promise<BatchRecord | null>;
   getBatch(batchId: string): Promise<BatchRecord | null>;
+  /** 批次清單,新到舊(含各狀態台數);資料範圍由 service 層過濾 */
+  listBatches(filter: BatchFilter): Promise<BatchRecord[]>;
   /** 批次內各裝置目前的所屬公司(去重;資料範圍檢查用,E6) */
   batchCompanies(batchRef: number): Promise<(string | null)[]>;
   listCommands(filter: CommandFilter): Promise<CommandRecord[]>;
