@@ -43,4 +43,6 @@ tempfile = "3.27.0"
 # Windows 服務:SCM 進入點、安裝與失敗復原設定(PLATFORM-PLAN §4.1、指南 §6.1)
 windows-service = "0.8.1"
 # 指令 message.show:WTSSendMessage 送到主控台工作階段(P4);軟體派送:Job Object 執行安裝程式、系統目錄的 msiexec(P7-2)
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_System_JobObjects", "Win32_System_RemoteDesktop", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_System_JobObjects", "Win32_System_Power", "Win32_System_RemoteDesktop", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+# 軟體派送 A6:計量網路判斷需要 COM 介面 INetworkCostManager(windows-sys 沒有 COM 介面);0.62.2 已在 Cargo.lock(demo 使用),不另下載(P7-2)
+windows = { version = "0.62", features = ["Win32_Networking_NetworkListManager", "Win32_System_Com"] }

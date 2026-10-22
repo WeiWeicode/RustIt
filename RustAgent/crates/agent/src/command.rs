@@ -256,7 +256,7 @@ async fn execute(shared: Arc<Shared>, cmd: CommandBody) {
         }
         "software.install" | "software.uninstall" => {
             report(&shared, &id, "running", |_| {});
-            software(&shared, &id, &cmd.kind, &cmd.params).await
+            software(&shared, &id, &cmd.kind, &cmd.params, &cmd.expires_at).await
         }
         "agent.restart" => return agent_restart(&shared, &id).await,
         _ => Err(fail("UNSUPPORTED_COMMAND", cmd.kind.clone())),
@@ -353,7 +353,13 @@ fn agent_upgrade(shared: &Shared, id: &str, p: &Value) -> Result<Value, Failure>
 
 /// software.install / software.uninstall(P7-2):參數再驗一次 → 取得串行鎖(會改變系統的指令同時只跑一個)→ 執行
 #[cfg(windows)]
-async fn software(shared: &Arc<Shared>, id: &str, kind: &str, p: &Value) -> Result<Value, Failure> {
+async fn software(
+    shared: &Arc<Shared>,
+    id: &str,
+    kind: &str,
+    p: &Value,
+    expires_at: &str,
+) -> Result<Value, Failure> {
     use crate::software::{self as sw, RealEnv};
     let from = |f: sw::Failure| Failure {
         code: f.code,
@@ -368,6 +374,11 @@ async fn software(shared: &Arc<Shared>, id: &str, kind: &str, p: &Value) -> Resu
     // 參數錯誤不必排隊
     if kind == "software.install" {
         let ins = sw::parse_install(p).map_err(from)?;
+        // A6:延後下載不超過 4 小時與指令剩餘有效時間;已下載完成的不延後
+        if !sw::cached(&paths, &ins) {
+            let max = remaining(shared, expires_at).min(sw::power::DEFER_MAX);
+            sw::defer(&env, &ins, max).await.map_err(from)?;
+        }
         let _guard = shared.exclusive.lock().await;
         sw::install(&env, &paths, id, &ins, &shared.trusted_signers).await
     } else {
@@ -379,8 +390,22 @@ async fn software(shared: &Arc<Shared>, id: &str, kind: &str, p: &Value) -> Resu
 }
 
 #[cfg(not(windows))]
-async fn software(_: &Arc<Shared>, _: &str, _: &str, _: &Value) -> Result<Value, Failure> {
+async fn software(_: &Arc<Shared>, _: &str, _: &str, _: &Value, _: &str) -> Result<Value, Failure> {
     Err(fail("EXECUTION_FAILED", "只支援 Windows"))
+}
+
+/// 距離 expires_at 還有多久(主機時間;無法解析或已過期為 0)
+#[cfg(windows)]
+fn remaining(shared: &Shared, expires_at: &str) -> Duration {
+    let skew = chrono::Duration::milliseconds(shared.clock_skew_ms.load(Ordering::Relaxed));
+    chrono::DateTime::parse_from_rfc3339(expires_at)
+        .ok()
+        .and_then(|exp| {
+            (exp.with_timezone(&chrono::Utc) - (chrono::Utc::now() - skew))
+                .to_std()
+                .ok()
+        })
+        .unwrap_or_default()
 }
 
 /// expires_at 是主機時間;本機時間 − 偏差 = 主機時間

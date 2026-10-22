@@ -23,6 +23,7 @@ pub mod args;
 pub mod detect;
 pub mod download;
 pub mod install;
+pub mod power;
 pub mod uninstall;
 
 use crate::Shared;
@@ -132,8 +133,7 @@ pub struct Install {
     pub signers: Vec<String>,
     pub detect: Detect,
     pub timeout: Duration,
-    /// A6 電池延後的略過旗標(P7-2 第 2-2 項使用)
-    #[allow(dead_code)]
+    /// A6:略過電池延後(不略過計量網路)
     pub ignore_power: bool,
 }
 
@@ -330,6 +330,8 @@ pub trait Env {
     fn progress(&self, pct: u8);
     /// 立即重新蒐集並回報資產(失敗只記警告)
     async fn collect(&self);
+    /// A6:電池與計量網路狀態
+    async fn power(&self) -> power::PowerState;
 }
 
 /// 檔案位置:`cache\software\`(下載與 staging)、`logs\software\`(安裝記錄)
@@ -532,6 +534,49 @@ fn check_signer(
 
 fn elapsed_ms(started: Instant) -> u64 {
     started.elapsed().as_millis() as u64
+}
+
+/// 安裝檔已完整下載過(大小相符;雜湊由下載步驟驗):A6 只延後下載,不延後安裝已下載的檔案
+pub fn cached(paths: &Paths, p: &Install) -> bool {
+    let f = paths.package(&p.package_id).join(p.installer.file_name());
+    std::fs::metadata(f).is_ok_and(|m| m.is_file() && m.len() == p.size_bytes)
+}
+
+/// A6(§5.4):電池供電或計量網路時延後下載,每 5 分鐘重新檢查;超過 `max` 回 `DEFERRED_TIMEOUT`。
+/// 呼叫端在取得串行鎖之前呼叫(延後期間不擋其他指令)
+pub async fn defer(env: &impl Env, p: &Install, max: Duration) -> Result<(), Failure> {
+    let mut waited = Duration::ZERO;
+    loop {
+        let Some(reason) = power::defer_reason(env.power().await, p.ignore_power) else {
+            if !waited.is_zero() {
+                info!("{} {} 延後條件解除,繼續", p.name, p.version);
+            }
+            return Ok(());
+        };
+        if waited >= max {
+            return Err(fail(
+                "DEFERRED_TIMEOUT",
+                format!(
+                    "{reason},已延後 {} 分鐘仍未解除;請接上電源或回到非計量網路後重新派送",
+                    waited.as_secs() / 60
+                ),
+            ));
+        }
+        if waited.is_zero() {
+            info!(
+                "{} {}:{reason},延後下載(每 {} 分鐘重新檢查,最多 {} 分鐘)",
+                p.name,
+                p.version,
+                power::CHECK_EVERY.as_secs() / 60,
+                max.as_secs() / 60
+            );
+        }
+        // 進度 0 的 running 也讓主機重設逾時(延後期間不被判逾時)
+        env.progress(0);
+        let step = power::CHECK_EVERY.min(max - waited);
+        env.sleep(step).await;
+        waited += step;
+    }
 }
 
 /// `software.install` 流程(§5.2)
@@ -782,6 +827,12 @@ impl Env for RealEnv {
 
     fn progress(&self, pct: u8) {
         crate::command::report_progress(&self.shared, &self.command_id, pct);
+    }
+
+    async fn power(&self) -> power::PowerState {
+        tokio::task::spawn_blocking(power::current)
+            .await
+            .unwrap_or_default()
     }
 
     async fn collect(&self) {

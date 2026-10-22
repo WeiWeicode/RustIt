@@ -35,6 +35,8 @@ struct Fake {
     progress: Mutex<Vec<u8>>,
     collected: Mutex<u32>,
     free: u64,
+    /// 依序回傳的電源狀態;用完後為「不限制」
+    power: Mutex<VecDeque<power::PowerState>>,
 }
 
 impl Fake {
@@ -58,6 +60,7 @@ impl Fake {
             progress: Mutex::new(Vec::new()),
             collected: Mutex::new(0),
             free: u64::MAX,
+            power: Mutex::new(VecDeque::new()),
         }
     }
     fn exits(self, e: &[Result<Exit, String>]) -> Self {
@@ -155,6 +158,9 @@ impl Env for Fake {
     }
     async fn collect(&self) {
         *self.collected.lock().unwrap() += 1;
+    }
+    async fn power(&self) -> power::PowerState {
+        self.power.lock().unwrap().pop_front().unwrap_or_default()
     }
 }
 
@@ -667,4 +673,78 @@ fn purge_removes_only_stale_entries() {
         fresh.exists() && paths.staging("x").exists(),
         "未超過 24 小時不刪"
     );
+}
+
+const BATTERY: power::PowerState = power::PowerState {
+    on_battery: true,
+    metered: false,
+};
+const METERED: power::PowerState = power::PowerState {
+    on_battery: false,
+    metered: true,
+};
+
+#[tokio::test]
+async fn a6_defers_until_power_returns() {
+    let content = b"a6";
+    let env = Fake::new(content);
+    *env.power.lock().unwrap() = [BATTERY, BATTERY].into_iter().collect();
+    let p = install_params(content, &[SIGNER]);
+    defer(&env, &p, power::DEFER_MAX).await.unwrap();
+    let waits = env.sleeps.lock().unwrap().clone();
+    assert_eq!(waits, vec![power::CHECK_EVERY; 2], "每 5 分鐘重新檢查");
+    assert_eq!(
+        env.progress.lock().unwrap().clone(),
+        vec![0, 0],
+        "延後期間以進度 0 讓主機重設逾時"
+    );
+}
+
+#[tokio::test]
+async fn a6_ignore_power_skips_battery_only() {
+    let content = b"a6";
+    let mut p = install_params(content, &[SIGNER]);
+    p.ignore_power = true;
+    let env = Fake::new(content);
+    *env.power.lock().unwrap() = [BATTERY].into_iter().collect();
+    defer(&env, &p, power::DEFER_MAX).await.unwrap();
+    assert!(env.sleeps.lock().unwrap().is_empty());
+
+    let env = Fake::new(content);
+    *env.power.lock().unwrap() = vec![METERED; 100].into_iter().collect();
+    let f = defer(&env, &p, Duration::from_secs(600)).await.unwrap_err();
+    assert_eq!(f.code, "DEFERRED_TIMEOUT", "計量網路不因 ignore_power 略過");
+    assert_eq!(
+        env.sleeps.lock().unwrap().len(),
+        2,
+        "上限 10 分鐘 = 檢查 2 次"
+    );
+}
+
+#[tokio::test]
+async fn a6_deadline_shorter_than_check_interval() {
+    let content = b"a6";
+    let env = Fake::new(content);
+    *env.power.lock().unwrap() = vec![BATTERY; 10].into_iter().collect();
+    let p = install_params(content, &[SIGNER]);
+    let f = defer(&env, &p, Duration::from_secs(90)).await.unwrap_err();
+    assert_eq!(f.code, "DEFERRED_TIMEOUT");
+    assert_eq!(
+        *env.sleeps.lock().unwrap(),
+        vec![Duration::from_secs(90)],
+        "不超過指令剩餘時間"
+    );
+    let f = defer(&env, &p, Duration::ZERO).await.unwrap_err();
+    assert_eq!(f.code, "DEFERRED_TIMEOUT", "已過期不等待");
+}
+
+#[test]
+fn cached_download_is_not_deferred() {
+    let content = b"cached-a6";
+    let (_d, paths) = paths();
+    let p = install_params(content, &[SIGNER]);
+    assert!(!cached(&paths, &p));
+    std::fs::create_dir_all(paths.package(PKG)).unwrap();
+    std::fs::write(paths.package(PKG).join("installer.msi"), content).unwrap();
+    assert!(cached(&paths, &p));
 }
