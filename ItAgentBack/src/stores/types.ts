@@ -449,6 +449,8 @@ export interface CommandStore {
   expirePendingBatches(createdBefore: Date, at: Date): Promise<number>;
   /** running 且所有指令都已結束 → done */
   finishBatchIfDone(batchRef: number): Promise<void>;
+  /** createdAfter 之後建立、running 且所有指令都已結束的批次 → done(不經派送器結束的指令,例如整批取消);回傳筆數 */
+  finishIdleBatches(createdAfter: Date): Promise<number>;
   /** 這些類型 sent / acked / running 的總數(全域並行上限) */
   activeOfKinds(kinds: readonly string[]): Promise<number>;
   /**
@@ -850,8 +852,8 @@ export interface SoftwareStore {
   publish(packageId: string, actor: Actor, at: Date, requestId: string): Promise<boolean>;
   /** 非 revoked → revoked;同一交易取消此套件尚未送出(queued)的 software.install */
   revoke(packageId: string, actor: Actor, at: Date, requestId: string): Promise<{ ok: boolean; canceledCommands: number }>;
-  /** 取消此套件尚未送出(queued)的 software.install,回傳筆數(檔案被換掉,M1) */
-  cancelQueuedInstalls(packageId: string, errorCode: string, at: Date): Promise<number>;
+  /** 取消此套件尚未送出(queued)的 software.install,回傳被取消指令的裝置內部 id(每筆一個,可重複;檔案被換掉,M1) */
+  cancelQueuedInstalls(packageId: string, errorCode: string, at: Date): Promise<number[]>;
   /** 此套件的 software.install 指令(新到舊) */
   installResults(packageId: string, limit: number): Promise<InstallResultRow[]>;
   /** 這台尚未結束(sent / acked / running)的 software.install 的 package_id(下載授權) */

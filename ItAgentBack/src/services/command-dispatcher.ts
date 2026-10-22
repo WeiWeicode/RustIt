@@ -182,6 +182,8 @@ export const GATED_GROUPS: Record<string, readonly string[]> = {
 };
 /** 全域並行上限補送一次最多掃幾頁(每頁 BATCH_MAX_DEVICES 筆) */
 const LIMITED_MAX_PAGES = 50;
+/** 批次收尾掃描只看最近幾天建立的批次(指令有效期限最長 7 天 + 核可 24 小時) */
+const IDLE_BATCH_LOOKBACK_MS = 8 * 24 * 3_600_000;
 /** 會送出指令的批次狀態 */
 const SENDABLE: readonly BatchState[] = ['running', 'done'];
 
@@ -254,10 +256,8 @@ export class CommandDispatcher {
   private readonly kindHooks: Record<string, KindHook>;
   private readonly approvalThreshold: number;
   private readonly limited: { kinds: readonly string[]; max: number } | null;
-  /** 進行中的批次補送(同一批次串行) */
-  private readonly refilling = new Map<number, Promise<void>>();
-  /** 全域並行上限類型的補送(串行) */
-  private limitedRefill: Promise<void> = Promise.resolve();
+  /** 進行中的補送(批次 `batch:{id}`、全域並行上限 `limited`);執行中再要求只標記重跑一次 */
+  private readonly refills = new Map<string, { ctx: Ctx; again: boolean; done: Promise<void> }>();
 
   constructor(
     private readonly store: CommandStore,
@@ -486,7 +486,15 @@ export class CommandDispatcher {
       const pkg = typeof input.params?.packageId === 'string' ? input.params.packageId.toLowerCase() : undefined;
       if (b.kind !== input.kind || b.level !== level || (pkg !== undefined && parse(b.params)?.package_id !== pkg))
         throw new AppError(422, 'ITA_IDEMPOTENCY_KEY_REUSED', 'Idempotency-Key 已用於另一筆不同的批次');
-      return result(b);
+      // 目標電腦不同也算不同的批次(資安稽核 L11;單台指令已比對 deviceId)
+      const r = await result(b);
+      const want = [...new Set(deviceIds.map((d) => d.toLowerCase()))].sort().join(',');
+      const got = r.commands
+        .map((c) => c.deviceId)
+        .sort()
+        .join(',');
+      if (got !== want) throw new AppError(422, 'ITA_IDEMPOTENCY_KEY_REUSED', 'Idempotency-Key 已用於另一筆不同的批次(目標電腦不同)');
+      return r;
     };
     if (key) {
       const existing = await this.sqlDo(ctx, 'batch.findByIdempotency', () => this.store.findBatchByIdempotency(emp, key));
@@ -760,9 +768,35 @@ export class CommandDispatcher {
     }
   }
 
-  /** 批次補送到上限;同一批次在本行程內依序執行,避免同時補送超過上限(單一實例,指南 §8.4) */
+  /**
+   * 同一個補送在本行程內不並行;執行中再被要求時只標記「結束後再跑一次」,
+   * 不把每次要求串成一條鏈(大量指令同時結束時鏈會一直累積,資安稽核 L10)
+   */
+  private coalesce(key: string, ctx: Ctx, run: (ctx: Ctx) => Promise<void>): Promise<void> {
+    const cur = this.refills.get(key);
+    if (cur) {
+      cur.ctx = ctx;
+      cur.again = true;
+      return cur.done;
+    }
+    const slot = { ctx, again: true, done: Promise.resolve() };
+    this.refills.set(key, slot);
+    slot.done = (async () => {
+      try {
+        while (slot.again) {
+          slot.again = false;
+          await run(slot.ctx);
+        }
+      } finally {
+        this.refills.delete(key);
+      }
+    })();
+    return slot.done;
+  }
+
+  /** 批次補送到上限;同一批次在本行程內不並行,避免同時補送超過上限(單一實例,指南 §8.4) */
   private refillBatch(ctx: Ctx, batchRef: number): Promise<void> {
-    const run = async () => {
+    return this.coalesce(`batch:${batchRef}`, ctx, async (ctx) => {
       try {
         const queued = await this.store.queuedForBatch(batchRef, this.now(), BATCH_MAX_DEVICES);
         // 上限在 trySend 送出前計數
@@ -771,20 +805,14 @@ export class CommandDispatcher {
       } catch (err) {
         ctx.log.warn({ err, batchRef }, '批次補送失敗,下次掃描再試');
       }
-    };
-    const next = (this.refilling.get(batchRef) ?? Promise.resolve()).then(run);
-    this.refilling.set(batchRef, next);
-    void next.then(() => {
-      if (this.refilling.get(batchRef) === next) this.refilling.delete(batchRef);
     });
-    return next;
   }
 
-  /** 全域並行上限類型的補送(有一筆結束、核可、每分鐘掃描時);串行執行 */
+  /** 全域並行上限類型的補送(有一筆結束、核可、每分鐘掃描時);不並行 */
   private refillLimited(ctx: Ctx): Promise<void> {
     const limited = this.limited;
     if (!limited) return Promise.resolve();
-    const run = async () => {
+    return this.coalesce('limited', ctx, async (ctx) => {
       try {
         // 依 id 分頁掃到底:最舊的一頁全是離線電腦時,後面在線的仍補送得到;名額已滿就提早結束
         let afterId = 0;
@@ -798,9 +826,7 @@ export class CommandDispatcher {
       } catch (err) {
         ctx.log.warn({ err }, '軟體派送補送失敗,下次掃描再試');
       }
-    };
-    this.limitedRefill = this.limitedRefill.then(run);
-    return this.limitedRefill;
+    });
   }
 
   /** 依指令類型的終態處理(P7 告警);失敗只記 warn */
@@ -967,6 +993,13 @@ export class CommandDispatcher {
       }
     }
     for (const b of batches) await this.refillBatch(ctx, b);
+    // 不經派送器結束的指令(套件被換掉時整批取消等)所屬的批次:全部結束就收尾(code-reviewer P7-1 第 7 點)
+    try {
+      const n = await this.store.finishIdleBatches(new Date(at.getTime() - IDLE_BATCH_LOOKBACK_MS));
+      if (n) ctx.log.info({ batches: n }, '批次內指令都已結束,批次收尾');
+    } catch (err) {
+      ctx.log.warn({ err }, '批次收尾掃描失敗,下次再試');
+    }
     // 全域並行上限:等待中的指令(名額釋出、離線後上線)
     await this.refillLimited(ctx);
     if (expired || timedOut) ctx.log.info({ expired, timedOut }, '指令逾期 / 逾時');

@@ -728,7 +728,9 @@ describe('SQL Server + Mongo + Redis', () => {
       pend.map((x) => [x.batchId, x.counts]),
       [[b4.batchId, { queued: 2 }]],
     );
-    const all = await cmds.listBatches({ limit: 10 });
+    // 只看本測試建立的批次(前面的 P4 測試也建立了批次)
+    const mine = new Set<string>([b1.batchId, b2.batchId, b3.batchId, b4.batchId]);
+    const all = (await cmds.listBatches({ limit: 50 })).filter((x) => mine.has(x.batchId));
     assert.deepEqual(
       all.map((x) => [x.batchId, x.state]),
       [
@@ -740,5 +742,125 @@ describe('SQL Server + Mongo + Redis', () => {
     );
     assert.deepEqual(all[2]!.counts, { canceled: 1 });
     assert.deepEqual((await cmds.listBatches({ beforeId: all[1]!.id, limit: 1 })).map((x) => x.batchId), [g2.batchId]);
+  });
+
+  it('P7 收尾:撤回記錄原狀態、整批取消回傳裝置、批次收尾掃描、D2-1 累計台數、reboot_required 起算時間', async () => {
+    const sw = new SqlSoftwareStore(() => sql.connection());
+    const cmds = new SqlCommandStore(() => sql.connection());
+    const monitor = new SqlMonitorStore(() => sql.connection());
+    const svc = new DeviceService(sql, mongo, redis, { heartbeatIntervalSec: 30 });
+    const d = await svc.identify(ctx, 'O=GigaNexus Dev,CN=PC-P7F-01', 'd'.repeat(40));
+    const d2 = await svc.identify(ctx, 'O=GigaNexus Dev,CN=PC-P7F-02', 'e'.repeat(40));
+    await svc.ingestInventory(ctx, d, structuredClone(inventoryRequest({ content_hash: '6'.repeat(64) })));
+    const pool = await sql.connection();
+    const creator = { emp: 'S000011', name: '登錄人' };
+    const reviewer = { emp: 'S000012', name: '覆核人' };
+    const at = new Date();
+    const pkgInput = (name: string) => ({
+      name,
+      version: '1.0',
+      fileName: `${name}/1.0/setup.msi`,
+      sha256: 'f'.repeat(64),
+      sizeBytes: 1024,
+      installerType: 'msi' as const,
+      installArgs: null,
+      uninstallArgs: null,
+      detectType: 'display_name' as const,
+      detectValue: `${name}%`,
+      rebootPolicy: 'never' as const,
+      licenseLimit: null,
+      notes: null,
+      actor: creator,
+      at,
+      requestId: 'int-p7f',
+    });
+    // revoked_from:撤回時記下原狀態
+    const draft = await sw.addPackage(pkgInput('ToolA'));
+    assert.equal((await sw.revoke(draft.packageId, creator, at, 'int-p7f')).ok, true);
+    const rv = (await sw.getPackage(draft.packageId))!;
+    assert.deepEqual([rv.status, rv.revokedFrom], ['revoked', 'draft']);
+    const p = await sw.addPackage(pkgInput('ToolB'));
+
+    const newCmd = (deviceRef: number, dn: string, kind = 'software.install', emp = creator.emp) => ({
+      commandId: randomUUID(),
+      deviceRef,
+      certDn: dn,
+      kind,
+      level: 'admin' as const,
+      params: JSON.stringify(installSnapshot(p)),
+      expiresAt: new Date(Date.now() + 86_400_000),
+      idempotencyKey: null,
+      createdByEmp: emp,
+      createdByName: null,
+      requestId: 'int-p7f',
+      createdAt: new Date(),
+    });
+    const newBatch = (requiresApproval: boolean, createdAt = new Date(), emp = creator.emp) => ({
+      batchId: randomUUID(),
+      kind: 'software.install',
+      level: 'admin' as const,
+      params: '{}',
+      maxConcurrent: 20,
+      requiresApproval,
+      idempotencyKey: null,
+      createdByEmp: emp,
+      createdByName: null,
+      requestId: 'int-p7f',
+      createdAt,
+    });
+
+    // 整批取消(檔案被換掉,M1):回傳被取消指令的裝置;已送出的不動;批次由收尾掃描結束
+    const b = newBatch(false);
+    const q1 = newCmd(d.id, d.certDn);
+    const q2 = newCmd(d2.id, d2.certDn);
+    await cmds.createCommands(b, [q1, q2]);
+    assert.equal((await cmds.getBatch(b.batchId))!.state, 'running');
+    const sent = (await cmds.getCommand(q1.commandId))!;
+    await cmds.transition(sent.id, ['queued'], { state: 'sent', at: new Date() });
+    assert.deepEqual(await sw.cancelQueuedInstalls(p.packageId, 'PACKAGE_FILE_CHANGED', new Date()), [d2.id]);
+    const c2 = (await cmds.getCommand(q2.commandId))!;
+    assert.deepEqual([c2.state, c2.errorCode], ['canceled', 'PACKAGE_FILE_CHANGED']);
+    // 前面測試留下的批次也可能被收尾,只看本測試的批次
+    const lookback = new Date(Date.now() - 8 * 86_400_000);
+    await cmds.finishIdleBatches(lookback);
+    assert.equal((await cmds.getBatch(b.batchId))!.state, 'running', '還有已送出的指令');
+    await cmds.transition(sent.id, ['sent'], { state: 'succeeded', at: new Date(), resultSummary: JSON.stringify({ exit_code: 3010, reboot_required: true }) });
+    assert.ok((await cmds.finishIdleBatches(lookback)) >= 1);
+    assert.equal((await cmds.getBatch(b.batchId))!.state, 'done');
+    // 待核可的批次不收尾(核可 / 駁回 / 逾期另有流程);超過回溯期間的批次不掃
+    const pend = newBatch(true);
+    const pc = newCmd(d.id, d.certDn);
+    await cmds.createCommands(pend, [pc]);
+    await cmds.transition((await cmds.getCommand(pc.commandId))!.id, ['queued'], { state: 'canceled', at: new Date() });
+    const old = newBatch(false, new Date(Date.now() - 10 * 86_400_000));
+    await cmds.createCommands(old, [{ ...newCmd(d2.id, d2.certDn), createdAt: old.createdAt }]);
+    await pool
+      .request()
+      .input('bid', old.batchId)
+      .query(`UPDATE ita.command SET state = 'canceled' WHERE batch_ref = (SELECT id FROM ita.command_batch WHERE batch_id = @bid)`);
+    await cmds.finishIdleBatches(lookback);
+    assert.deepEqual([(await cmds.getBatch(pend.batchId))!.state, (await cmds.getBatch(old.batchId))!.state], ['pending_approval', 'running']);
+
+    // D2-1:此人 24 小時內涉及的電腦台數;待核可 / 已核可批次不計,未核可的 running / done 批次與單台照計(取消的單台也計)
+    const since = new Date(Date.now() - 86_400_000);
+    const kinds = ['software.install', 'software.uninstall'];
+    assert.equal(await cmds.recentGatedTargets(creator.emp, kinds, since), 2, '未核可的 done 批次含 d、d2;待核可與 10 天前的不計');
+    const single = newCmd(d.id, d.certDn, 'software.uninstall', 'S000013');
+    await cmds.createCommands(null, [single]);
+    await cmds.transition((await cmds.getCommand(single.commandId))!.id, ['queued'], { state: 'canceled', at: new Date() });
+    assert.equal(await cmds.recentGatedTargets('S000013', kinds, since), 1, '取消的單台照計');
+    assert.equal(await cmds.recentGatedTargets('s000013', kinds, since), 1, '工號不分大小寫');
+    assert.equal(await cmds.recentGatedTargets('S000013', ['system.reboot'], since), 0, '另一組類型');
+    const ap = newBatch(true, new Date(), 'S000014');
+    await cmds.createCommands(ap, [newCmd(d.id, d.certDn, 'software.install', 'S000014'), newCmd(d2.id, d2.certDn, 'software.install', 'S000014')]);
+    assert.equal(await cmds.recentGatedTargets('S000014', kinds, since), 0, '待核可不計');
+    assert.equal(await cmds.approveBatch((await cmds.getBatch(ap.batchId))!.id, reviewer, new Date(), new Date(Date.now() + 86_400_000)), true);
+    assert.equal(await cmds.recentGatedTargets('S000014', kinds, since), 0, '已核可不計');
+
+    // reboot_required:開機時間之後成功、結果含 reboot_required 的軟體指令,取最早完成時間;沒有資產(開機時間未知)的不算
+    const t = await monitor.monitorTargets(new Date(Date.now() - 86_400_000));
+    const rb = t.find((x) => x.deviceRef === d.id)!.rebootRequiredSince;
+    assert.ok(rb && Math.abs(rb.getTime() - Date.now()) < 120_000, String(rb));
+    assert.equal(t.find((x) => x.deviceRef === d2.id)!.rebootRequiredSince, null);
   });
 });

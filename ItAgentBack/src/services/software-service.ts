@@ -6,7 +6,9 @@
  *   - draft / tested 只能派到 pilot 環的電腦(放進 / 移出 pilot 需全部公司角色,P6);revoked 不可再安裝(可移除)
  *   - software.install / software.uninstall 的 params 由這裡換成目錄快照(Agent 只信任快照,§2.2);授權數只檢查已發佈套件的安裝(§3.4)
  *   - 安裝參數字元白名單、不可指到其他檔案、不可含機密字樣(§2.3、§5.6);主機登錄、修改、建立指令時都驗
- *   - 下載只給「這台有尚未結束的此套件 software.install」的裝置;回應前複驗 SHA-256(§3.3)
+ *   - 下載只給「這台有尚未結束的此套件 software.install」的裝置;回應前複驗 SHA-256(§3.3),雜湊與內容讀同一個檔案代號(L4);
+ *     同一台同時最多 DOWNLOADS_PER_DEVICE 條(L5)
+ *   - 定期複驗(verifyFiles,M1):不符或找不到檔案時取消排隊中的安裝、開告警,之後新的安裝指令拒絕建立直到恢復一致
  * SQL 是唯一真相;下載稽核每台每套件每小時一筆。
  */
 import type { ReadStream } from 'node:fs';
@@ -134,6 +136,10 @@ const SIGNER_RE = /^[0-9a-f]{40}$/;
 export const INSTALL_TIMEOUT_SEC = 1800;
 /** 下載稽核事件:同一台同一套件多久記一次 */
 const DOWNLOAD_EVENT_MS = 3_600_000;
+/** 同一台同時下載上限(資安稽核 L5;Agent 依序執行,1 條 + 斷線後重試時上一條尚未關閉) */
+export const DOWNLOADS_PER_DEVICE = 2;
+/** 定期複驗發現不符時,最多在幾台(被取消安裝的裝置)開告警 */
+const TAMPER_ALERT_MAX = 20;
 /** 詳情顯示的測試結果 / 已安裝電腦筆數 */
 const DETAIL_LIMIT = 200;
 
@@ -367,6 +373,11 @@ export class SoftwareService {
   private readonly onPackageTampered: NonNullable<SoftwareServiceOptions['onPackageTampered']>;
   /** 下載稽核事件的最後記錄時間(裝置:套件 → 毫秒) */
   private readonly downloadLogged = new Map<string, number>();
+  /** 進行中的下載數(裝置內部 id → 條數;L5) */
+  private readonly downloading = new Map<number, number>();
+  /** 安裝檔與登錄不符或找不到的套件(packageId → 原因);新的安裝指令拒絕建立,恢復一致時解除(M1;單一實例,重啟後由下一輪複驗重建) */
+  private readonly fileChanged = new Map<string, 'changed' | 'missing'>();
+  private verifying = false;
 
   constructor(
     private readonly store: SoftwareStore,
@@ -684,6 +695,13 @@ export class SoftwareService {
     }
     if (action === 'install' && pkg.status !== 'draft' && pkg.signerThumbprints.length === 0)
       throw new AppError(409, 'ITA_PACKAGE_INVALID', '套件沒有預期簽章者');
+    const changed = action === 'install' ? this.fileChanged.get(pkg.packageId) : undefined;
+    if (changed)
+      throw new AppError(
+        409,
+        'ITA_PACKAGE_CHANGED',
+        changed === 'missing' ? '軟體庫找不到此套件的安裝檔,請確認檔案或重新登錄' : '安裝檔內容與登錄不符,請重新登錄新版本',
+      );
     return action === 'install' ? installSnapshot(pkg, { ignorePower: params.ignorePower === true }) : uninstallSnapshot(pkg);
   }
 
@@ -731,29 +749,32 @@ export class SoftwareService {
       ctx.log.error({ packageId: id, fileName: pkg.fileName }, '軟體庫找不到已登錄的安裝檔(掛載中斷或檔案被移走)');
       throw new AppError(503, 'ITA_PACKAGE_UNAVAILABLE', '安裝檔暫時無法讀取,請稍後重試');
     }
-    const sha = await this.files.sha256(f);
+    // 單台同時下載上限(資安稽核 L5):Agent 依序執行軟體指令,正常只有一條;超過回 429 讓 Agent 稍後重試
+    const busy = this.downloading.get(device.id) ?? 0;
+    if (busy >= DOWNLOADS_PER_DEVICE) {
+      ctx.log.warn({ deviceId: device.deviceId, packageId: id, busy }, '同一台同時下載超過上限,拒絕');
+      throw new AppError(429, 'ITA_DOWNLOAD_BUSY', '此電腦已有下載進行中,請稍後重試');
+    }
+    // 雜湊與回應內容讀同一個檔案代號(L4)
+    const opened = await this.files.openChecked(f);
+    let sha: string;
+    try {
+      sha = await opened.sha256();
+    } catch (err) {
+      await opened.close();
+      throw err;
+    }
     if (sha !== pkg.sha256 || f.size !== pkg.sizeBytes) {
-      ctx.log.error({ packageId: id, fileName: pkg.fileName, expected: pkg.sha256, actual: sha }, '安裝檔內容與登錄不符,拒絕下發(需重新登錄新版本)');
-      // 其餘尚未送出的安裝一併取消(會一台一台下載失敗),需重新登錄新版本(M1)
-      const canceled = await this.store.cancelQueuedInstalls(id, 'PACKAGE_FILE_CHANGED', this.now()).catch((err: unknown) => {
-        ctx.log.warn({ err, packageId: id }, '取消此套件排隊中的安裝失敗');
-        return 0;
-      });
-      await this.onPackageTampered(ctx, device.id, {
-        canceledCommands: canceled,
-        packageId: id,
-        name: pkg.name,
-        version: pkg.version,
-        fileName: pkg.fileName,
-        expectedSha256: pkg.sha256,
-        actualSha256: sha,
-        expectedSize: pkg.sizeBytes,
-        actualSize: f.size,
-      });
+      await opened.close();
+      await this.packageFileChanged(ctx, pkg, { actualSha256: sha, actualSize: f.size }, device.id);
       throw new AppError(503, 'ITA_PACKAGE_CHANGED', '安裝檔內容與登錄不符');
     }
+    this.fileChanged.delete(id);
     const r = parseRange(range, f.size);
-    if (r === 'unsatisfiable') return { status: 416, headers: { 'content-range': `bytes */${f.size}` }, stream: null };
+    if (r === 'unsatisfiable') {
+      await opened.close();
+      return { status: 416, headers: { 'content-range': `bytes */${f.size}` }, stream: null };
+    }
     const headers: Record<string, string> = {
       'content-type': 'application/octet-stream',
       'accept-ranges': 'bytes',
@@ -767,16 +788,101 @@ export class SoftwareService {
     if ((!r || r.start === 0) && Date.now() - last >= DOWNLOAD_EVENT_MS) {
       this.downloadLogged.set(key, Date.now());
       if (this.downloadLogged.size > 10_000) this.downloadLogged.clear();
-      await this.sqlDo(ctx, 'event.add(package_download)', () =>
-        this.devices.addEvent(device, 'package_download', `下載 ${pkg.name} ${pkg.version}(${id},${f.size} bytes)`, ctx.requestId),
-      );
+      try {
+        await this.sqlDo(ctx, 'event.add(package_download)', () =>
+          this.devices.addEvent(device, 'package_download', `下載 ${pkg.name} ${pkg.version}(${id},${f.size} bytes)`, ctx.requestId),
+        );
+      } catch (err) {
+        await opened.close();
+        throw err;
+      }
     }
     ctx.log.info({ deviceId: device.deviceId, packageId: id, start: r?.start ?? 0, end: r?.end ?? f.size - 1 }, '下載軟體套件');
-    if (!r) return { status: 200, headers: { ...headers, 'content-length': String(f.size) }, stream: this.files.open(f.file) };
+    const stream = opened.stream(r);
+    // 串流結束(含中斷)才釋放名額
+    this.downloading.set(device.id, (this.downloading.get(device.id) ?? 0) + 1);
+    stream.once('close', () => {
+      const n = (this.downloading.get(device.id) ?? 1) - 1;
+      if (n > 0) this.downloading.set(device.id, n);
+      else this.downloading.delete(device.id);
+    });
+    if (!r) return { status: 200, headers: { ...headers, 'content-length': String(f.size) }, stream };
     return {
       status: 206,
       headers: { ...headers, 'content-length': String(r.end - r.start + 1), 'content-range': `bytes ${r.start}-${r.end}/${f.size}` },
-      stream: this.files.open(f.file, r),
+      stream,
     };
+  }
+
+  /**
+   * 安裝檔與登錄不符(下載時複驗或定期複驗,M1):記住此套件(新的安裝指令拒絕建立)、取消尚未送出的安裝,
+   * 在要求下載的裝置(定期複驗時為被取消安裝的裝置,最多 TAMPER_ALERT_MAX 台)開 software_file_tampered 告警
+   */
+  private async packageFileChanged(
+    ctx: Ctx,
+    pkg: PackageRecord,
+    actual: { actualSha256: string | null; actualSize: number | null },
+    deviceRef?: number,
+  ): Promise<void> {
+    const id = pkg.packageId;
+    this.fileChanged.set(id, actual.actualSha256 === null ? 'missing' : 'changed');
+    ctx.log.error(
+      { packageId: id, fileName: pkg.fileName, expected: pkg.sha256, actual: actual.actualSha256, expectedSize: pkg.sizeBytes, actualSize: actual.actualSize },
+      actual.actualSha256 === null ? '軟體庫找不到已登錄的安裝檔' : '安裝檔內容與登錄不符,拒絕下發(需重新登錄新版本)',
+    );
+    // 其餘尚未送出的安裝一併取消(會一台一台下載失敗),需重新登錄新版本(M1)
+    const canceled = await this.store.cancelQueuedInstalls(id, 'PACKAGE_FILE_CHANGED', this.now()).catch((err: unknown) => {
+      ctx.log.warn({ err, packageId: id }, '取消此套件排隊中的安裝失敗');
+      return [] as number[];
+    });
+    const detail = {
+      canceledCommands: canceled.length,
+      packageId: id,
+      name: pkg.name,
+      version: pkg.version,
+      fileName: pkg.fileName,
+      expectedSha256: pkg.sha256,
+      expectedSize: pkg.sizeBytes,
+      ...actual,
+    };
+    const targets = deviceRef !== undefined ? [deviceRef] : [...new Set(canceled)].slice(0, TAMPER_ALERT_MAX);
+    for (const ref of targets) await this.onPackageTampered(ctx, ref, detail);
+    // 取消的指令可能屬於批次:由指令派送器的每分鐘掃描收尾(finishIdleBatches)
+  }
+
+  /**
+   * 定期複驗軟體庫(資安稽核 M1):未撤回的套件逐一重新計算 SHA-256(不用快取),不符或找不到檔案時同下載複驗的處理;
+   * 恢復一致時解除。同一時間只跑一輪;回傳檢查與不符的套件數
+   */
+  async verifyFiles(ctx: Ctx): Promise<{ checked: number; changed: number }> {
+    const result = { checked: 0, changed: 0 };
+    if (this.verifying) return result;
+    this.verifying = true;
+    try {
+      const pkgs = (await this.store.listPackages({})).filter((p) => p.status !== 'revoked');
+      for (const pkg of pkgs) {
+        result.checked++;
+        try {
+          const f = await this.files.resolve(pkg.fileName);
+          const sha = f ? await this.files.sha256Fresh(f) : null;
+          if (f && sha === pkg.sha256 && f.size === pkg.sizeBytes) {
+            if (this.fileChanged.delete(pkg.packageId)) ctx.log.info({ packageId: pkg.packageId }, '安裝檔已恢復與登錄一致');
+            continue;
+          }
+          result.changed++;
+          // 已知不符的不重複取消與開告警
+          if (!this.fileChanged.has(pkg.packageId)) await this.packageFileChanged(ctx, pkg, { actualSha256: sha, actualSize: f?.size ?? null });
+        } catch (err) {
+          // 掛載中斷等(503):這一輪略過,不當成被竄改
+          ctx.log.warn({ err, packageId: pkg.packageId }, '定期複驗安裝檔失敗,下次再試');
+        }
+      }
+      ctx.log.info(result, '軟體庫定期複驗完成');
+    } catch (err) {
+      ctx.log.warn({ err }, '軟體庫定期複驗失敗,下次再試');
+    } finally {
+      this.verifying = false;
+    }
+    return result;
   }
 }

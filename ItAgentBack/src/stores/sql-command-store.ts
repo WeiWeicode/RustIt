@@ -432,6 +432,14 @@ export class SqlCommandStore implements CommandStore, CommandFileStore {
         AND NOT EXISTS (SELECT 1 FROM ita.command WHERE batch_ref = @batch AND state IN ('queued', 'sent', 'acked', 'running'))`);
   }
 
+  async finishIdleBatches(createdAfter: Date): Promise<number> {
+    const r = await (await this.request()).input('after', sql.DateTime2(3), createdAfter).query(`
+      UPDATE b SET state = 'done' FROM ita.command_batch b
+      WHERE b.state = 'running' AND b.created_at >= @after
+        AND NOT EXISTS (SELECT 1 FROM ita.command c WHERE c.batch_ref = b.id AND c.state IN ('queued', 'sent', 'acked', 'running'))`);
+    return r.rowsAffected[0] ?? 0;
+  }
+
   private kindsIn(req: sql.Request, kinds: readonly string[]): string {
     return kinds.map((k, i) => (req.input(`kd${i}`, sql.VarChar(64), k), `@kd${i}`)).join(', ');
   }

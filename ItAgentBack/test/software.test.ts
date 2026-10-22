@@ -5,7 +5,8 @@
  * 經記憶體儲存;SQL 語句由整合測試涵蓋。
  */
 import assert from 'node:assert/strict';
-import { readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { readFileSync, symlinkSync, writeFileSync, type ReadStream } from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { loadGatewayEnv, loadMonitorEnv, type GatewayIdentity } from '@giganexus/backend-sdk';
@@ -19,6 +20,7 @@ import {
   deployDenied,
   detectErrors,
   displayNameLike,
+  DOWNLOADS_PER_DEVICE,
   installSnapshot,
   qualifyingSigners,
   type RegisterPackageInput,
@@ -180,6 +182,21 @@ describe('參數白名單、偵測規則、軟體庫路徑(純函式)', () => {
       (await files.list()).map((f) => f.fileName),
       [FILE],
     );
+  });
+
+  it('L4:resolve 之後檔案被換掉,開檔時 503;開檔後雜湊與內容讀同一個檔案代號', async () => {
+    const dir = softwareDir();
+    dir.put(FILE, CONTENT);
+    const files = new SoftwareFiles(dir.root);
+    const f = (await files.resolve(FILE))!;
+    dir.put(FILE, 'MSI-replaced-longer');
+    await assert.rejects(files.openChecked(f), { code: 'ITA_FILES_CHANGED' });
+    const g = (await files.resolve(FILE))!;
+    const opened = await files.openChecked(g);
+    assert.equal(await opened.sha256(), createHash('sha256').update('MSI-replaced-longer').digest('hex'));
+    const chunks: Buffer[] = [];
+    for await (const c of opened.stream({ start: 4, end: 11 })) chunks.push(c as Buffer);
+    assert.equal(Buffer.concat(chunks).toString(), 'replaced');
   });
 });
 
@@ -669,6 +686,52 @@ describe('軟體目錄、覆核與派送(SoftwareService + CommandDispatcher)', 
     await env.commands.sweep(ctx);
     assert.equal(conn.sent.filter((m) => m.type === 'command' && m.id === cmd.commandId).length, 1);
   });
+
+  it('M1 定期複驗:檔案被換掉 → 取消排隊中的安裝、開告警、拒絕新的安裝;恢復後解除;批次由掃描收尾', async () => {
+    const r = await register();
+    const batch = await env.software.deploy(ctx, IT, r.packageId, { action: 'install', deviceIds: [pilot.deviceId] });
+    assert.equal(batch.commands[0]!.state, 'queued', 'pilot 離線,排隊中');
+    assert.deepEqual(await env.software.verifyFiles(ctx), { checked: 1, changed: 0 });
+    env.dir.put(FILE, 'MSI-tampered!!');
+    assert.deepEqual(await env.software.verifyFiles(ctx), { checked: 1, changed: 1 });
+    const c = env.commandStore.commands.find((x) => x.commandId === batch.commands[0]!.commandId)!;
+    assert.deepEqual([c.state, c.errorCode], ['canceled', 'PACKAGE_FILE_CHANGED']);
+    const alerts = env.monitor.alerts.filter((a) => a.rule === 'software_file_tampered');
+    assert.deepEqual(
+      alerts.map((a) => [a.deviceRef, JSON.parse(a.detail ?? '{}').actualSha256 !== null]),
+      [[pilot.id, true]],
+      '被取消安裝的裝置開告警',
+    );
+    await assert.rejects(install(pilot, r.packageId), { code: 'ITA_PACKAGE_CHANGED' });
+    // 已知不符:下一輪不重複取消、不重複開告警
+    await env.software.verifyFiles(ctx);
+    assert.equal(env.monitor.alerts.filter((a) => a.rule === 'software_file_tampered').length, 1);
+    // 不經派送器取消的指令:批次由每分鐘掃描收尾
+    const b = () => env.commandStore.batches.find((x) => x.batchId === batch.batchId)!;
+    assert.equal(b().state, 'running');
+    await env.commands.sweep(ctx);
+    assert.equal(b().state, 'done');
+    // 找不到檔案也算不符;放回原檔後解除
+    env.dir.put(FILE, CONTENT);
+    await env.software.verifyFiles(ctx);
+    assert.equal((await install(pilot, r.packageId)).kind, 'software.install');
+  });
+
+  it('L11:同一個 Idempotency-Key 用在不同的目標電腦 → 422;相同電腦(順序不同)回傳同一批', async () => {
+    const id = await published();
+    const a = await env.software.deploy(ctx, IT, id, { action: 'install', deviceIds: [pilot.deviceId, other.deviceId] }, 'key-1');
+    const again = await env.software.deploy(ctx, IT, id, { action: 'install', deviceIds: [other.deviceId.toUpperCase(), pilot.deviceId] }, 'key-1');
+    assert.equal(again.batchId, a.batchId);
+    await assert.rejects(env.software.deploy(ctx, IT, id, { action: 'install', deviceIds: [pilot.deviceId] }, 'key-1'), { code: 'ITA_IDEMPOTENCY_KEY_REUSED' });
+  });
+
+  it('L10:同時大量要求補送,只合併成「執行中 + 再跑一次」', async () => {
+    await register();
+    env.commandStore.calls.length = 0;
+    await Promise.all(Array.from({ length: 30 }, () => env.commands.sweep(ctx)));
+    const scans = env.commandStore.calls.filter((n) => n === 'activeOfKinds').length;
+    assert.ok(scans <= 2, `補送執行 ${scans} 次`);
+  });
 });
 
 describe('套件下載 API 與管理 API', () => {
@@ -816,5 +879,27 @@ describe('套件下載 API 與管理 API', () => {
     await env.commands.create(ctx, IT, 'admin', device.deviceId, { kind: 'software.install', params: { packageId: r.packageId } });
     await env.software.revoke(ctx, IT, r.packageId);
     assert.equal((await agent.inject({ url: `/agent/v1/packages/${r.packageId}`, headers })).statusCode, 404);
+  });
+
+  it('L5:同一台同時下載超過上限 → 429;串流關閉後釋放名額', async () => {
+    const r = await env.software.register(ctx, IT, {
+      name: '7-Zip',
+      version: '24.09',
+      fileName: FILE,
+      installerType: 'msi',
+      detectType: 'display_name',
+      detectValue: '7-Zip%',
+    });
+    await env.service.connected(ctx, device, new FakeConnection());
+    await env.commands.create(ctx, IT, 'admin', device.deviceId, { kind: 'software.install', params: { packageId: r.packageId } });
+    const open: ReadStream[] = [];
+    for (let i = 0; i < DOWNLOADS_PER_DEVICE; i++) open.push((await env.software.download(ctx, device, r.packageId, undefined)).stream!);
+    await assert.rejects(env.software.download(ctx, device, r.packageId, undefined), { status: 429, code: 'ITA_DOWNLOAD_BUSY' });
+    const closed = new Promise<void>((ok) => open[0]!.once('close', () => ok()));
+    open[0]!.destroy();
+    await closed;
+    const d = await env.software.download(ctx, device, r.packageId, undefined);
+    assert.equal(d.status, 200);
+    for (const s of [...open.slice(1), d.stream!]) s.destroy();
   });
 });

@@ -129,13 +129,13 @@ export class MemorySoftwareStore implements SoftwareStore {
     return true;
   }
   async cancelQueuedInstalls(packageId: string, errorCode: string, at: Date) {
-    let n = 0;
+    const refs: number[] = [];
     for (const c of this.commands.commands)
       if (c.kind === 'software.install' && c.state === 'queued' && this.pkgParam(c.params) === packageId) {
         Object.assign(c, { state: 'canceled', errorCode, finishedAt: at });
-        n++;
+        refs.push(c.deviceRef);
       }
-    return n;
+    return refs;
   }
   async revoke(packageId: string, actor: Actor, at: Date) {
     const p = this.packages.find((x) => x.packageId === packageId);
