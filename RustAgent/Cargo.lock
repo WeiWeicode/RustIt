@@ -3546,7 +3546,7 @@ dependencies = [
 
 [[package]]
 name = "rustit-watchdog"
-version = "0.3.3"
+version = "0.3.5"
 dependencies = [
  "chrono",
  "embed-resource",

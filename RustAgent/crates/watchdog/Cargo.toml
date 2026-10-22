@@ -1,6 +1,6 @@
 [package]
 name = "rustit-watchdog"
-version = "0.3.3"
+version = "0.3.5"
 edition = "2024"
 description = "GigaNexus 端點 Watchdog:看守 Agent 服務(重啟、卡住、被停止 / 改設定)並自己經 :9443 上報;升級 Agent(下載、驗證、替換、失敗還原)(RustIt PLATFORM-PLAN P5、P6,ENDPOINT-AGENT-GUIDE §7)"
 

@@ -52,7 +52,7 @@
         "busy": {
           "type": "string",
           "enum": ["software"],
-          "description": "Agent 正在執行不可中斷的工作(software:software.* 執行中,含延後下載與等候;P7)。Watchdog 0.3.3 起看到就延後升級 Agent;沒有此欄位 = 不忙"
+          "description": "Agent 正在執行不可中斷的工作(software:software.* 執行中,含延後下載與等候;P7)。Watchdog 0.3.5 起看到就延後升級 Agent;沒有此欄位 = 不忙"
         }
       }
     },
