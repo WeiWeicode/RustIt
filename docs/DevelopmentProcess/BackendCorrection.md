@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。本檔自 P7-1 起記錄 `ItAgentBack/` 的修改,先前的後端變更記在 `NewFeatures.md` / `BugFix.md`。
 
+## 2026-10-22 P7-4-1 NAS 唯讀掛載帳密腳本
+- 內容:新增 `host2-set-nas-credentials.sh`(需求方在主機 2 WSL 以 sudo 執行,AI 不經手帳密):帳密以隱藏輸入寫入 root 專屬的 `/srv/giganexus/nas-secrets/rustit-nas.cred`(0400,不放 `ita-secrets`,避免被 chown 給容器內 node);以 CIFS 唯讀(`ro,nosuid,nodev,noexec`)掛載 `//10.10.130.31/docker-folder/RustIT` 到 `/srv/giganexus/nas-rustit`,檢查 `releases/`、`software/` 並做寫入測試確認唯讀;印出 `ita.env` 的 `ITA_RELEASES_HOST_DIR` / `ITA_SOFTWARE_HOST_DIR` 與 fstab 建議行,不自動改 `ita.env`、fstab 與 compose(compose 已支援這兩個變數,切換由需求方決定)。
+- 檔案:`ItAgentBack/deploy/host2-set-nas-credentials.sh`、`docs/PROJECT-MAP.md`、`docs/HANDOFF.md`
+- 驗證:`sh -n` 語法檢查通過;尚未在主機 2 執行(需 NAS 帳密與 cifs-utils)。
+
 ## 2026-10-22 P7-3 新增 system.reboot.cancel 指令類型
 - 內容:`ItAgentBack/src/commands/kinds.ts` 新增 `system.reboot.cancel`(admin、無參數 `NO_PARAMS`、有效 1 小時 / 逾時 5 分鐘、每台未結束 1 筆);不受串行與累計核可限制(取消不造成破壞)。需求方 2026-10-22 決定 M2(設計 §8.1.3);Agent 端 0.9.0 實作(`AgentCorrection.md` 同日記錄)。部署後 GigaItApp 才能使用,「取消重新開機」按鈕屬 P7-5。
 - 檔案:`ItAgentBack/src/commands/kinds.ts`、`ItAgentBack/test/contract.test.ts`、`docs/contracts/examples/ws-command-system-reboot-cancel.sample.json`(commit `1b383f7`)、`docs/contracts/command-kinds.md`。
