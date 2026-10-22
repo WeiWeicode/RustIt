@@ -52,6 +52,8 @@ const LOG_FILE_PREFIX: &str = "agent-";
 const UPLOAD_ATTEMPTS: u32 = 3;
 /// kv:執行中的 agent.restart 指令(重新啟動後回報 succeeded)
 const RESTART_KEY: &str = "restart_command";
+/// kv:已排程的 system.reboot 指令(排程前寫入;重開機後回報 succeeded,不誤報為中途停止)
+const REBOOT_KEY: &str = "reboot_command";
 /// 已回報的指令紀錄保留天數(大於最長有效期限 1 天,才能去重)
 pub const COMMAND_LOG_DAYS: i64 = 7;
 /// 訊息框標題固定前綴(不可由操作人覆寫,避免偽裝成系統或其他程式的對話框)
@@ -123,27 +125,38 @@ pub(crate) fn report_progress(shared: &Shared, id: &str, pct: u8) {
 
 /// 啟動時:上次執行的 agent.restart 回報成功;其他執行到一半的指令(Agent 中途被結束)回報失敗;清除舊紀錄
 pub fn recover(shared: &Shared) {
-    let (restart, unfinished) = {
+    let (restart, reboot, unfinished) = {
         let store = shared.store.lock();
-        let restart = store
-            .get(RESTART_KEY)
-            .ok()
-            .flatten()
-            .filter(|v| !v.is_empty());
-        if restart.is_some()
-            && let Err(e) = store.set(RESTART_KEY, "")
-        {
-            warn!("無法清除重新啟動紀錄:{e}");
-        }
+        let take = |key: &str| {
+            let v = store.get(key).ok().flatten().filter(|v| !v.is_empty());
+            if v.is_some()
+                && let Err(e) = store.set(key, "")
+            {
+                warn!("無法清除 {key} 紀錄:{e}");
+            }
+            v
+        };
+        let (restart, reboot) = (take(RESTART_KEY), take(REBOOT_KEY));
         let before = (chrono::Utc::now() - chrono::Duration::days(COMMAND_LOG_DAYS))
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         if let Err(e) = store.purge_command_log(&before) {
             warn!("無法清除舊的指令紀錄:{e}");
         }
-        (restart, store.command_unfinished().unwrap_or_default())
+        (
+            restart,
+            reboot,
+            store.command_unfinished().unwrap_or_default(),
+        )
     };
     for id in unfinished {
-        if restart.as_deref() == Some(id.as_str()) {
+        if reboot.as_deref() == Some(id.as_str()) {
+            // 排程後、回報前就關機(delay 0):排程已成功
+            info!("指令 {id} 排程的重新開機已執行");
+            report(shared, &id, "succeeded", |u| {
+                u.progress = Some(100);
+                u.result = Some(json!({ "rebooted": true, "recovered_at": now_rfc3339() }));
+            });
+        } else if restart.as_deref() == Some(id.as_str()) {
             info!("已依指令 {id} 重新啟動");
             report(shared, &id, "succeeded", |u| {
                 u.progress = Some(100);
@@ -434,17 +447,33 @@ async fn system_reboot(
         return Err(fail("EXPIRED", "等待前一個指令時已超過有效期限,不執行"));
     }
     let (title, text) = reboot::notice(&params, issued_by);
-    // 訊息框不等待使用者按下;沒有登入者(NO_ACTIVE_SESSION)照常排程
-    let (t, x) = (title.clone(), text.clone());
-    let notified = matches!(
-        tokio::task::spawn_blocking(move || wts::send_message(&t, &x, 0)).await,
-        Ok(Ok(_))
-    );
+    // 先排程,成功後才顯示訊息框:已有排程(1190)或關機中(1115)而失敗時,不讓使用者看到不會發生的倒數
+    if let Err(e) = shared.store.lock().set(REBOOT_KEY, id) {
+        return Err(fail(
+            "EXECUTION_FAILED",
+            format!("無法記錄重新開機指令:{e}"),
+        ));
+    }
     let (sp, msg) = (params.clone(), format!("{title}\n{text}"));
-    tokio::task::spawn_blocking(move || reboot::schedule(&sp, &msg))
+    let scheduled = tokio::task::spawn_blocking(move || reboot::schedule(&sp, &msg))
         .await
-        .map_err(|e| fail("EXECUTION_FAILED", e.to_string()))?
-        .map_err(|e| fail("EXECUTION_FAILED", e))?;
+        .map_err(|e| e.to_string())
+        .and_then(|r| r);
+    if let Err(e) = scheduled {
+        // 沒排成:清掉紀錄,開機後不誤報成功
+        if let Err(e) = shared.store.lock().set(REBOOT_KEY, "") {
+            warn!("無法清除重新開機紀錄:{e}");
+        }
+        return Err(fail("EXECUTION_FAILED", e));
+    }
+    // 訊息框不等待使用者按下;沒有登入者(NO_ACTIVE_SESSION)只記錄。delay 0 時系統已在關機,不顯示
+    let notified = params.delay_sec > 0 && {
+        let (t, x) = (title.clone(), text.clone());
+        matches!(
+            tokio::task::spawn_blocking(move || wts::send_message(&t, &x, 0)).await,
+            Ok(Ok(_))
+        )
+    };
     info!(
         "指令 {id}:已排程 {} 秒後重新開機(force = {},訊息框 {})",
         params.delay_sec,
@@ -726,9 +755,30 @@ struct MessageParams {
 }
 
 /// 控制字元(text 允許換行)與雙向文字控制字元:可倒轉顯示、偽裝網址
-fn unsafe_char(c: char, allow_newline: bool) -> bool {
+pub(crate) fn unsafe_char(c: char, allow_newline: bool) -> bool {
     (c.is_control() && !(allow_newline && c == '\n'))
-        || matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+        || matches!(
+            c,
+            // 格式字元(Cf):軟連字號、阿拉伯字母標記、零寬字元、雙向文字控制、BOM、行內注解、標籤字元
+            '\u{00AD}'
+                | '\u{061C}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'..='\u{206F}'
+                | '\u{FEFF}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{E0000}'..='\u{E007F}'
+                // 行分隔、段落分隔(Zl、Zp):單行欄位不可換行
+                | '\u{2028}'
+                | '\u{2029}'
+        )
+}
+
+/// 顯示在訊息框的發送人工號:英數字 1–16 字(主機送來的 issued_by 不採信,不符就不顯示,資安 P7-3 M3)
+pub(crate) fn sender_label(issued_by: Option<&str>) -> Option<&str> {
+    issued_by
+        .filter(|e| (1..=16).contains(&e.len()) && e.bytes().all(|b| b.is_ascii_alphanumeric()))
 }
 
 /// 參數已由主機驗證;版本差異或主機被繞過時仍檢查,不符回 INVALID_PARAMS。
@@ -751,7 +801,7 @@ fn message_params(p: &Value, issued_by: Option<&str>) -> Result<MessageParams, F
         Some(t) => format!("{TITLE_PREFIX}{t}"),
         None => TITLE_PREFIX.to_string(),
     };
-    let text = match issued_by {
+    let text = match sender_label(issued_by) {
         Some(emp) if !emp.is_empty() => format!("{text}\n\n(發送人:IT {emp})"),
         _ => text.to_string(),
     };

@@ -1008,4 +1008,25 @@ async fn reboot_policy_required_marks_result() {
         "reboot_policy": "always"
     }));
     assert_eq!(bad.unwrap_err().code, "INVALID_PARAMS");
+    // 失敗、1638 都不因政策標記重新開機
+    for exit in [Ok(Exit::Code(1603)), Ok(Exit::Code(1638))] {
+        let env = Fake::new(content).exits(&[exit]);
+        let r = match run_install(&env, &p, &paths).await {
+            Ok(v) => v,
+            Err(f) => f.result.unwrap(),
+        };
+        assert_eq!(r["reboot_required"], false, "{r}");
+    }
+    let not_string = parse_install(&json!({
+        "package_id": PKG,
+        "name": "7-Zip",
+        "version": "24.09",
+        "url": format!("/agent/v1/packages/{PKG}"),
+        "sha256": sha(content),
+        "size_bytes": content.len(),
+        "installer_type": "msi",
+        "detect": { "type": "display_name", "value": "7-Zip%" },
+        "reboot_policy": true
+    }));
+    assert_eq!(not_string.unwrap_err().code, "INVALID_PARAMS", "非字串拒絕");
 }

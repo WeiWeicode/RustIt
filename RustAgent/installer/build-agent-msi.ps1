@@ -47,6 +47,8 @@ $stage = Join-Path $root "target\msi-stage\$Env"
 New-Item -ItemType Directory -Force $stage | Out-Null
 if ($TrustedSigners.Count -eq 0) { Write-Warning '沒有 -TrustedSigners:安裝後端點會拒絕任何升級檔(SIGNER_NOT_TRUSTED)' }
 $signers = ($TrustedSigners | ForEach-Object { '"' + $_.ToLower() + '"' }) -join ', '
+$overlap = @($SoftwareSigners | Where-Object { $TrustedSigners -contains $_ })
+if ($overlap.Count -gt 0) { Write-Warning "同一指紋同時在 -TrustedSigners 與 -SoftwareSigners:派送用的憑證也能升級 Agent,抵銷兩份清單分開的目的($($overlap -join ', '))" }
 if ($SoftwareSigners.Count -eq 0) { Write-Warning '沒有 -SoftwareSigners:安裝後端點會拒絕任何派送的軟體(SIGNER_NOT_TRUSTED)' }
 $swSigners = ($SoftwareSigners | ForEach-Object { '"' + $_.ToLower() + '"' }) -join ', '
 $toml = @"

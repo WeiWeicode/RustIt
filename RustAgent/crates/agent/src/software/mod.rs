@@ -284,10 +284,11 @@ pub fn parse_install(p: &Value) -> Result<Install, Failure> {
             .collect::<Result<_, _>>()?,
         _ => return Err(invalid(format!("signer_thumbprints 最多 {MAX_SIGNERS} 個"))),
     };
-    let reboot_required_by_policy = match p["reboot_policy"].as_str() {
-        None | Some("never") => false,
-        Some("required") => true,
-        Some(_) => return Err(invalid("reboot_policy 需 never / required")),
+    let reboot_required_by_policy = match &p["reboot_policy"] {
+        Value::Null => false,
+        Value::String(s) if s == "never" => false,
+        Value::String(s) if s == "required" => true,
+        _ => return Err(invalid("reboot_policy 需 never / required")),
     };
     let ignore_power = match &p["ignore_power"] {
         Value::Null => false,
@@ -721,7 +722,7 @@ pub async fn install(
     let tail = log_tail(&log);
     let mut result = json!({
         "exit_code": code,
-        "reboot_required": matches!(code, 3010 | 1641) || p.reboot_required_by_policy,
+        "reboot_required": matches!(code, 3010 | 1641),
         "signer": signer,
         "signer_subject": subject,
         "already_installed": code == 1638,
@@ -748,6 +749,10 @@ pub async fn install(
             ),
             result,
         ));
+    }
+    // 重開機政策 required:只在安裝成功且不是「已安裝同版本」(1638)時標記(失敗或沒裝東西不需要重開機)
+    if p.reboot_required_by_policy && code != 1638 {
+        result["reboot_required"] = json!(true);
     }
     env.collect().await;
     info!("{} {} 安裝完成(結束代碼 {code})", p.name, p.version);

@@ -22,10 +22,9 @@ pub struct Params {
     pub force: bool,
 }
 
-/// 控制字元與雙向文字控制字元(單行:換行也不允許)
+/// 控制字元與雙向文字控制字元(與 message.show 同一套規則;單行,換行也不允許)
 fn unsafe_char(c: char) -> bool {
-    c.is_control()
-        || matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+    crate::command::unsafe_char(c, false)
 }
 
 /// 參數已由主機驗證;版本差異或主機被繞過時仍檢查,不符回錯誤訊息(INVALID_PARAMS)
@@ -40,7 +39,9 @@ pub fn parse(p: &Value) -> Result<Params, String> {
     let message = match &p["message"] {
         Value::Null => None,
         Value::String(s)
-            if !s.is_empty() && s.chars().count() <= MESSAGE_MAX && !s.chars().any(unsafe_char) =>
+            if !s.trim().is_empty()
+                && s.chars().count() <= MESSAGE_MAX
+                && !s.chars().any(unsafe_char) =>
         {
             Some(s.clone())
         }
@@ -78,7 +79,7 @@ pub fn notice(p: &Params, issued_by: Option<&str>) -> (String, String) {
         text.push('\n');
         text.push_str(m);
     }
-    if let Some(emp) = issued_by.filter(|e| !e.is_empty()) {
+    if let Some(emp) = crate::command::sender_label(issued_by) {
         text.push_str(&format!("\n\n(發送人:IT {emp})"));
     }
     (format!("{PREFIX}重新開機"), text)
@@ -94,7 +95,7 @@ pub fn result(p: &Params, notified: bool) -> Value {
     })
 }
 
-/// 排程重新開機(阻塞):啟用 SeShutdownPrivilege → InitiateSystemShutdownExW(重新開機、計畫性、原因:應用程式 / 安裝)
+/// 排程重新開機(阻塞):啟用 SeShutdownPrivilege → InitiateSystemShutdownExW(重新開機、計畫性、原因:其他)
 #[cfg(windows)]
 pub fn schedule(p: &Params, text: &str) -> Result<(), String> {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LUID};
@@ -103,8 +104,8 @@ pub fn schedule(p: &Params, text: &str) -> Result<(), String> {
         TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
     };
     use windows_sys::Win32::System::Shutdown::{
-        InitiateSystemShutdownExW, SHTDN_REASON_FLAG_PLANNED, SHTDN_REASON_MAJOR_APPLICATION,
-        SHTDN_REASON_MINOR_INSTALLATION,
+        InitiateSystemShutdownExW, SHTDN_REASON_FLAG_PLANNED, SHTDN_REASON_MAJOR_OTHER,
+        SHTDN_REASON_MINOR_OTHER,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -129,7 +130,7 @@ pub fn schedule(p: &Params, text: &str) -> Result<(), String> {
     }
     let mut luid = LUID::default();
     // SAFETY:name 以 NUL 結尾;tp 長度正確
-    let adjusted = unsafe {
+    let adjusted: Result<(), std::io::Error> = unsafe {
         let ok = LookupPrivilegeValueW(std::ptr::null(), name.as_ptr(), &mut luid) != 0 && {
             let mut tp = TOKEN_PRIVILEGES {
                 PrivilegeCount: 1,
@@ -148,14 +149,22 @@ pub fn schedule(p: &Params, text: &str) -> Result<(), String> {
                 // 沒有該權限時也回成功,以 GetLastError = ERROR_NOT_ALL_ASSIGNED(1300)區分
                 && std::io::Error::last_os_error().raw_os_error() != Some(1300)
         };
+        // 錯誤碼在 CloseHandle 之前取得
+        let r = if ok {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        };
         CloseHandle(token);
-        ok
+        r
     };
-    if !adjusted {
-        return Err(format!(
-            "無法啟用關機權限:{}",
-            std::io::Error::last_os_error()
-        ));
+    if let Err(e) = adjusted {
+        let hint = if e.raw_os_error() == Some(1300) {
+            "(帳戶沒有 SeShutdownPrivilege)"
+        } else {
+            ""
+        };
+        return Err(format!("無法啟用關機權限:{e}{hint}"));
     }
     let msg: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     // SAFETY:msg 以 NUL 結尾;本機(lpMachineName = NULL)
@@ -166,9 +175,8 @@ pub fn schedule(p: &Params, text: &str) -> Result<(), String> {
             p.delay_sec as u32,
             p.force as i32,
             1,
-            SHTDN_REASON_MAJOR_APPLICATION
-                | SHTDN_REASON_MINOR_INSTALLATION
-                | SHTDN_REASON_FLAG_PLANNED,
+            // 事件 1074 的原因:IT 遠端指令的計畫性重開機(不記成「應用程式安裝」,稽核時才不會誤判)
+            SHTDN_REASON_MAJOR_OTHER | SHTDN_REASON_MINOR_OTHER | SHTDN_REASON_FLAG_PLANNED,
         )
     };
     if ok == 0 {
@@ -209,6 +217,28 @@ mod tests {
             "以字元計"
         );
         assert!(parse(&json!({ "force": "yes" })).is_err());
+        assert!(parse(&json!({ "message": "   " })).is_err(), "只有空白");
+        for c in ['\u{2028}', '\u{200B}', '\u{FEFF}', '\u{061C}', '\u{E0041}'] {
+            assert!(
+                parse(&json!({ "message": format!("a{c}b") })).is_err(),
+                "{:04X}",
+                c as u32
+            );
+        }
+    }
+
+    #[test]
+    fn sender_is_validated() {
+        let p = parse(&json!({})).unwrap();
+        for bad in ["S1\n惡意", "S1\u{202E}", "", &"S".repeat(17)] {
+            let (_, text) = notice(&p, Some(bad));
+            assert!(!text.contains("發送人"), "{bad:?} 不顯示");
+        }
+        assert!(
+            notice(&p, Some("S112009"))
+                .1
+                .ends_with("(發送人:IT S112009)")
+        );
     }
 
     #[test]
