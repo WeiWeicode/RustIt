@@ -10,7 +10,7 @@
   - 修正:發送人工號只顯示英數字 1–16 字(`message.show` 一併套用);字元過濾加 Cf / Zl / Zp、`message` 不可只有空白;`reboot_policy = required` 只在安裝成功且非 1638 時標記 `reboot_required`(`software/mod.rs`);`build-agent-msi.ps1` 兩份簽章者清單有交集時警告。
   - 未處理:`SeShutdownPrivilege` 啟用後未還原(影響小);`reboot_policy` 觸發的重開機尚無自動排程(只標記)。
 - 檔案:`RustAgent/crates/agent/src/{reboot,command,lib}.rs`、`agent/src/software/{mod,tests}.rs`、`agent/Cargo.toml`、`common/src/config.rs`、`RustAgent/installer/build-agent-msi.ps1`;文件 `docs/contracts/command-kinds.md`、`docs/P7-SOFTWARE-DESIGN.md`、`docs/HANDOFF.md`、`docs/PROJECT-MAP.md`。
-- 驗證:程式端驗證由主工作階段執行(本筆文件回寫未重跑測試);VM 驗收(設計 §8.3)尚未做。
+- 驗證:`cargo test -p rustit-agent -p rustit-common`:Agent 124/124(`1b383f7` 時);`rustit-common` 單獨執行會因 `log::set_boxed_logger` 編譯失敗(既有問題),與 Agent 一起編譯時設定測試 `software_signers_are_separate`、`trusted_signers_are_validated` 通過;`cargo build -p rustit-watchdog` 通過。(測試由主工作階段執行,文件回寫未重跑)。測試區 MSI `GigaNexusAgent-0.9.0-test.msi`(SHA-256 `589309dfaa6a846e0dd996ec0918e069cd199221119d52b81571ce6cf4e060ec`,內含 Agent 0.9.0、Watchdog 0.3.2,由 `1b383f7` 以 `build-agent-msi.ps1` 建置)。VM 驗收(設計 §8.3)尚未做。
 
 ## 2026-10-22 P7-2 Agent software 模組(0.9.0)
 - 內容:新增 `software.install` / `software.uninstall` 兩個指令類型的 Agent 端(設計 `P7-SOFTWARE-DESIGN.md` §5、§8.1.2);分支 `feature/p7-2-agent-software`(`591ab84`、`11145d6`、`a484b1e`、`4848605`、`f3af32d`)。
