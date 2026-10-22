@@ -26,6 +26,7 @@ mod logs;
 #[cfg(windows)]
 mod pipe;
 pub mod protocol;
+mod reboot;
 #[cfg(windows)]
 pub mod service;
 #[cfg(windows)]

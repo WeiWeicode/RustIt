@@ -146,6 +146,8 @@ pub struct Install {
     pub timeout: Duration,
     /// A6:略過電池延後(不略過計量網路)
     pub ignore_power: bool,
+    /// 目錄的重開機政策 `required`:已知安裝後必須重新開機(結果標 `reboot_required`,主機據此開 reboot_pending、畫面提供重新開機)
+    pub reboot_required_by_policy: bool,
 }
 
 /// `software.uninstall` 快照(已驗證)
@@ -282,6 +284,11 @@ pub fn parse_install(p: &Value) -> Result<Install, Failure> {
             .collect::<Result<_, _>>()?,
         _ => return Err(invalid(format!("signer_thumbprints 最多 {MAX_SIGNERS} 個"))),
     };
+    let reboot_required_by_policy = match p["reboot_policy"].as_str() {
+        None | Some("never") => false,
+        Some("required") => true,
+        Some(_) => return Err(invalid("reboot_policy 需 never / required")),
+    };
     let ignore_power = match &p["ignore_power"] {
         Value::Null => false,
         Value::Bool(b) => *b,
@@ -300,6 +307,7 @@ pub fn parse_install(p: &Value) -> Result<Install, Failure> {
         detect,
         timeout,
         ignore_power,
+        reboot_required_by_policy,
     })
 }
 
@@ -713,7 +721,7 @@ pub async fn install(
     let tail = log_tail(&log);
     let mut result = json!({
         "exit_code": code,
-        "reboot_required": matches!(code, 3010 | 1641),
+        "reboot_required": matches!(code, 3010 | 1641) || p.reboot_required_by_policy,
         "signer": signer,
         "signer_subject": subject,
         "already_installed": code == 1638,

@@ -11,6 +11,7 @@
 //!   `agent.log_level`(暫時調整日誌等級,記在本機 kv,重啟後仍有效直到到期):P4-2,PLATFORM-PLAN A4。
 //! - `agent.upgrade`(P6-2):只記下要求,經本機管道 `status.upgrade_requested` 交給 Watchdog(結果 `handed_to_watchdog`);
 //!   升級中(Watchdog 已送 `prepare_shutdown`)收到的新指令回 `failed AGENT_UPGRADING`。
+//! - `system.reboot`(P7-3,[`crate::reboot`]):服務模式才執行;取得串行鎖(安裝中不重開機)→ 訊息框 → 排程重新開機,排程成功即 `succeeded`。
 //! - `software.install` / `software.uninstall`(P7-2,[`crate::software`]):取得串行鎖後執行;失敗時 `result` 也帶摘要(結束代碼、記錄)。
 
 use crate::Shared;
@@ -29,7 +30,7 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 
 /// 本版支援的類型(與 command-kinds.md 一致)
-pub const KINDS: [&str; 9] = [
+pub const KINDS: [&str; 10] = [
     "inventory.collect",
     "agent.restart",
     "message.show",
@@ -39,6 +40,7 @@ pub const KINDS: [&str; 9] = [
     "agent.upgrade",
     "software.install",
     "software.uninstall",
+    "system.reboot",
 ];
 /// agent.upgrade 交給 Watchdog 的要求有效多久(與指令有效期限相同)
 pub const UPGRADE_REQUEST_TTL: Duration = Duration::from_secs(3600);
@@ -258,6 +260,17 @@ async fn execute(shared: Arc<Shared>, cmd: CommandBody) {
             report(&shared, &id, "running", |_| {});
             software(&shared, &id, &cmd.kind, &cmd.params, &cmd.expires_at).await
         }
+        "system.reboot" => {
+            report(&shared, &id, "running", |_| {});
+            system_reboot(
+                &shared,
+                &id,
+                &cmd.params,
+                cmd.issued_by.as_deref(),
+                &cmd.expires_at,
+            )
+            .await
+        }
         "agent.restart" => return agent_restart(&shared, &id).await,
         _ => Err(fail("UNSUPPORTED_COMMAND", cmd.kind.clone())),
     };
@@ -399,6 +412,56 @@ async fn software(
 
 #[cfg(not(windows))]
 async fn software(_: &Arc<Shared>, _: &str, _: &str, _: &Value, _: &str) -> Result<Value, Failure> {
+    Err(fail("EXECUTION_FAILED", "只支援 Windows"))
+}
+
+/// system.reboot(P7-3):參數再驗 → 服務模式 → 串行鎖(等進行中的軟體派送結束)→ 重驗有效期限 → 訊息框 → 排程
+#[cfg(windows)]
+async fn system_reboot(
+    shared: &Arc<Shared>,
+    id: &str,
+    p: &Value,
+    issued_by: Option<&str>,
+    expires_at: &str,
+) -> Result<Value, Failure> {
+    use crate::reboot;
+    let params = reboot::parse(p).map_err(|e| fail("INVALID_PARAMS", e))?;
+    if !crate::SERVICE_MODE.load(Ordering::Relaxed) {
+        return Err(fail("NOT_RUNNING_AS_SERVICE", "前景模式不重新開機(開發機)"));
+    }
+    let _guard = shared.exclusive.lock().await;
+    if expired(shared, expires_at)? {
+        return Err(fail("EXPIRED", "等待前一個指令時已超過有效期限,不執行"));
+    }
+    let (title, text) = reboot::notice(&params, issued_by);
+    // 訊息框不等待使用者按下;沒有登入者(NO_ACTIVE_SESSION)照常排程
+    let (t, x) = (title.clone(), text.clone());
+    let notified = matches!(
+        tokio::task::spawn_blocking(move || wts::send_message(&t, &x, 0)).await,
+        Ok(Ok(_))
+    );
+    let (sp, msg) = (params.clone(), format!("{title}\n{text}"));
+    tokio::task::spawn_blocking(move || reboot::schedule(&sp, &msg))
+        .await
+        .map_err(|e| fail("EXECUTION_FAILED", e.to_string()))?
+        .map_err(|e| fail("EXECUTION_FAILED", e))?;
+    info!(
+        "指令 {id}:已排程 {} 秒後重新開機(force = {},訊息框 {})",
+        params.delay_sec,
+        params.force,
+        if notified { "已顯示" } else { "未顯示" }
+    );
+    Ok(reboot::result(&params, notified))
+}
+
+#[cfg(not(windows))]
+async fn system_reboot(
+    _: &Arc<Shared>,
+    _: &str,
+    _: &Value,
+    _: Option<&str>,
+    _: &str,
+) -> Result<Value, Failure> {
     Err(fail("EXECUTION_FAILED", "只支援 Windows"))
 }
 

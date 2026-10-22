@@ -359,7 +359,10 @@ mod tests {
             b.to_uppercase()
         ))
         .unwrap();
-        assert_eq!((s.trusted_signers, s.software_signers), (vec![a.to_string()], vec![b.to_string()]));
+        assert_eq!(
+            (s.trusted_signers, s.software_signers),
+            (vec![a.to_string()], vec![b.to_string()])
+        );
         let s = parse("server_url = \"http://127.0.0.1:1\"\n").unwrap();
         assert!(s.software_signers.is_empty(), "沒有設定 = 不接受任何套件");
         assert!(

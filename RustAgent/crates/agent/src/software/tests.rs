@@ -970,3 +970,42 @@ fn held_exe_can_still_run() {
         "持有拒寫控制代碼時仍可執行"
     );
 }
+
+#[tokio::test]
+async fn reboot_policy_required_marks_result() {
+    let content = b"policy";
+    let (_d, paths) = paths();
+    let mut p = install_params(content, &[SIGNER]);
+    p.reboot_required_by_policy = true;
+    let env = Fake::new(content);
+    let r = run_install(&env, &p, &paths).await.unwrap();
+    assert_eq!(
+        (r["exit_code"].as_u64(), r["reboot_required"].as_bool()),
+        (Some(0), Some(true))
+    );
+    let parsed = parse_install(&json!({
+        "package_id": PKG,
+        "name": "7-Zip",
+        "version": "24.09",
+        "url": format!("/agent/v1/packages/{PKG}"),
+        "sha256": sha(content),
+        "size_bytes": content.len(),
+        "installer_type": "msi",
+        "detect": { "type": "display_name", "value": "7-Zip%" },
+        "reboot_policy": "required"
+    }))
+    .unwrap();
+    assert!(parsed.reboot_required_by_policy);
+    let bad = parse_install(&json!({
+        "package_id": PKG,
+        "name": "7-Zip",
+        "version": "24.09",
+        "url": format!("/agent/v1/packages/{PKG}"),
+        "sha256": sha(content),
+        "size_bytes": content.len(),
+        "installer_type": "msi",
+        "detect": { "type": "display_name", "value": "7-Zip%" },
+        "reboot_policy": "always"
+    }));
+    assert_eq!(bad.unwrap_err().code, "INVALID_PARAMS");
+}
