@@ -147,8 +147,8 @@ impl Env for Fake {
         }
         exit
     }
-    fn exists(&self, _: &Path) -> bool {
-        true
+    fn check_uninstaller(&self, _: &Path) -> Result<(), String> {
+        Ok(())
     }
     fn msiexec(&self) -> PathBuf {
         PathBuf::from(r"C:\Windows\System32\msiexec.exe")
@@ -331,19 +331,41 @@ async fn signature_and_signer_checks() {
 }
 
 #[tokio::test]
-async fn draft_package_reports_signer_without_list() {
+async fn draft_package_requires_local_list() {
     let content = b"draft";
-    let env = Fake::new(content);
     let (_d, paths) = paths();
-    // 本機清單也不含此簽章者:draft 不比對清單,但簽章必須有效
-    let r = install(&env, &paths, CMD, &install_params(content, &[]), &[])
+    // draft(主機清單空):簽章者在本機清單內 → 安裝並回報實際簽章者
+    let env = Fake::new(content);
+    let r = run_install(&env, &install_params(content, &[]), &paths)
         .await
         .unwrap();
     assert_eq!(r["signer"], SIGNER);
     assert_eq!(env.runs(), 1);
+    // 不在本機清單 → 拒絕(資安 C2:主機被入侵也不能用空清單推任意已簽章程式)
+    let env = Fake::new(content);
+    let f = install(
+        &env,
+        &paths,
+        CMD,
+        &install_params(content, &[]),
+        &[OTHER.to_string()],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(f.code, "SIGNER_NOT_TRUSTED");
+    assert_eq!(f.result.unwrap()["signer"], SIGNER, "仍回報實際簽章者");
+    assert_eq!(env.runs(), 0);
+    let env = Fake::new(content);
+    let f = install(&env, &paths, CMD, &install_params(content, &[]), &[])
+        .await
+        .unwrap_err();
+    assert_eq!(
+        f.code, "SIGNER_NOT_TRUSTED",
+        "本機清單空白 → 不接受任何套件"
+    );
     let mut env = Fake::new(content);
     env.signer = Err("未簽章".into());
-    let f = install(&env, &paths, CMD, &install_params(content, &[]), &[])
+    let f = run_install(&env, &install_params(content, &[]), &paths)
         .await
         .unwrap_err();
     assert_eq!(f.code, "SIGNATURE_INVALID", "未簽章在任何狀態都拒絕");

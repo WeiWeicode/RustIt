@@ -335,7 +335,8 @@ pub trait Env {
     fn signer(&self, path: &Path) -> Result<(String, String), String>;
     /// 執行並等結束(逾時結束行程樹);主行程結束後再等 Job 內的子行程最多 `drain`
     async fn run(&self, cmd: &CmdLine, timeout: Duration, drain: Duration) -> Result<Exit, String>;
-    fn exists(&self, path: &Path) -> bool;
+    /// 移除程式存在,且在 Program Files / Windows / Package Cache 底下或只有系統管理帳號可寫(資安 H1)
+    fn check_uninstaller(&self, path: &Path) -> Result<(), String>;
     fn msiexec(&self) -> PathBuf;
     async fn sleep(&self, d: Duration);
     /// 回報 `running` 與進度百分比
@@ -548,7 +549,8 @@ fn with_result(mut f: Failure, result: Value) -> Failure {
     f
 }
 
-/// 簽章檢查:有效簽章必要;主機清單非空時,簽章者須同時在主機清單與本機清單(P6 `signer_allowed`)
+/// 簽章檢查:有效簽章必要;主機清單非空時,簽章者須同時在主機清單與本機清單(P6 `signer_allowed`);
+/// draft(主機清單為空)也必須在本機清單內(資安 C2,需求方 2026-10-22 決定:本機清單是主機被入侵時的最後一道)
 fn check_signer(
     env: &impl Env,
     file: &Path,
@@ -564,10 +566,22 @@ fn check_signer(
         .filter(|c| !unsafe_text(&c.to_string()))
         .take(200)
         .collect();
+    let not_trusted = |why: String| {
+        with_result(
+            fail("SIGNER_NOT_TRUSTED", format!("{why},未執行安裝程式")),
+            json!({ "signer": signer, "signer_subject": subject }),
+        )
+    };
     if p.signers.is_empty() {
-        // draft 套件(只派到 pilot 測試機):回報實際簽章者,不採信空清單放行其他檢查(§5.2)
+        // draft 套件(只派到 pilot 測試機):不比對主機清單,但仍須在本機清單內;回報實際簽章者供 IT 標記 tested
+        if !trusted.iter().any(|t| t.eq_ignore_ascii_case(&signer)) {
+            return Err(not_trusted(format!(
+                "draft 套件的簽章者 {signer}({subject})不在本機信任清單內(本機 {} 個)",
+                trusted.len()
+            )));
+        }
         info!(
-            "{} {} 尚未登錄簽章者(draft),簽章有效,實際簽章者 {signer}({subject})",
+            "{} {} 尚未登錄簽章者(draft),簽章者 {signer}({subject})在本機信任清單內",
             p.name, p.version
         );
     } else if !rustit_common::authenticode::signer_allowed(&signer, &p.signers, trusted) {
@@ -760,7 +774,7 @@ pub async fn uninstall(
         &p.uninstall_args,
         &log,
         &env.msiexec(),
-        |path| env.exists(path),
+        |path| env.check_uninstaller(path),
     )?;
     env.progress(50);
     info!(
@@ -892,8 +906,31 @@ impl Env for RealEnv {
             .map_err(|e| format!("背景工作異常:{e}"))?
     }
 
-    fn exists(&self, path: &Path) -> bool {
-        path.is_file()
+    fn check_uninstaller(&self, path: &Path) -> Result<(), String> {
+        if !path.is_file() {
+            return Err(format!("移除程式 {} 不存在", path.display()));
+        }
+        let lower = path.to_string_lossy().to_lowercase();
+        let env_dir = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
+        let program_data = env_dir("ProgramData", r"C:\ProgramData");
+        let roots = [
+            env_dir("ProgramFiles", r"C:\Program Files"),
+            env_dir("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+            env_dir("SystemRoot", r"C:\Windows"),
+            format!(r"{program_data}\Package Cache"),
+        ];
+        if roots
+            .iter()
+            .any(|r| lower.starts_with(&format!(r"{}\", r.to_lowercase())))
+        {
+            return Ok(());
+        }
+        rustit_common::scm::admin_only_writable(path).map_err(|e| {
+            format!(
+                "移除程式 {} 不在 Program Files / Windows / Package Cache 底下,且{e}",
+                path.display()
+            )
+        })
     }
 
     fn msiexec(&self) -> PathBuf {

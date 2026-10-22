@@ -12,6 +12,49 @@ use super::{Failure, Installer, fail};
 use rustit_collector::UninstallEntry;
 use std::path::{Path, PathBuf};
 
+/// 不可移除的軟體(資安 H2,需求方 2026-10-22 決定:主機被入侵也不能對全公司移除監控本身與防毒 / EDR);
+/// DisplayName 含這些字(不分大小寫)回 `UNINSTALL_NOT_SUPPORTED`
+const PROTECTED: [&str; 22] = [
+    "giganexus",
+    "rustit",
+    "defender",
+    "symantec",
+    "norton",
+    "endpoint protection",
+    "endpoint security",
+    "trend micro",
+    "apex one",
+    "officescan",
+    "sophos",
+    "kaspersky",
+    "eset",
+    "mcafee",
+    "trellix",
+    "crowdstrike",
+    "sentinel",
+    "carbon black",
+    "bitdefender",
+    "cortex xdr",
+    "forticlient",
+    "antivirus",
+];
+
+/// 名稱屬於保護清單時回傳符合的字:單字樣式比對「某個詞以它開頭」(避免 eset 比到 Preset),多字樣式比對包含
+pub fn protected(e: &UninstallEntry) -> Option<&'static str> {
+    let name = e.name.to_lowercase();
+    let words: Vec<&str> = name
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    PROTECTED.iter().copied().find(|p| {
+        if p.contains(' ') {
+            name.contains(p)
+        } else {
+            words.iter().any(|w| w.starts_with(p))
+        }
+    })
+}
+
 /// 不接受作為移除程式的殼層與腳本主機(可執行任意指令)
 const SHELLS: [&str; 10] = [
     "cmd.exe",
@@ -56,15 +99,21 @@ fn not_supported(msg: impl Into<String>) -> Failure {
     fail("UNINSTALL_NOT_SUPPORTED", msg)
 }
 
-/// 決定移除命令;`exists` 檢查程式檔(測試注入)
+/// 決定移除命令;`check` 檢查程式檔存在且位置可信(測試注入;正式見 [`super::RealEnv`],資安 H1)
 pub fn uninstall_cmdline(
     e: &UninstallEntry,
     kind: Installer,
     extra: &str,
     log: &Path,
     msiexec: &Path,
-    exists: impl Fn(&Path) -> bool,
+    check: impl Fn(&Path) -> Result<(), String>,
 ) -> Result<CmdLine, Failure> {
+    if let Some(p) = protected(e) {
+        return Err(not_supported(format!(
+            "{} 屬於不可移除的軟體(監控本身或防毒 / EDR,符合「{p}」)",
+            e.name
+        )));
+    }
     let msi_string = e.uninstall_string.to_lowercase().contains("msiexec");
     if e.windows_installer || kind == Installer::Msi || msi_string {
         if let Some(code) = product_code(e) {
@@ -115,12 +164,13 @@ pub fn uninstall_cmdline(
             program.display()
         )));
     }
-    if !exists(&program) {
+    if program.to_string_lossy().contains("..") {
         return Err(not_supported(format!(
-            "移除程式 {} 不存在",
+            "移除程式路徑 {} 含 ..",
             program.display()
         )));
     }
+    check(&program).map_err(not_supported)?;
     let args = if quiet || extra.is_empty() {
         rest
     } else {
@@ -152,7 +202,9 @@ mod tests {
     const MSIEXEC: &str = r"C:\Windows\System32\msiexec.exe";
 
     fn plan(e: &UninstallEntry, kind: Installer, extra: &str) -> Result<CmdLine, Failure> {
-        uninstall_cmdline(e, kind, extra, Path::new(LOG), Path::new(MSIEXEC), |_| true)
+        uninstall_cmdline(e, kind, extra, Path::new(LOG), Path::new(MSIEXEC), |_| {
+            Ok(())
+        })
     }
 
     #[test]
@@ -251,8 +303,66 @@ mod tests {
             "",
             Path::new(LOG),
             Path::new(MSIEXEC),
-            |_| false,
+            |_| Err("不存在".into()),
         );
         assert_eq!(missing.unwrap_err().code, "UNINSTALL_NOT_SUPPORTED");
+        let e = entry("A", "", r#""C:\Program Files\A\..\..\x\u.exe" /S"#, false);
+        assert_eq!(
+            plan(&e, Installer::Exe, "").unwrap_err().code,
+            "UNINSTALL_NOT_SUPPORTED",
+            ".."
+        );
+    }
+
+    #[test]
+    fn protected_software_cannot_be_removed() {
+        for name in [
+            "GigaNexus Agent (test)",
+            "Microsoft Defender for Endpoint",
+            "Trend Micro Apex One Security Agent",
+            "CrowdStrike Windows Sensor",
+            "ESET Endpoint Antivirus",
+        ] {
+            let mut e = entry(
+                "{23170F69-40C1-2702-2409-000001000000}",
+                "MsiExec.exe /X{23170F69-40C1-2702-2409-000001000000}",
+                "",
+                true,
+            );
+            e.name = name.into();
+            assert_eq!(
+                plan(&e, Installer::Msi, "").unwrap_err().code,
+                "UNINSTALL_NOT_SUPPORTED",
+                "{name}"
+            );
+        }
+        let e = entry(
+            "7-Zip",
+            "",
+            r#""C:\Program Files\7-Zip\Uninstall.exe" /S"#,
+            false,
+        );
+        assert!(protected(&e).is_none());
+        let mut e = e;
+        e.name = "Preset Manager".into();
+        assert!(protected(&e).is_none(), "eset 不比對字中間");
+        e.name = "SentinelOne Agent".into();
+        assert_eq!(protected(&e), Some("sentinel"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn admin_only_writable_paths() {
+        // System32 的程式只有 TrustedInstaller / 系統管理帳號可寫
+        let sys = super::super::install::msiexec_path();
+        assert!(
+            rustit_common::scm::admin_only_writable(&sys).is_ok(),
+            "{sys:?}"
+        );
+        // 使用者暫存目錄可被目前使用者寫入
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("u.exe");
+        std::fs::write(&f, b"MZ").unwrap();
+        assert!(rustit_common::scm::admin_only_writable(&f).is_err());
     }
 }
