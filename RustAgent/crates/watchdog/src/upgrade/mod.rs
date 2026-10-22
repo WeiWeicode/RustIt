@@ -7,6 +7,7 @@
 //! | 檢查目標(url 的元件 / 版本段與目標一致、版本 ≥ 0.7.0、大小 ≤ 200 MB);同一目標已失敗 2 次不再嘗試 | — | `failed`(`DOWNLOAD_FAILED`) |
 //! | 磁碟剩餘 ≥ 500 MB → 下載到 `cache\agent\{版本}\{檔名}.part`(中斷後以 Range 續傳,最多 3 次) | `downloading` | `DISK_FULL` / `DOWNLOAD_FAILED` |
 //! | 大小、SHA-256(以 `target.sha256` 驗整個檔案,不採信回應標頭)、Authenticode、簽章者(主機清單 ∩ 本機清單)、版本資源 | `verifying` | `HASH_MISMATCH` / `SIGNATURE_INVALID` / `SIGNER_NOT_TRUSTED`(刪檔,不還原) |
+//! | Agent `get_status` 回報 `busy`(軟體派送中,P7)就不安裝,下次上報再來(檔案留在 cache,不算失敗) | — | — |
 //! | 維護中(看守暫停)→ 管道 `prepare_shutdown`(90 秒,逾時照樣繼續)→ 停止服務 → `previous\` 備份 → `.new` 再驗雜湊 → 換上 → 啟動 | `installing` | `STOP_TIMEOUT` / `REPLACE_FAILED` |
 //! | 2 分鐘內每 10 秒 `get_status`:版本 = 目標、`ws_connected`、PID 連續兩次相同 | `succeeded` | 還原 `previous\` → 確認舊版正常 → `rolled_back`(`HEALTH_CHECK_FAILED`);還原也失敗 `failed`(`ROLLBACK_FAILED`) |
 //!
@@ -504,6 +505,11 @@ impl<E: UpgradeEnv> Upgrader<'_, E> {
             self.env.clear();
             return Outcome::Skipped("Windows 關機中或安裝程式執行中");
         }
+        if self.agent_busy().await {
+            // 軟體派送中停止 Agent 會中斷安裝(Job Object 隨行程關閉,MSI 可能半裝):同上,下次上報再來
+            self.env.clear();
+            return Outcome::Skipped("Agent 正在執行軟體派送");
+        }
         rec.state = "installing".into();
         self.env.save(&rec);
         let _m = Maintenance::enter(self.env);
@@ -911,6 +917,17 @@ impl<E: UpgradeEnv> Upgrader<'_, E> {
             if let Err(e) = std::fs::remove_dir_all(&d) {
                 warn!("無法清除舊的升級檔 {}:{e}", d.display());
             }
+        }
+    }
+
+    /// Agent 回報正在執行不可中斷的工作(管道 status.busy,P7);查不到狀態時視為不忙(與舊版 Agent 相同,照原流程)
+    async fn agent_busy(&self) -> bool {
+        let Ok(SvcInfo { pid: Some(pid), .. }) = self.env.query().await else {
+            return false;
+        };
+        match self.env.get_status(pid).await {
+            Ok(s) => s.busy.is_some(),
+            Err(_) => false,
         }
     }
 

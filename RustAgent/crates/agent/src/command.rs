@@ -294,6 +294,7 @@ async fn execute(shared: Arc<Shared>, cmd: CommandBody) {
         }
         "software.install" | "software.uninstall" => {
             report(&shared, &id, "running", |_| {});
+            let _busy = SoftwareBusy::new(&shared);
             software(&shared, &id, &cmd.kind, &cmd.params, &cmd.expires_at).await
         }
         "system.reboot" => {
@@ -343,6 +344,22 @@ impl Drop for Running<'_> {
         if let Ok(mut set) = self.0.running_commands.lock() {
             set.remove(&self.1);
         }
+    }
+}
+
+/// 執行中的軟體派送(管道 status.busy,P7);Drop 時減一
+struct SoftwareBusy<'a>(&'a Shared);
+
+impl<'a> SoftwareBusy<'a> {
+    fn new(shared: &'a Shared) -> Self {
+        shared.software_busy.fetch_add(1, Ordering::SeqCst);
+        Self(shared)
+    }
+}
+
+impl Drop for SoftwareBusy<'_> {
+    fn drop(&mut self) {
+        self.0.software_busy.fetch_sub(1, Ordering::SeqCst);
     }
 }
 

@@ -3465,7 +3465,7 @@ dependencies = [
 
 [[package]]
 name = "rustit-agent"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "aes-gcm",
  "chrono",
@@ -3546,7 +3546,7 @@ dependencies = [
 
 [[package]]
 name = "rustit-watchdog"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "chrono",
  "embed-resource",

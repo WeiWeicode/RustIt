@@ -264,6 +264,10 @@ pub(crate) fn status_body(shared: &Shared) -> Value {
         "device_status": if shared.is_disabled() { "disabled" } else { "active" },
         "previous_exit": shared.previous_exit,
     });
+    // 軟體派送中:Watchdog 延後升級 Agent(P7)
+    if shared.software_busy.load(Ordering::SeqCst) > 0 {
+        body["busy"] = json!("software");
+    }
     let ack = shared.last_ack_ms.load(Ordering::Relaxed);
     if let Some(t) = (ack > 0)
         .then(|| chrono::DateTime::from_timestamp_millis(ack))

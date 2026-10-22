@@ -38,6 +38,8 @@ struct Fake {
     /// 依序回傳的電源狀態;用完後為「不限制」
     power: Mutex<VecDeque<power::PowerState>>,
     drains: Mutex<Vec<Duration>>,
+    /// installer_busy 還會回 true 的次數(L3)
+    msi_busy: Mutex<u32>,
 }
 
 impl Fake {
@@ -63,6 +65,7 @@ impl Fake {
             free: u64::MAX,
             power: Mutex::new(VecDeque::new()),
             drains: Mutex::new(Vec::new()),
+            msi_busy: Mutex::new(0),
         }
     }
     fn exits(self, e: &[Result<Exit, String>]) -> Self {
@@ -161,6 +164,14 @@ impl Env for Fake {
     }
     async fn collect(&self) {
         *self.collected.lock().unwrap() += 1;
+    }
+    fn installer_busy(&self) -> bool {
+        let mut n = self.msi_busy.lock().unwrap();
+        if *n == 0 {
+            return false;
+        }
+        *n -= 1;
+        true
     }
     async fn power(&self) -> power::PowerState {
         self.power.lock().unwrap().pop_front().unwrap_or_default()
@@ -404,6 +415,34 @@ async fn exit_codes() {
         run_install(&env, &p, &paths).await.unwrap_err().code,
         "EXECUTION_FAILED"
     );
+}
+
+#[tokio::test]
+async fn timeout_waits_for_windows_installer() {
+    let content = b"settle";
+    let (_d, paths) = paths();
+    let p = install_params(content, &[SIGNER]);
+    let polls = |env: &Fake| {
+        env.sleeps
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|d| **d == SETTLE_POLL)
+            .count() as u64
+    };
+    // 逾時後 msiserver 還在跑 3 次輪詢:等它結束再回 INSTALL_TIMEOUT(L3)
+    let env = Fake::new(content).exits(&[Ok(Exit::Timeout)]);
+    *env.msi_busy.lock().unwrap() = 3;
+    let f = run_install(&env, &p, &paths).await.unwrap_err();
+    assert_eq!(f.code, "INSTALL_TIMEOUT");
+    assert!(f.message.contains("已沒有進行中的安裝"), "{}", f.message);
+    assert_eq!(polls(&env), 3);
+    // 一直沒結束:等到上限
+    let env = Fake::new(content).exits(&[Ok(Exit::Timeout)]);
+    *env.msi_busy.lock().unwrap() = u32::MAX;
+    let f = run_install(&env, &p, &paths).await.unwrap_err();
+    assert!(f.message.contains("可能遇到 1618"), "{}", f.message);
+    assert_eq!(polls(&env), SETTLE_MAX.as_secs() / SETTLE_POLL.as_secs());
 }
 
 #[tokio::test]
