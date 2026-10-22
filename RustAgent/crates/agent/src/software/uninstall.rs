@@ -36,7 +36,8 @@ pub fn split_command(cmd: &str) -> Option<(PathBuf, String)> {
             rest[end + 1..].trim().to_string(),
         ));
     }
-    let end = cmd.to_lowercase().find(".exe").map(|i| i + 4)?;
+    // ASCII 小寫:位元組長度不變,索引才能用在原字串(Unicode 小寫會改變長度)
+    let end = cmd.to_ascii_lowercase().find(".exe").map(|i| i + 4)?;
     Some((PathBuf::from(&cmd[..end]), cmd[end..].trim().to_string()))
 }
 
@@ -68,8 +69,14 @@ pub fn uninstall_cmdline(
     if e.windows_installer || kind == Installer::Msi || msi_string {
         if let Some(code) = product_code(e) {
             let mut args = format!("/x {code} /qn /norestart /l*v \"{}\"", log.display());
-            if !extra.is_empty() {
+            // 目錄的 uninstall_args 依 installer_type 檢查過;只有 msi 類型是「屬性=值」,其他類型的開關(/S 等)msiexec 不認得
+            if !extra.is_empty() && kind == Installer::Msi {
                 args = format!("{args} {extra}");
+            } else if !extra.is_empty() {
+                log::warn!(
+                    "移除項目是 MSI,略過 {} 類型的移除參數 {extra}",
+                    kind.as_str()
+                );
             }
             return Ok(CmdLine {
                 program: msiexec.to_path_buf(),
@@ -145,6 +152,10 @@ mod tests {
 
     #[test]
     fn splits_registry_commands() {
+        // 非 ASCII 路徑(İ 小寫後位元組長度會變)不可 panic
+        let (exe, args) = split_command(r"C:\Program Files\İİİ\u.exe /S").unwrap();
+        assert_eq!(exe, PathBuf::from(r"C:\Program Files\İİİ\u.exe"));
+        assert_eq!(args, "/S");
         let (exe, args) =
             split_command(r#""C:\Program Files\Mozilla Firefox\uninstall\helper.exe" /foo"#)
                 .unwrap();

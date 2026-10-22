@@ -380,10 +380,18 @@ async fn software(
             sw::defer(&env, &ins, max).await.map_err(from)?;
         }
         let _guard = shared.exclusive.lock().await;
+        // 排在長時間安裝後面時,等鎖期間可能已過期
+        if expired(shared, expires_at)? {
+            return Err(fail("EXPIRED", "等待前一個安裝時已超過有效期限,不執行"));
+        }
         sw::install(&env, &paths, id, &ins, &shared.trusted_signers).await
     } else {
         let unins = sw::parse_uninstall(p).map_err(from)?;
         let _guard = shared.exclusive.lock().await;
+        // 排在長時間安裝後面時,等鎖期間可能已過期
+        if expired(shared, expires_at)? {
+            return Err(fail("EXPIRED", "等待前一個安裝時已超過有效期限,不執行"));
+        }
         sw::uninstall(&env, &paths, id, &unins).await
     }
     .map_err(from)

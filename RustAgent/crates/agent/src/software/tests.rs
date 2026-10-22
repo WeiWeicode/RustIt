@@ -37,6 +37,7 @@ struct Fake {
     free: u64,
     /// 依序回傳的電源狀態;用完後為「不限制」
     power: Mutex<VecDeque<power::PowerState>>,
+    drains: Mutex<Vec<Duration>>,
 }
 
 impl Fake {
@@ -61,6 +62,7 @@ impl Fake {
             collected: Mutex::new(0),
             free: u64::MAX,
             power: Mutex::new(VecDeque::new()),
+            drains: Mutex::new(Vec::new()),
         }
     }
     fn exits(self, e: &[Result<Exit, String>]) -> Self {
@@ -77,7 +79,7 @@ impl Fake {
 }
 
 impl Env for Fake {
-    fn find(&self, d: &Detect) -> Option<UninstallEntry> {
+    async fn find(&self, d: &Detect) -> Option<UninstallEntry> {
         (*self.installed.lock().unwrap() && detect::matches(d, &self.entry))
             .then(|| self.entry.clone())
     }
@@ -130,7 +132,8 @@ impl Env for Fake {
     fn signer(&self, _: &Path) -> Result<(String, String), String> {
         self.signer.clone()
     }
-    async fn run(&self, cmd: &CmdLine, _: Duration) -> Result<Exit, String> {
+    async fn run(&self, cmd: &CmdLine, _: Duration, drain: Duration) -> Result<Exit, String> {
+        self.drains.lock().unwrap().push(drain);
         self.runs.lock().unwrap().push(cmd.clone());
         let exit = self
             .exits
@@ -747,4 +750,154 @@ fn cached_download_is_not_deferred() {
     std::fs::create_dir_all(paths.package(PKG)).unwrap();
     std::fs::write(paths.package(PKG).join("installer.msi"), content).unwrap();
     assert!(cached(&paths, &p));
+}
+
+#[tokio::test]
+async fn failures_clean_up_staging_and_download() {
+    let content = b"cleanup";
+    let (_d, paths) = paths();
+    let p = install_params(content, &[SIGNER]);
+    for env in [
+        Fake::new(content).exits(&[Ok(Exit::Code(1603))]),
+        Fake::new(content).exits(&[Ok(Exit::Timeout)]),
+    ] {
+        run_install(&env, &p, &paths).await.unwrap_err();
+        assert!(!paths.staging(CMD).exists(), "失敗後 staging 已刪除");
+        assert!(
+            !paths.package(PKG).join("installer.msi").exists(),
+            "失敗後安裝檔已刪除"
+        );
+    }
+    let env = Fake::new(content);
+    install(&env, &paths, CMD, &p, &[OTHER.to_string()])
+        .await
+        .unwrap_err();
+    assert!(
+        !paths.staging(CMD).exists(),
+        "SIGNER_NOT_TRUSTED 後 staging 已刪除"
+    );
+}
+
+#[tokio::test]
+async fn range_416_restarts_from_zero() {
+    let content = b"0123456789";
+    let env = Fake::new(content).downloads(&[Dl::Cut(4), Dl::Range416, Dl::Full]);
+    let (_d, paths) = paths();
+    run_install(&env, &install_params(content, &[SIGNER]), &paths)
+        .await
+        .unwrap();
+    assert_eq!(
+        *env.offsets.lock().unwrap(),
+        vec![0, 4, 0],
+        "416 後刪除 .part 從頭下載"
+    );
+}
+
+#[tokio::test]
+async fn complete_part_file_is_used_without_download() {
+    let content = b"part-complete";
+    let env = Fake::new(content).downloads(&[Dl::Denied]);
+    let (_d, paths) = paths();
+    std::fs::create_dir_all(paths.package(PKG)).unwrap();
+    std::fs::write(paths.package(PKG).join("installer.msi.part"), content).unwrap();
+    run_install(&env, &install_params(content, &[SIGNER]), &paths)
+        .await
+        .unwrap();
+    assert!(
+        env.offsets.lock().unwrap().is_empty(),
+        "改名前中斷的完整 .part 直接採用"
+    );
+}
+
+#[tokio::test]
+async fn drain_limits_per_action() {
+    let content = b"drain";
+    let (_d, paths) = paths();
+    let env = Fake::new(content);
+    run_install(&env, &install_params(content, &[SIGNER]), &paths)
+        .await
+        .unwrap();
+    assert_eq!(
+        *env.drains.lock().unwrap(),
+        vec![Duration::from_secs(1800)],
+        "安裝:子行程等到逾時"
+    );
+    let env = Fake::new(b"");
+    *env.installed.lock().unwrap() = true;
+    uninstall(&env, &paths, CMD, &uninstall_params("msi", ""))
+        .await
+        .unwrap();
+    assert_eq!(
+        *env.drains.lock().unwrap(),
+        vec![install::DRAIN_MAX],
+        "移除:最多 5 分鐘"
+    );
+}
+
+#[tokio::test]
+async fn uninstall_exit_paths() {
+    let (_d, paths) = paths();
+    let p = uninstall_params("msi", "");
+    let env = Fake::new(b"").exits(&[Ok(Exit::Code(1618)), Ok(Exit::Code(1605))]);
+    *env.installed.lock().unwrap() = true;
+    let r = uninstall(&env, &paths, CMD, &p).await.unwrap();
+    assert_eq!(r["exit_code"], 1605, "1605 以登錄檔輪詢確認");
+    assert!(env.sleeps.lock().unwrap().contains(&BUSY_WAIT));
+    let env = Fake::new(b"").exits(&[Ok(Exit::Timeout)]);
+    *env.installed.lock().unwrap() = true;
+    assert_eq!(
+        uninstall(&env, &paths, CMD, &p).await.unwrap_err().code,
+        "INSTALL_TIMEOUT"
+    );
+}
+
+#[tokio::test]
+async fn command_id_must_be_uuid() {
+    let content = b"id";
+    let (_d, paths) = paths();
+    for id in [r"c:\windows", r"..\..\users", "x"] {
+        let env = Fake::new(content);
+        let f = install(
+            &env,
+            &paths,
+            id,
+            &install_params(content, &[SIGNER]),
+            &trusted(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(f.code, "INVALID_PARAMS", "{id}");
+        assert!(env.offsets.lock().unwrap().is_empty());
+        let f = uninstall(&env, &paths, id, &uninstall_params("msi", ""))
+            .await
+            .unwrap_err();
+        assert_eq!(f.code, "INVALID_PARAMS", "{id}");
+    }
+}
+
+#[test]
+fn purge_removes_stale_entries() {
+    let (_d, paths) = paths();
+    std::fs::create_dir_all(&paths.root).unwrap();
+    std::fs::create_dir_all(&paths.logs).unwrap();
+    let old = std::time::SystemTime::now() - Duration::from_secs(15 * 24 * 3600);
+    let stale_log = paths.logs.join("old.log");
+    let stale_part = paths.root.join("stray.part");
+    for f in [&stale_log, &stale_part] {
+        std::fs::write(f, b"x").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(f)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+    }
+    let fresh_log = paths.logs.join("new.log");
+    std::fs::write(&fresh_log, b"x").unwrap();
+    purge_stale(&paths);
+    assert!(
+        !stale_log.exists() && !stale_part.exists(),
+        "過期的記錄與殘留已刪除"
+    );
+    assert!(fresh_log.exists());
 }

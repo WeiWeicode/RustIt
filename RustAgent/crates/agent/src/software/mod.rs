@@ -54,6 +54,7 @@ pub const LOG_KEEP: Duration = Duration::from_secs(14 * 24 * 3600);
 /// `log_tail`:最後幾行、最多幾個字元(result 序列化後 4,000 字元內)
 const LOG_TAIL_LINES: usize = 20;
 const LOG_TAIL_CHARS: usize = 1500;
+const LOG_READ_MAX: u64 = 64 * 1024;
 const MAX_SIGNERS: usize = 8;
 
 /// 指令失敗;`result` 為失敗時也要給主機的摘要(例如 `INSTALL_FAILED` 的 `exit_code`、`log_tail`)
@@ -96,6 +97,16 @@ impl Installer {
             "exe" => Self::Exe,
             _ => return None,
         })
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Msi => "msi",
+            Self::Inno => "inno",
+            Self::Nsis => "nsis",
+            Self::Burn => "burn",
+            Self::Exe => "exe",
+        }
     }
 
     /// 快取與 staging 內的檔名(副檔名依類型;主機的檔名不帶到端點)
@@ -309,7 +320,7 @@ pub fn parse_uninstall(p: &Value) -> Result<Uninstall, Failure> {
 #[allow(async_fn_in_trait)]
 pub trait Env {
     /// 整台電腦的登錄檔中第一個符合 `detect` 的項目
-    fn find(&self, d: &Detect) -> Option<UninstallEntry>;
+    async fn find(&self, d: &Detect) -> Option<UninstallEntry>;
     /// 建立目錄並確認安全:SYSTEM / Administrators 專用 ACL、不是連結(junction / 符號連結)
     fn prepare_dir(&self, dir: &Path) -> Result<(), String>;
     fn free_bytes(&self, dir: &Path) -> Result<u64, String>;
@@ -322,7 +333,8 @@ pub trait Env {
     ) -> Result<Fetched, DlError>;
     /// Authenticode 驗證通過時回傳(簽章者 SHA-1 指紋, 簽章者名稱)
     fn signer(&self, path: &Path) -> Result<(String, String), String>;
-    async fn run(&self, cmd: &CmdLine, timeout: Duration) -> Result<Exit, String>;
+    /// 執行並等結束(逾時結束行程樹);主行程結束後再等 Job 內的子行程最多 `drain`
+    async fn run(&self, cmd: &CmdLine, timeout: Duration, drain: Duration) -> Result<Exit, String>;
     fn exists(&self, path: &Path) -> bool;
     fn msiexec(&self) -> PathBuf;
     async fn sleep(&self, d: Duration);
@@ -424,9 +436,21 @@ pub fn purge_stale(paths: &Paths) {
 
 /// 安裝記錄最後 20 行(MSI 記錄為 UTF-16LE),經 logs.collect 同一套遮罩;沒有記錄回 None
 pub fn log_tail(path: &Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
-    let text = if bytes.starts_with(&[0xFF, 0xFE]) {
-        let units: Vec<u16> = bytes[2..]
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let mut bom = [0u8; 2];
+    let utf16 = f.read_exact(&mut bom).is_ok() && bom == [0xFF, 0xFE];
+    // MSI /l*v 可到數十 MB:只讀最後 64 KB(UTF-16 對齊偶數位置)
+    let mut start = len.saturating_sub(LOG_READ_MAX);
+    if utf16 {
+        start = (start & !1).max(2);
+    }
+    f.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    f.read_to_end(&mut bytes).ok()?;
+    let text = if utf16 {
+        let units: Vec<u16> = bytes
             .chunks_exact(2)
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
@@ -450,11 +474,21 @@ pub fn log_tail(path: &Path) -> Option<String> {
 }
 
 /// 1618 重試後的結束代碼
-async fn run_installer(env: &impl Env, cmd: &CmdLine, timeout: Duration) -> Result<u32, Failure> {
+/// 整體不超過 `timeout`(含 1618 重試與等待,不會超過主機的執行逾時);`drain` = 主行程結束後等子行程的上限
+async fn run_installer(
+    env: &impl Env,
+    cmd: &CmdLine,
+    timeout: Duration,
+    drain: Duration,
+) -> Result<u32, Failure> {
     let mut retried = 0;
+    let mut left = timeout;
     loop {
-        match env.run(cmd, timeout).await {
-            Ok(Exit::Code(1618)) if retried == BUSY_RETRIES => {
+        let started = Instant::now();
+        let exit = env.run(cmd, left, drain).await;
+        left = left.saturating_sub(started.elapsed());
+        match exit {
+            Ok(Exit::Code(1618)) if retried == BUSY_RETRIES || left <= BUSY_WAIT => {
                 return Err(fail(
                     "INSTALL_BUSY",
                     format!("另一個安裝進行中(1618),重試 {BUSY_RETRIES} 次仍失敗"),
@@ -467,13 +501,15 @@ async fn run_installer(env: &impl Env, cmd: &CmdLine, timeout: Duration) -> Resu
                     BUSY_WAIT.as_secs()
                 );
                 env.sleep(BUSY_WAIT).await;
+                left = left.saturating_sub(BUSY_WAIT);
             }
             Ok(Exit::Code(c)) => return Ok(c),
             Ok(Exit::Timeout) => {
+                // MSI 的實際安裝在 Windows Installer 服務(msiserver)內進行,不在 Job 內,只結束得了 msiexec 前端(§8.2)
                 return Err(fail(
                     "INSTALL_TIMEOUT",
                     format!(
-                        "超過 {} 秒仍未結束,已結束安裝程式的行程樹",
+                        "超過 {} 秒仍未結束,已結束安裝程式的行程樹(MSI 的安裝可能仍在 Windows Installer 服務內進行)",
                         timeout.as_secs()
                     ),
                 ));
@@ -486,7 +522,7 @@ async fn run_installer(env: &impl Env, cmd: &CmdLine, timeout: Duration) -> Resu
 /// 輪詢到「有 / 沒有」該項目為止;回傳是否達成
 async fn poll_detect(env: &impl Env, d: &Detect, present: bool) -> bool {
     for i in 0..DETECT_POLLS {
-        if env.find(d).is_some() == present {
+        if env.find(d).await.is_some() == present {
             return true;
         }
         if i + 1 < DETECT_POLLS {
@@ -588,7 +624,11 @@ pub async fn install(
     trusted: &[String],
 ) -> Result<Value, Failure> {
     let started = Instant::now();
-    if env.find(&p.detect).is_some() {
+    // command_id 會組成 staging / 記錄路徑(結束時 remove_dir_all):主機被繞過也只接受 UUID
+    if !is_uuid(command_id) {
+        return Err(invalid("command_id 需 UUID"));
+    }
+    if env.find(&p.detect).await.is_some() {
         info!("{} {} 已安裝,不重新安裝", p.name, p.version);
         return Ok(json!({
             "already_installed": true,
@@ -617,7 +657,10 @@ pub async fn install(
     env.progress(82);
     // TOCTOU:複製到僅 SYSTEM / Administrators 可寫的 staging,在目的地再驗雜湊與簽章,從該位置執行(§5.6)
     let staged = staging.join(p.installer.file_name());
-    std::fs::copy(&file, &staged)
+    let (src, dst) = (file.clone(), staged.clone());
+    tokio::task::spawn_blocking(move || std::fs::copy(&src, &dst))
+        .await
+        .map_err(|e| fail("EXECUTION_FAILED", format!("背景工作異常:{e}")))?
         .map_err(|e| fail("EXECUTION_FAILED", format!("無法複製安裝檔到 staging:{e}")))?;
     download::verify(&staged, p).await?;
     let (signer, subject) = check_signer(env, &staged, p, trusted)?;
@@ -626,7 +669,7 @@ pub async fn install(
     let cmd = install::install_cmdline(p.installer, &staged, &log, &p.install_args, &env.msiexec());
     env.progress(85);
     info!("安裝 {} {}:{}", p.name, p.version, cmd.command_line());
-    let code = run_installer(env, &cmd, p.timeout).await?;
+    let code = run_installer(env, &cmd, p.timeout, p.timeout).await?;
     let tail = log_tail(&log);
     let mut result = json!({
         "exit_code": code,
@@ -671,7 +714,10 @@ pub async fn uninstall(
     p: &Uninstall,
 ) -> Result<Value, Failure> {
     let started = Instant::now();
-    let Some(entry) = env.find(&p.detect) else {
+    if !is_uuid(command_id) {
+        return Err(invalid("command_id 需 UUID"));
+    }
+    let Some(entry) = env.find(&p.detect).await else {
         info!("{} {} 未安裝,不需移除", p.name, p.version);
         return Ok(json!({
             "already_absent": true,
@@ -698,7 +744,7 @@ pub async fn uninstall(
         p.package_id,
         cmd.command_line()
     );
-    let code = run_installer(env, &cmd, p.timeout).await?;
+    let code = run_installer(env, &cmd, p.timeout, install::DRAIN_MAX).await?;
     let mut result = json!({
         "exit_code": code,
         "reboot_required": matches!(code, 3010 | 1641),
@@ -739,8 +785,14 @@ pub(crate) struct RealEnv {
 }
 
 impl Env for RealEnv {
-    fn find(&self, d: &Detect) -> Option<UninstallEntry> {
-        detect::find(rustit_collector::machine_uninstall_entries(), d)
+    async fn find(&self, d: &Detect) -> Option<UninstallEntry> {
+        let d = d.clone();
+        tokio::task::spawn_blocking(move || {
+            detect::find(rustit_collector::machine_uninstall_entries(), &d)
+        })
+        .await
+        .ok()
+        .flatten()
     }
 
     fn prepare_dir(&self, dir: &Path) -> Result<(), String> {
@@ -806,9 +858,9 @@ impl Env for RealEnv {
         rustit_common::authenticode::signer_details(path)
     }
 
-    async fn run(&self, cmd: &CmdLine, timeout: Duration) -> Result<Exit, String> {
+    async fn run(&self, cmd: &CmdLine, timeout: Duration, drain: Duration) -> Result<Exit, String> {
         let cmd = cmd.clone();
-        tokio::task::spawn_blocking(move || install::run_job(&cmd, timeout))
+        tokio::task::spawn_blocking(move || install::run_job(&cmd, timeout, drain))
             .await
             .map_err(|e| format!("背景工作異常:{e}"))?
     }

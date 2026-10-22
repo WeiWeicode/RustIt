@@ -3,14 +3,15 @@
 //! - 命令列由 Agent 依 `installer_type` 寫死,主機只給已驗過的額外參數([`super::args`]);
 //!   一律 `CreateProcessW` 直接執行(指定程式路徑,不搜尋 PATH),**不經 cmd.exe / PowerShell**,不展開環境變數
 //! - 行程以 `CREATE_SUSPENDED` 建立 → 放入 Job Object(`KILL_ON_JOB_CLOSE`)→ 才開始執行,子行程一律在同一個 Job 內:
-//!   逾時時結束整個行程樹;主行程結束後再等 Job 內的子行程(NSIS 移除程式會自我複製後結束)最多 [`DRAIN_MAX`]
+//!   逾時時結束整個行程樹;主行程結束後再等 Job 內的子行程(安裝:剩餘逾時;移除:最多 [`DRAIN_MAX`])
 //! - 服務在 session 0、`CREATE_NO_WINDOW`,安裝程式不可跳出需要使用者操作的視窗(靠靜默參數與逾時)
 
 use super::Installer;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// 主行程結束後,等 Job 內其他行程結束的上限;超過就結束它們(記警告),由登錄檔偵測決定結果
+/// 移除時,主行程結束後等 Job 內其他行程(NSIS 自我複製的移除程式)的上限;超過就結束它們(記警告),由登錄檔偵測決定結果。
+/// 安裝時改用剩餘逾時(自解壓縮的安裝程式會在子行程繼續安裝,不可提早結束)
 pub const DRAIN_MAX: Duration = Duration::from_secs(300);
 
 /// 要執行的程式與參數
@@ -102,7 +103,7 @@ pub fn msiexec_path() -> PathBuf {
 
 /// 以 Job Object 執行(阻塞;呼叫端放在阻塞執行緒)
 #[cfg(windows)]
-pub fn run_job(cmd: &CmdLine, timeout: Duration) -> Result<Exit, String> {
+pub fn run_job(cmd: &CmdLine, timeout: Duration, drain_max: Duration) -> Result<Exit, String> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
     use windows_sys::Win32::System::JobObjects::{
@@ -238,7 +239,7 @@ pub fn run_job(cmd: &CmdLine, timeout: Duration) -> Result<Exit, String> {
     }
 
     // 主行程結束後:等 Job 內其他行程(自我複製的移除程式、子安裝程式)結束,不超過剩餘逾時與 DRAIN_MAX
-    let drain = timeout.saturating_sub(started.elapsed()).min(DRAIN_MAX);
+    let drain = timeout.saturating_sub(started.elapsed()).min(drain_max);
     let deadline = std::time::Instant::now() + drain;
     loop {
         let mut info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
@@ -321,14 +322,14 @@ mod tests {
             args: "/Q rustit-no-such-file-xyz".into(),
         };
         assert_eq!(
-            run_job(&cmd, Duration::from_secs(30)).unwrap(),
+            run_job(&cmd, Duration::from_secs(30), DRAIN_MAX).unwrap(),
             Exit::Code(1)
         );
         let missing = CmdLine {
             program: system.join("rustit-missing.exe"),
             args: String::new(),
         };
-        assert!(run_job(&missing, Duration::from_secs(5)).is_err());
+        assert!(run_job(&missing, Duration::from_secs(5), DRAIN_MAX).is_err());
     }
 
     #[cfg(windows)]
@@ -342,7 +343,7 @@ mod tests {
         };
         let started = std::time::Instant::now();
         assert_eq!(
-            run_job(&cmd, Duration::from_secs(1)).unwrap(),
+            run_job(&cmd, Duration::from_secs(1), DRAIN_MAX).unwrap(),
             Exit::Timeout
         );
         assert!(started.elapsed() < Duration::from_secs(10));

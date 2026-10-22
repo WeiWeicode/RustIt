@@ -50,7 +50,16 @@ pub async fn fetch(env: &impl Env, dir: &Path, p: &Install) -> Result<PathBuf, F
         }
         let _ = std::fs::remove_file(&done);
     }
-    let free = env.free_bytes(dir).map_err(|e| fail("DISK_FULL", e))?;
+    let part = dir.join(format!("{}.part", p.installer.file_name()));
+    // 上次在改名前中斷:.part 已完整且雜湊相符就直接採用(否則 Range 從結尾開始會得到 416 而整包重下)
+    if len(&part) == p.size_bytes && hash(&part).await.ok().as_deref() == Some(&p.sha256) {
+        std::fs::rename(&part, &done)
+            .map_err(|e| fail("DOWNLOAD_FAILED", format!("無法改名下載檔:{e}")))?;
+        return Ok(done);
+    }
+    let free = env
+        .free_bytes(dir)
+        .map_err(|e| fail("DOWNLOAD_FAILED", e))?;
     let need = p.size_bytes.saturating_mul(2).saturating_add(FREE_MARGIN);
     if free < need {
         return Err(fail(
@@ -62,7 +71,6 @@ pub async fn fetch(env: &impl Env, dir: &Path, p: &Install) -> Result<PathBuf, F
             ),
         ));
     }
-    let part = dir.join(format!("{}.part", p.installer.file_name()));
     let mut last = String::new();
     for attempt in 0..TRIES {
         if attempt > 0 {
