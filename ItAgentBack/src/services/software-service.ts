@@ -44,11 +44,11 @@ export const ARGS_MAX = 500;
 /** 參數不可指到其他可執行檔、轉換檔、回應檔、設定檔(§2.3、D3) */
 const ARGS_FILE = /\.(msi|msp|mst|exe|dll|bat|cmd|ps1|vbs|js|inf|iss|ini|xml|txt|log|reg|cfg|json)\b/i;
 /**
- * 禁止的屬性(D3;資安稽核 H2):讀外部檔(轉換、修補、來源)、改變安裝方式、隱藏於「新增 / 移除程式」、繞過重開機政策;
- * 以及名稱看起來是檔案或設定檔(*FILE、CONFIG*、INI*)
+ * 禁止的屬性(D3;資安稽核 H2):讀外部檔(轉換、修補、來源)、改變安裝方式(含 ACTION=ADMIN 等,P7-2 L2)、隱藏於「新增 / 移除程式」、
+ * 繞過重開機政策(REBOOT*、Restart Manager 關閉程式;L2);以及名稱看起來是檔案或設定檔(*FILE、CONFIG*、INI*)
  */
 const BANNED_PROPS =
-  /^(TRANSFORMS|TRANSFORMSATSOURCE|TRANSFORMSSECURE|PATCH|MSIPATCHREMOVE|PATCHNEWPACKAGECODE|SOURCELIST|INSTALLSOURCE|SOURCEDIR|ADDSOURCE|ADVERTISE|MSINEWINSTANCE|MSIINSTANCEGUID|REINSTALL|REINSTALLMODE|REBOOT|REBOOTPROMPT|MSILOGGINGMODE|LIMITUI|ARPSYSTEMCOMPONENT|ARPNOREMOVE|MSIINSTALLPERUSER|ROOTDRIVE|SETTINGS|XML|CONFIG.*|INI.*|.*FILE)$/i;
+  /^(TRANSFORMS|TRANSFORMSATSOURCE|TRANSFORMSSECURE|PATCH|MSIPATCHREMOVE|PATCHNEWPACKAGECODE|SOURCELIST|INSTALLSOURCE|SOURCEDIR|ADDSOURCE|ADVERTISE|MSINEWINSTANCE|MSIINSTANCEGUID|REINSTALL|REINSTALLMODE|ACTION|EXECUTEACTION|REBOOT.*|MSIRMSHUTDOWN|MSIRESTARTMANAGERCONTROL|MSILOGGINGMODE|LIMITUI|ARPSYSTEMCOMPONENT|ARPNOREMOVE|MSIINSTALLPERUSER|ROOTDRIVE|SETTINGS|XML|CONFIG.*|INI.*|.*FILE)$/i;
 /**
  * 禁止的開關(去掉開頭的 / - --、比對 = 或 : 之前的名稱,不分大小寫;D3、H2):
  * 記錄 / 回應檔 / 設定檔(log、l*、loadinf、saveinf、f1、f2、r、config…)、轉交 msiexec(v)、另一個套件或修補(i、p、update、package、y、z、t、a、j、x)、
@@ -56,6 +56,8 @@ const BANNED_PROPS =
  */
 const BANNED_SWITCH =
   /^(log|l[*!+voiwearucmpx]*|loadinf|saveinf|f1|f2|r|v|b|z|y|i|p|t|a|j.*|x|update|package|uninstall|repair|modify|layout|parent.*|burn\..*|config|configure|settings|response|unattend|answerfile|password|restartexitcode|debugwnd|silent|ncrc|ini)$/i;
+/** 重開機類開關(/forcerestart、/promptrestart、-reboot、/RESTARTAPPLICATIONS…):重開機由 Agent 依 reboot_policy 處理,只允許 no 開頭的(/norestart;P7-2 L2) */
+const RESTART_SWITCH = /^(?!no).*(restart|reboot)/i;
 /** exe / burn / 未指定類型:名稱含這些字的開關多半是寫檔(記錄、輸出、傾印)或指定路徑,一律拒絕(/DIR、/D 由路徑規則處理) */
 const WRITE_SWITCH = /(log|out|file|dump|trace|save|path|report)/i;
 /** 屬性名稱 */
@@ -108,6 +110,7 @@ function argsGrammarError(v: string, installerType: InstallerType | undefined): 
       const sw = name.replace(/^(--|[/-])/, '');
       const swName = sw.split(':')[0]!;
       if (BANNED_SWITCH.test(swName)) return `不可使用 ${name}(會讀寫外部檔案、轉交其他安裝程式或改變安裝方式)`;
+      if (RESTART_SWITCH.test(swName)) return `不可使用 ${name}(重開機由 Agent 依重開機政策處理,只允許 /norestart 這類)`;
       if (installerType !== 'inno' && installerType !== 'nsis' && WRITE_SWITCH.test(swName)) return `不可使用 ${name}(可能以 SYSTEM 寫檔)`;
       // /switch:value 的值同樣檢查
       const err = argsValueError(sw.includes(':') ? sw.slice(sw.indexOf(':') + 1) : '') ?? argsValueError(value);

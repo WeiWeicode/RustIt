@@ -36,8 +36,8 @@ fn names_file(v: &str) -> bool {
     })
 }
 
-/// 禁止的屬性(完全比對,不分大小寫);另含 `CONFIG*`、`INI*`、`*FILE`
-const BANNED_PROPS: [&str; 25] = [
+/// 禁止的屬性(完全比對,不分大小寫);另含 `CONFIG*`、`INI*`、`REBOOT*`、`*FILE`
+const BANNED_PROPS: [&str; 27] = [
     "TRANSFORMS",
     "TRANSFORMSATSOURCE",
     "TRANSFORMSSECURE",
@@ -53,8 +53,11 @@ const BANNED_PROPS: [&str; 25] = [
     "MSIINSTANCEGUID",
     "REINSTALL",
     "REINSTALLMODE",
-    "REBOOT",
-    "REBOOTPROMPT",
+    // 改變安裝方式(ACTION=ADMIN 等)、Restart Manager 關閉程式(L2);REBOOT* 見 banned_prop
+    "ACTION",
+    "EXECUTEACTION",
+    "MSIRMSHUTDOWN",
+    "MSIRESTARTMANAGERCONTROL",
     "MSILOGGINGMODE",
     "LIMITUI",
     "ARPSYSTEMCOMPONENT",
@@ -70,6 +73,7 @@ fn banned_prop(name: &str) -> bool {
     BANNED_PROPS.contains(&n.as_str())
         || n.starts_with("CONFIG")
         || n.starts_with("INI")
+        || n.starts_with("REBOOT")
         || n.ends_with("FILE")
 }
 
@@ -120,6 +124,13 @@ fn banned_switch(name: &str) -> bool {
         || n.starts_with('j')
         || n.starts_with("parent")
         || n.starts_with("burn.")
+}
+
+/// 重開機類開關(`/forcerestart`、`/promptrestart`、`-reboot`、`/RESTARTAPPLICATIONS`…):重開機由 Agent 依 `reboot_policy` 處理,
+/// 只允許 no 開頭的(`/norestart`;L2)。對應 ItAgentBack `RESTART_SWITCH`
+fn restart_switch(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    !n.starts_with("no") && (n.contains("restart") || n.contains("reboot"))
 }
 
 /// exe / burn / 未指定類型:名稱含這些字的開關多半是寫檔或指定路徑
@@ -265,6 +276,11 @@ fn grammar_error(v: &str, kind: Option<Installer>) -> Option<String> {
             if banned_switch(sw_name) {
                 return Some(format!(
                     "不可使用 {name}(會讀寫外部檔案、轉交其他安裝程式或改變安裝方式)"
+                ));
+            }
+            if restart_switch(sw_name) {
+                return Some(format!(
+                    "不可使用 {name}(重開機由 Agent 依重開機政策處理,只允許 /norestart 這類)"
                 ));
             }
             if !matches!(kind, Some(Installer::Inno | Installer::Nsis)) && write_switch(sw_name) {
