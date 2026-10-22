@@ -122,6 +122,8 @@ pub(crate) struct Shared {
     /// 本機信任簽章者(agent.toml [upgrade] trusted_signers)與下載快取目錄(替換 Watchdog 的第二道驗證)
     pub trusted_signers: Vec<String>,
     pub cache_dir: std::path::PathBuf,
+    /// 軟體派送安裝檔簽章者的本機信任清單(agent.toml [software],與升級分開,P7-3 資安 M3)
+    pub software_signers: Vec<String>,
 }
 
 impl Shared {
@@ -295,6 +297,7 @@ pub async fn run(settings: Settings, mut shutdown: watch::Receiver<bool>) -> Res
         watchdog_replacing: Arc::new(AtomicBool::new(false)),
         watchdog_seen: std::sync::Mutex::new(None),
         trusted_signers: settings.trusted_signers.clone(),
+        software_signers: settings.software_signers.clone(),
         cache_dir: settings
             .state_dir
             .parent()
