@@ -80,6 +80,11 @@ function refsIn(req: sql.Request, refs: number[], col: string): string {
 /** 一次查詢的裝置數上限(參數上限 2100) */
 const REF_BATCH = 1000;
 
+/** P7 reboot_pending:Agent result 的 reboot_required(JSON 序列化無空白,設計 §2.4) */
+const REBOOT_REQUIRED_LIKE = '%"reboot_required":true%';
+/** 只看最近 30 天建立的 software.* 指令(更早仍未重開機的告警已開著,超過後自動關閉) */
+const REBOOT_LOOKBACK_MS = 30 * 86_400_000;
+
 export class SqlMonitorStore implements MonitorStore {
   constructor(private readonly pool: () => Promise<sql.ConnectionPool>) {}
 
@@ -147,10 +152,17 @@ export class SqlMonitorStore implements MonitorStore {
   }
 
   async monitorTargets(since: Date): Promise<MonitorTarget[]> {
-    const r = await (await this.request()).input('since', sql.DateTime2(3), since).input('unexp', sql.NVarChar(100), UNEXPECTED_LIKE).query(`
+    const r = await (await this.request())
+      .input('since', sql.DateTime2(3), since)
+      .input('unexp', sql.NVarChar(100), UNEXPECTED_LIKE)
+      .input('rbLike', sql.NVarChar(100), REBOOT_REQUIRED_LIKE)
+      .input('rbSince', sql.DateTime2(3), new Date(since.getTime() - REBOOT_LOOKBACK_MS)).query(`
       SELECT d.id AS dref, d.last_seen_at, d.clock_skew_ms, h.device_ref AS has_health, ${HEALTH_COLS.replace('h.device_ref, ', '')},
         (SELECT COUNT(*) FROM ita.device_event e
-          WHERE e.device_ref = d.id AND e.event_type = 'agent_started' AND e.occurred_at >= @since AND e.data LIKE @unexp) AS restarts
+          WHERE e.device_ref = d.id AND e.event_type = 'agent_started' AND e.occurred_at >= @since AND e.data LIKE @unexp) AS restarts,
+        (SELECT MIN(c.finished_at) FROM ita.command c
+          WHERE c.device_ref = d.id AND c.kind IN ('software.install', 'software.uninstall') AND c.state = 'succeeded'
+            AND c.created_at >= @rbSince AND c.result_summary LIKE @rbLike AND c.finished_at > (SELECT i.boot_time FROM ita.device_inventory i WHERE i.device_ref = d.id)) AS reboot_since
       FROM ita.device d LEFT JOIN ita.device_health h ON h.device_ref = d.id
       WHERE d.status = 'active' AND d.merged_into IS NULL;
       SELECT device_ref, [rule] FROM ita.device_alert WHERE state = 'open';`);
@@ -164,6 +176,7 @@ export class SqlMonitorStore implements MonitorStore {
       health: d.has_health == null ? null : toHealth({ ...d, device_ref: d.dref }),
       unexpectedRestarts24h: Number(d.restarts ?? 0),
       openRules: rules.get(Number(d.dref)) ?? [],
+      rebootRequiredSince: (d.reboot_since as Date | null) ?? null,
     }));
   }
 

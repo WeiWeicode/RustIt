@@ -24,6 +24,9 @@ const NO_PARAMS = { type: 'object', additionalProperties: false, properties: {} 
 /** 顯示給使用者的文字:不可含控制字元(text 允許換行)與雙向文字控制字元(避免倒轉、偽裝網址) */
 const SAFE_TEXT = '^[^\\u0000-\\u0009\\u000B-\\u001F\\u007F-\\u009F\\u200E\\u200F\\u202A-\\u202E\\u2066-\\u2069]*$';
 const SAFE_LINE = '^[^\\u0000-\\u001F\\u007F-\\u009F\\u200E\\u200F\\u202A-\\u202E\\u2066-\\u2069]*$';
+const UUID = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
+/** 軟體派送類型:同時執行的總數受 SOFTWARE_MAX_CONCURRENT 限制(跨批次與單台,P7 §3.1、§8.2-4) */
+export const SOFTWARE_KINDS: readonly string[] = ['software.install', 'software.uninstall'];
 /** message.show 內文最多行數 */
 export const MESSAGE_MAX_LINES = 30;
 
@@ -88,6 +91,50 @@ export const COMMAND_KINDS: readonly CommandKind[] = [
       properties: {
         component: { type: 'string', enum: ['agent', 'watchdog'] },
         version: { type: 'string', pattern: '^\\d{1,4}\\.\\d{1,4}\\.\\d{1,4}(?:-[0-9A-Za-z.-]{1,20})?$' },
+      },
+    },
+  },
+  // 軟體派送(PLATFORM-PLAN P7;P7-SOFTWARE-DESIGN §2):IT 只送 packageId,建立時由 SoftwareService(kindHook)查目錄、
+  // 檢查狀態 / pilot / 授權數,把參數換成目錄快照(Agent 只信任快照)。有效 24 小時(離線太久回來不再執行過期的安裝)
+  {
+    kind: 'software.install',
+    level: 'admin',
+    expiresSec: 86400,
+    timeoutSec: 4 * 3600,
+    maxPending: 3,
+    params: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['packageId'],
+      properties: {
+        packageId: { type: 'string', pattern: UUID },
+        // A6:略過電池延後(不略過計量網路;§5.4)
+        ignorePower: { type: 'boolean' },
+      },
+    },
+  },
+  {
+    kind: 'software.uninstall',
+    level: 'admin',
+    expiresSec: 86400,
+    timeoutSec: 3600,
+    maxPending: 3,
+    params: { type: 'object', additionalProperties: false, required: ['packageId'], properties: { packageId: { type: 'string', pattern: UUID } } },
+  },
+  // 重新開機(§2.5;Agent 端流程在 P7-3):給使用者儲存工作的時間、訊息同 message.show 的安全文字規則
+  {
+    kind: 'system.reboot',
+    level: 'admin',
+    expiresSec: 4 * 3600,
+    timeoutSec: 1800,
+    maxPending: 1,
+    params: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        delay_sec: { type: 'integer', minimum: 0, maximum: 86400 },
+        message: { type: 'string', minLength: 1, maxLength: 200, pattern: SAFE_LINE },
+        force: { type: 'boolean' },
       },
     },
   },

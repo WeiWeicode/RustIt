@@ -72,7 +72,7 @@ describe('指令派送器', () => {
 
   it('等級與路徑不符 400 ENDPOINT_COMMAND_LEVEL_MISMATCH;不認得的類型、參數錯誤、有效期限超出範圍 400', async () => {
     await assert.rejects(env.commands.create(ctx, IT, 'admin', device.deviceId, { kind: 'inventory.collect' }), { code: 'ENDPOINT_COMMAND_LEVEL_MISMATCH' });
-    await assert.rejects(env.commands.create(ctx, IT, 'basic', device.deviceId, { kind: 'system.reboot' }), { code: 'ITA_COMMAND_KIND_UNKNOWN' });
+    await assert.rejects(env.commands.create(ctx, IT, 'basic', device.deviceId, { kind: 'system.format' }), { code: 'ITA_COMMAND_KIND_UNKNOWN' });
     await assert.rejects(env.commands.create(ctx, IT, 'basic', device.deviceId, { kind: 'message.show', params: {} }), { code: 'VALIDATION_FAILED' });
     await assert.rejects(env.commands.create(ctx, IT, 'basic', device.deviceId, { kind: 'inventory.collect', params: { cmd: 'whoami' } }), {
       code: 'VALIDATION_FAILED',
@@ -325,7 +325,7 @@ describe('指令管理 API(:51240)', () => {
   it('basic 路徑送管理指令 400;參數錯誤 400;找不到 404', async () => {
     const reboot = await create('system.reboot');
     assert.equal(reboot.statusCode, 400);
-    assert.equal(reboot.json().code, 'ITA_COMMAND_KIND_UNKNOWN');
+    assert.equal(reboot.json().code, 'ENDPOINT_COMMAND_LEVEL_MISMATCH');
     const bad = await create('message.show', { params: { text: '' } });
     assert.equal(bad.statusCode, 400);
     assert.equal(bad.json().code, 'VALIDATION_FAILED');

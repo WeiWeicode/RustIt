@@ -22,6 +22,9 @@ const RULES = [
   'agent_silent',
   'upgrade_failed',
   'version_mismatch',
+  'software_install_failed',
+  'reboot_pending',
+  'software_file_tampered',
 ] as const;
 const SEVERITIES = ['warn', 'critical'] as const;
 const STATES = ['open', 'resolved'] as const;
@@ -38,7 +41,7 @@ export const alertSchema = {
       type: 'string',
       enum: RULES,
       description:
-        'offline_long 離線過久、disk_low 磁碟剩餘不足、hardware_changed 硬體變更、agent_restarts Agent 非正常重啟過多、cert_expiring 裝置憑證即將到期、clock_skew 時鐘偏差、agent_tampered Agent / Watchdog 服務被停止或改設定、agent_silent 電腦開著但 Agent 沒有回應、upgrade_failed 升級失敗 2 次或還原失敗、version_mismatch 發佈環目標設定超過 24 小時仍未到目標版本',
+        'offline_long 離線過久、disk_low 磁碟剩餘不足、hardware_changed 硬體變更、agent_restarts Agent 非正常重啟過多、cert_expiring 裝置憑證即將到期、clock_skew 時鐘偏差、agent_tampered Agent / Watchdog 服務被停止或改設定、agent_silent 電腦開著但 Agent 沒有回應、upgrade_failed 升級失敗 2 次或還原失敗、version_mismatch 發佈環目標設定超過 24 小時仍未到目標版本、software_install_failed 軟體安裝失敗、reboot_pending 需要重新開機超過 7 天、software_file_tampered 軟體庫安裝檔被換掉',
     },
     severity: { type: 'string', enum: SEVERITIES },
     state: { type: 'string', enum: STATES },

@@ -2,11 +2,14 @@
  * 指令儲存(SQL Server 2012,migration 0003;PLATFORM-PLAN P4、ENDPOINT-AGENT-GUIDE §8.4–§8.5):ita.command、ita.command_batch、
  * ita.command_file(指令附檔索引,P4-2;檔案本身在 COMMAND_FILES_DIR)。
  * 與 SqlDeviceStore 共用連線池。狀態轉換一律條件更新(WHERE state IN …):多個來源同時更新時只有一個成功,狀態只能往前。
+ * 批次狀態與第二人核可(migration 0008,P7 B1):核可 / 駁回 / 逾期以條件更新批次 state,同一交易處理批次內 queued 的指令。
  */
 import sql from 'mssql';
 import { companyIn } from './sql-store.js';
 import type {
+  Actor,
   BatchRecord,
+  BatchState,
   CommandFileRecord,
   CommandFileStore,
   CommandFilter,
@@ -23,7 +26,7 @@ type Row = Record<string, unknown>;
 
 const cut = (s: string | null | undefined, n: number): string | null => (s == null || s === '' ? null : s.length > n ? s.slice(0, n) : s);
 
-const COLS = `c.id, c.command_id, c.batch_ref, b.batch_id, b.max_concurrent, c.device_ref, d.device_id, d.computer_name, d.company AS device_company, c.cert_dn, c.kind, c.level, c.params,
+const COLS = `c.id, c.command_id, c.batch_ref, b.batch_id, b.max_concurrent, b.state AS batch_state, c.device_ref, d.device_id, d.computer_name, d.company AS device_company, c.cert_dn, c.kind, c.level, c.params,
   c.state, c.progress, c.result_summary, c.error_code, c.error_message, c.expires_at, c.timeout_at, c.send_count, c.created_by_emp, c.created_by_name,
   c.request_id, c.created_at, c.sent_at, c.acked_at, c.started_at, c.finished_at`;
 const FROM = `ita.command c JOIN ita.device d ON d.id = c.device_ref LEFT JOIN ita.command_batch b ON b.id = c.batch_ref`;
@@ -39,6 +42,7 @@ function toCommand(r: Row): CommandRecord {
     batchRef: r.batch_ref == null ? null : Number(r.batch_ref),
     batchId: r.batch_id == null ? null : String(r.batch_id).toLowerCase(),
     batchMaxConcurrent: r.max_concurrent == null ? null : Number(r.max_concurrent),
+    batchState: r.batch_state == null ? null : (String(r.batch_state) as BatchState),
     deviceRef: Number(r.device_ref),
     deviceId: String(r.device_id).toLowerCase(),
     computerName: String(r.computer_name),
@@ -104,14 +108,17 @@ export class SqlCommandStore implements CommandStore, CommandFileStore {
           .input('params', sql.NVarChar(4000), batch.params)
           .input('n', sql.Int, commands.length)
           .input('max', sql.Int, batch.maxConcurrent)
+          .input('approval', sql.Bit, batch.requiresApproval)
+          .input('state', sql.VarChar(16), batch.requiresApproval ? 'pending_approval' : 'running')
           .input('idem', sql.VarChar(128), batch.idempotencyKey)
           .input('emp', sql.NVarChar(64), batch.createdByEmp)
           .input('name', sql.NVarChar(100), cut(batch.createdByName, 100))
           .input('rid', sql.VarChar(64), cut(batch.requestId, 64))
           .input('at', sql.DateTime2(3), batch.createdAt).query(`
-            INSERT INTO ita.command_batch (batch_id, kind, level, params, target_count, max_concurrent, idempotency_key, created_by_emp, created_by_name, request_id, created_at)
+            INSERT INTO ita.command_batch (batch_id, kind, level, params, target_count, max_concurrent, requires_approval, state, idempotency_key,
+              created_by_emp, created_by_name, request_id, created_at)
             OUTPUT INSERTED.id
-            VALUES (@bid, @kind, @level, @params, @n, @max, @idem, @emp, @name, @rid, @at)`);
+            VALUES (@bid, @kind, @level, @params, @n, @max, @approval, @state, @idem, @emp, @name, @rid, @at)`);
         batchRef = Number((r.recordset[0] as Row).id);
       }
       // 每列 12 個參數,每批 100 列(參數上限 2100)
@@ -161,7 +168,9 @@ export class SqlCommandStore implements CommandStore, CommandFileStore {
 
   private async batchWhere(where: string, bind: (r: sql.Request) => sql.Request): Promise<BatchRecord | null> {
     const r = await bind(await this.request()).query(`
-      SELECT b.id, b.batch_id, b.kind, b.level, b.params, b.target_count, b.max_concurrent, b.created_by_emp, b.created_by_name, b.created_at
+      SELECT b.id, b.batch_id, b.kind, b.level, b.params, b.target_count, b.max_concurrent, b.state, b.requires_approval,
+        b.approved_by_emp, b.approved_by_name, b.approved_at, b.rejected_by_emp, b.rejected_by_name, b.rejected_at, b.reject_reason,
+        b.created_by_emp, b.created_by_name, b.created_at
       FROM ita.command_batch b WHERE ${where};
       SELECT c.state, COUNT(*) AS n FROM ita.command c JOIN ita.command_batch b ON b.id = c.batch_ref WHERE ${where} GROUP BY c.state;`);
     const sets = r.recordsets as unknown as Row[][];
@@ -177,6 +186,15 @@ export class SqlCommandStore implements CommandStore, CommandFileStore {
       params: String(row.params),
       targetCount: Number(row.target_count),
       maxConcurrent: Number(row.max_concurrent),
+      state: String(row.state) as BatchState,
+      requiresApproval: row.requires_approval === true,
+      approvedByEmp: strOrNull(row.approved_by_emp),
+      approvedByName: strOrNull(row.approved_by_name),
+      approvedAt: dateOrNull(row.approved_at),
+      rejectedByEmp: strOrNull(row.rejected_by_emp),
+      rejectedByName: strOrNull(row.rejected_by_name),
+      rejectedAt: dateOrNull(row.rejected_at),
+      rejectReason: strOrNull(row.reject_reason),
       createdByEmp: String(row.created_by_emp),
       createdByName: strOrNull(row.created_by_name),
       createdAt: row.created_at as Date,
@@ -309,6 +327,100 @@ export class SqlCommandStore implements CommandStore, CommandFileStore {
     const r = await (await this.request()).input('now', sql.DateTime2(3), now).input('limit', sql.Int, limit).query(`
       SELECT TOP (@limit) ${COLS} FROM ${FROM}
       WHERE (c.state IN ('queued', 'sent') AND c.expires_at <= @now) OR (c.state IN ('acked', 'running') AND c.timeout_at <= @now)
+      ORDER BY c.id`);
+    return (r.recordset as Row[]).map(toCommand);
+  }
+
+  // ---------- 批次第二人核可(B1;migration 0008) ----------
+
+  async approveBatch(batchRef: number, actor: Actor, at: Date, expiresAt: Date): Promise<boolean> {
+    const r = await (await this.request())
+      .input('batch', sql.BigInt, batchRef)
+      .input('emp', sql.NVarChar(64), cut(actor.emp, 64))
+      .input('name', sql.NVarChar(100), cut(actor.name, 100))
+      .input('at', sql.DateTime2(3), at)
+      .input('exp', sql.DateTime2(3), expiresAt).query(`
+        SET XACT_ABORT ON;
+        BEGIN TRAN;
+        DECLARE @ok BIT;
+        UPDATE ita.command_batch SET state = 'running', approved_by_emp = @emp, approved_by_name = @name, approved_at = @at
+        WHERE id = @batch AND state = 'pending_approval' AND created_by_emp <> @emp AND created_at > DATEADD(HOUR, -24, @at);
+        SET @ok = CASE WHEN @@ROWCOUNT > 0 THEN 1 ELSE 0 END;
+        -- 待核可期間不倒數:有效期限自核可時起算
+        IF @ok = 1 UPDATE ita.command SET expires_at = @exp, updated_at = SYSUTCDATETIME() WHERE batch_ref = @batch AND state = 'queued';
+        COMMIT;
+        SELECT @ok AS ok;`);
+    return (r.recordset[0] as Row | undefined)?.ok === true;
+  }
+
+  async rejectBatch(batchRef: number, actor: Actor, at: Date, reason: string): Promise<boolean> {
+    const r = await (await this.request())
+      .input('batch', sql.BigInt, batchRef)
+      .input('emp', sql.NVarChar(64), cut(actor.emp, 64))
+      .input('name', sql.NVarChar(100), cut(actor.name, 100))
+      .input('at', sql.DateTime2(3), at)
+      .input('reason', sql.NVarChar(500), cut(reason, 500)).query(`
+        SET XACT_ABORT ON;
+        BEGIN TRAN;
+        DECLARE @ok BIT;
+        UPDATE ita.command_batch SET state = 'rejected', rejected_by_emp = @emp, rejected_by_name = @name, rejected_at = @at, reject_reason = @reason
+        WHERE id = @batch AND state = 'pending_approval';
+        SET @ok = CASE WHEN @@ROWCOUNT > 0 THEN 1 ELSE 0 END;
+        IF @ok = 1 UPDATE ita.command SET state = 'canceled', error_code = 'BATCH_REJECTED', finished_at = @at, updated_at = SYSUTCDATETIME()
+          WHERE batch_ref = @batch AND state = 'queued';
+        COMMIT;
+        SELECT @ok AS ok;`);
+    return (r.recordset[0] as Row | undefined)?.ok === true;
+  }
+
+  async expirePendingBatches(createdBefore: Date, at: Date): Promise<number> {
+    const r = await (await this.request()).input('before', sql.DateTime2(3), createdBefore).input('at', sql.DateTime2(3), at).query(`
+      SET XACT_ABORT ON;
+      BEGIN TRAN;
+      DECLARE @expired TABLE (id BIGINT);
+      UPDATE ita.command_batch SET state = 'expired' OUTPUT INSERTED.id INTO @expired
+      WHERE state = 'pending_approval' AND created_at <= @before;
+      UPDATE ita.command SET state = 'canceled', error_code = 'APPROVAL_EXPIRED', finished_at = @at, updated_at = SYSUTCDATETIME()
+      WHERE batch_ref IN (SELECT id FROM @expired) AND state = 'queued';
+      COMMIT;
+      SELECT COUNT(*) AS n FROM @expired;`);
+    return Number((r.recordset[0] as Row | undefined)?.n ?? 0);
+  }
+
+  async finishBatchIfDone(batchRef: number): Promise<void> {
+    await (await this.request()).input('batch', sql.BigInt, batchRef).query(`
+      UPDATE ita.command_batch SET state = 'done'
+      WHERE id = @batch AND state = 'running'
+        AND NOT EXISTS (SELECT 1 FROM ita.command WHERE batch_ref = @batch AND state IN ('queued', 'sent', 'acked', 'running'))`);
+  }
+
+  private kindsIn(req: sql.Request, kinds: readonly string[]): string {
+    return kinds.map((k, i) => (req.input(`kd${i}`, sql.VarChar(64), k), `@kd${i}`)).join(', ');
+  }
+
+  async activeOfKinds(kinds: readonly string[]): Promise<number> {
+    if (kinds.length === 0) return 0;
+    const req = await this.request();
+    const r = await req.query(`SELECT COUNT(*) AS n FROM ita.command WHERE kind IN (${this.kindsIn(req, kinds)}) AND state IN ('sent', 'acked', 'running')`);
+    return Number((r.recordset[0] as Row).n);
+  }
+
+  async recentGatedTargets(emp: string, kinds: readonly string[], since: Date): Promise<number> {
+    if (kinds.length === 0) return 0;
+    const req = (await this.request()).input('emp', sql.NVarChar(64), cut(emp, 64)).input('since', sql.DateTime2(3), since);
+    const r = await req.query(`SELECT COUNT(DISTINCT c.device_ref) AS n FROM ita.command c
+      LEFT JOIN ita.command_batch b ON b.id = c.batch_ref
+      WHERE c.created_by_emp = @emp AND c.created_at >= @since AND c.kind IN (${this.kindsIn(req, kinds)})
+        AND (b.id IS NULL OR (b.approved_by_emp IS NULL AND b.state IN ('running', 'done')))`);
+    return Number((r.recordset[0] as Row).n);
+  }
+
+  async queuedOfKinds(kinds: readonly string[], now: Date, limit: number, afterId = 0): Promise<CommandRecord[]> {
+    if (kinds.length === 0) return [];
+    const req = (await this.request()).input('now', sql.DateTime2(3), now).input('limit', sql.Int, limit).input('after', sql.BigInt, afterId);
+    const r = await req.query(`SELECT TOP (@limit) ${COLS} FROM ${FROM}
+      WHERE c.kind IN (${this.kindsIn(req, kinds)}) AND c.state = 'queued' AND c.expires_at > @now AND c.id > @after
+        AND (b.id IS NULL OR b.state IN ('running', 'done'))
       ORDER BY c.id`);
     return (r.recordset as Row[]).map(toCommand);
   }

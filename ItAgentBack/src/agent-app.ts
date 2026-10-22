@@ -8,6 +8,7 @@
  *   - POST /agent/v1/watchdog/report(Watchdog 上報,watchdog.schema.json,P5-2):同一張裝置憑證,只更新 Watchdog 欄位與寫 Watchdog 事件
  *   - POST /agent/v1/commands/{commandId}/files(指令附檔,logs.collect 日誌 zip,上限 20 MB;command-file.schema.json,P4-2)
  *   - GET /agent/v1/releases/{component}/{version}/{file}(版本檔下載,支援 Range;只給這台被指派的目標版本,P6-UPGRADE-DESIGN §3.1)
+ *   - GET /agent/v1/packages/{packageId}(軟體套件下載,支援 Range;只給有尚未結束的此套件 software.install 的裝置,P7-SOFTWARE-DESIGN §3.3)
  *   - HTTPS 回報同時處理中的請求超過 AGENT_MAX_INFLIGHT 時回 429 ITA_BUSY + Retry-After,在驗證身分前就擋下(A3)
  *   - 與 :51240 是不同的 Fastify 實例,不共用 hook(§5.2);日誌帶 x-request-id、DN、指紋(§5.7)
  *   - 告警評估(P5):每 5 分鐘由這裡的計時器呼叫 AlertService.sweep(與心跳逾時、指令逾期掃描同一處管理)
@@ -38,6 +39,7 @@ import type { AlertService } from './services/alert-service.js';
 import type { CommandDispatcher, CommandUpdateBody } from './services/command-dispatcher.js';
 import type { CommandFileService } from './services/command-files.js';
 import type { ReleaseService } from './services/release-service.js';
+import type { SoftwareService } from './services/software-service.js';
 import type { AgentConnection, Ctx, DeviceService } from './services/device-service.js';
 import type { DeviceRecord } from './stores/types.js';
 
@@ -73,6 +75,8 @@ export interface AgentAppOptions {
   alertSweepIntervalMs?: number;
   /** 升級(P6;省略 = 不開放下載、不評估升級告警) */
   releases?: ReleaseService;
+  /** 軟體派送(P7;省略 = 不開放套件下載,SOFTWARE_DIR 未設定) */
+  software?: SoftwareService;
   /** giga-observe 監控(loadMonitorEnv;省略 = 不監控) */
   monitor?: MonitorEnv;
   /** 監控心跳附帶的相依服務狀態(SQL Server / Mongo / Redis) */
@@ -262,6 +266,19 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
         const range = req.headers.range;
         const d = await releases.download(ctxOf(req), req.device!, req.params.component, req.params.version, req.params.file, typeof range === 'string' ? range : undefined);
         // 416 帶 Content-Range: bytes */大小,Watchdog 依此從頭重新下載
+        return reply.status(d.status).headers(d.headers).send(d.stream ?? undefined);
+      },
+    );
+
+  // 軟體套件下載(P7):Agent 中斷後以 Range 續傳;大檔不經 Fastify 緩衝(串流)
+  const software = opts.software;
+  if (software)
+    app.get<{ Params: { packageId: string } }>(
+      '/agent/v1/packages/:packageId',
+      { schema: { params: { type: 'object', required: ['packageId'], properties: { packageId: { type: 'string', format: 'uuid' } } } } },
+      async (req, reply) => {
+        const range = req.headers.range;
+        const d = await software.download(ctxOf(req), req.device!, req.params.packageId, typeof range === 'string' ? range : undefined);
         return reply.status(d.status).headers(d.headers).send(d.stream ?? undefined);
       },
     );

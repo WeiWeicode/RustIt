@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "type": "command_update",
+  "id": "8d4e0f3a-6b5c-4d7e-9f8a-3c4d5e6f7a22",
+  "body": {
+    "command_id": "6c1d9e2f-3a4b-4c5d-8e6f-7a8b9c0d1e21",
+    "state": "failed",
+    "error_code": "HASH_MISMATCH",
+    "error_message": "下載檔案的 SHA-256 與指令不符,未執行安裝程式",
+    "occurred_at": "2026-10-20T08:00:30.000Z"
+  }
+}

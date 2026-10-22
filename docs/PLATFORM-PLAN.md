@@ -211,6 +211,7 @@ Demo(Tauri)改造為使用者端程式 `desktop`:使用者會用的頁面保留(
 - **派送器**(ItAgentBack service 層):寫入 SQL → 該裝置在線就從 WebSocket 推 `command` → 依 `command_update` 更新狀態;Agent 重連(收到 `hello`)時補送 `queued` 指令;每分鐘掃描逾期指令設為 `expired`。單一實例,多實例另議(指南 §8.4)。
 - **Agent 執行器**:以 `command_id` 去重(去重表在本機持久化,重開機後仍有效);同時間只執行一個會改變系統的指令(`software.*`、`system.reboot`、`agent.upgrade`),查詢類可並行;不認得的 `kind` 回 `UNSUPPORTED_COMMAND`;執行結果先寫本機再回報。
 - **第一批類型**:`inventory.collect`(basic)、`agent.restart`(basic)、`message.show`(basic;使用者端程式在執行就由它顯示,否則 `WTSSendMessage` 跳系統訊息框);之後 P6 `agent.upgrade`、P7 `software.install` / `software.uninstall` / `system.reboot`。
+- **每台上限與批次核可(P7 補充,2026-10-20)**:同一台尚未結束的同類型指令 `software.install`、`software.uninstall` 各 3 筆,`system.reboot` 1 筆(超過 `409 ITA_COMMAND_LIMIT`);`software.*` 同時執行總數另受 `SOFTWARE_MAX_CONCURRENT`(預設 20,跨批次與單台)限制;admin 批次超過 `BATCH_APPROVAL_THRESHOLD`(20)台需第二人核可(B1),`ita.command_batch.state`(0008)。細節見 `P7-SOFTWARE-DESIGN.md` §2.1、§6 與 `contracts/command-kinds.md`。
 - **畫面**:電腦詳情的指令按鈕(依 itapp 按鈕權限 ∧ `/api/auth/me` 的 `endpoint.*` 顯示,指南 §8.6)、「指令紀錄」Tab;執行中每 2 秒輪詢 `GET /commands/{id}`。
 
 ### 4.5 升級 — P6
@@ -242,6 +243,10 @@ Demo(Tauri)改造為使用者端程式 `desktop`:使用者會用的頁面保留(
 | 移除 | `software.uninstall`:用登錄檔 `QuietUninstallString` / `UninstallString` 加靜默參數,MSI 用 `msiexec /x {產品代碼} /qn`;輪詢登錄檔直到項目消失(沿用 Demo `deploy.rs` 的處理) |
 | 重開機 | 結束代碼 3010 / 1641 不強制重開,狀態 `succeeded` + `reboot_required`;IT 另下 `system.reboot`(先提示使用者,可延後) |
 | 授權數 | 目錄記錄授權數,已安裝數(由資產比對)達上限時不允許派送;報表屬路線圖 |
+| 參數快照與限制(2026-10-20 定案,P7-1) | IT 只送 `packageId`,主機建立指令時把目錄內容寫成**參數快照**(檔案雜湊、大小、類型、安裝參數、預期簽章者、偵測規則),**Agent 只信任快照**;安裝參數字元白名單、不經 shell、不可指到其他檔案、不可含機密字樣 |
+| `draft` 只能派 pilot | `draft` / `tested` 的套件只能派到 `pilot` 環的電腦(放進 / 移出 pilot 需全部公司角色,沿用 P6);目錄維護需 `endpoint.software.manage` 且全部公司角色;`published_by ≠ created_by` |
+| 安裝前複驗 | 主機下載前複驗 SHA-256(檔案被換掉 `503 ITA_PACKAGE_CHANGED`),下載只給有尚未結束的此套件 `software.install` 的裝置;端點仍須自己驗雜湊與簽章者(主機複驗只是第二道防線) |
+| 批次核可 | 超過 20 台的批次 `pending_approval`,建立人以外的 IT 核可後才送出(同人 `403`),24 小時無人核可取消;細節見 `P7-SOFTWARE-DESIGN.md` §6 |
 
 **為何不用 giga-file-service**:附件服務的下載走使用者登入(BFF),Agent 沒有使用者身分;安裝檔也遠大於 30 MB。軟體庫由 ItAgentBack 唯讀提供。
 
@@ -348,7 +353,7 @@ Demo(Tauri)改造為使用者端程式 `desktop`:使用者會用的頁面保留(
 | `routes/commands.ts` | 指南 §8.3 的指令 API(basic / admin 分路徑、批次、取消、Idempotency-Key) | P4 |
 | `routes/alerts.ts` | 告警清單(由事件與規則計算) | P5 |
 | `routes/releases.ts` | 版本登錄、發佈環目標版本、裝置所屬環 | P6 |
-| `routes/software.ts` | 軟體目錄 CRUD、NAS 檔案瀏覽、狀態變更、派送(建立 batch) | P7 |
+| `routes/software.ts` | 軟體目錄 CRUD、軟體庫檔案瀏覽、狀態變更、派送(建立 batch);批次核可在 `routes/commands.ts` | P7 |
 | `agent-app.ts`(續) | WS `command` / `command_update`(P4)、`POST /agent/v1/watchdog/report`(P5)、`GET /agent/v1/releases/...`(P6)、`GET /agent/v1/packages/{id}`(P7);`hello_ack` 帶設定版本號(P2) | P4–P7 |
 | `services/sync-service.ts` | `/sync` 冪等比對(INTEGRATION-PLAN §4.2)、`offline_period` 等事件寫入 | P2 |
 | `services/command-dispatcher.ts` | 指令狀態機、在線推送、重連補送、逾期、批次限流 | P4 |
@@ -414,7 +419,7 @@ Demo(Tauri)改造為使用者端程式 `desktop`:使用者會用的頁面保留(
 
 ## 8. 階段與完成標準
 
-> 進度(細節以甘特圖為準):P0–P4 已在測試區完成(P3 於 2026-10-19 完成合併驗證;P4 含 GigaItApp 指令畫面，見 `HANDOFF.md`);**P5 測試區完成(2026-10-20)**(設計 `P5-MONITOR-DESIGN.md`:P5-1 健康 / 變更事件 / 告警已上測試區;P5-2 Watchdog 已合併並於 2026-10-19 VM 驗收通過;P5-3 GigaItApp 畫面 2026-10-20 上測試區並驗證通過;P5-4 指南 v0.10 回寫);P6 設計 2026-10-20 確認(`P6-UPGRADE-DESIGN.md`),P6-1 進行中;P7 設計草案 2026-10-20(`P7-SOFTWARE-DESIGN.md`,§9 已全部確認)、P8 未開始。
+> 進度(細節以甘特圖為準):P0–P4 已在測試區完成(P3 於 2026-10-19 完成合併驗證;P4 含 GigaItApp 指令畫面，見 `HANDOFF.md`);**P5 測試區完成(2026-10-20)**(設計 `P5-MONITOR-DESIGN.md`:P5-1 健康 / 變更事件 / 告警已上測試區;P5-2 Watchdog 已合併並於 2026-10-19 VM 驗收通過;P5-3 GigaItApp 畫面 2026-10-20 上測試區並驗證通過;P5-4 指南 v0.10 回寫);**P6 測試區完成(2026-10-21)**(設計 `P6-UPGRADE-DESIGN.md`:Agent 0.8.2 / Watchdog 0.3.2 經正式發版流程發佈;上線前待正式簽章憑證與 NAS);**P7 進行中**(設計 `P7-SOFTWARE-DESIGN.md`,§9 已全部確認;P7-1 後端實作完成、待資安稽核與 MR;Agent 版本改為 0.9.0)、P8 未開始。
 
 | 階段 | 內容 | 主要 repo | 完成標準 | 依賴 |
 | --- | --- | --- | --- | --- |

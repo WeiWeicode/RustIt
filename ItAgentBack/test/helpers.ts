@@ -21,6 +21,7 @@ import type {
   AlertRecord,
   AlertRule,
   BatchRecord,
+  BatchState,
   CompanyChange,
   CompanySource,
   CommandFileRecord,
@@ -459,6 +460,8 @@ type MemoryAlert = AlertOpen & {
 export class MemoryMonitorStore extends Failable implements MonitorStore {
   health = new Map<number, DeviceHealthRecord>();
   alerts: MemoryAlert[] = [];
+  /** P7 reboot_pending 測試用:裝置 → 需要重新開機的起始時間 */
+  rebootRequired = new Map<number, Date>();
   constructor(private readonly devices: MemoryDeviceStore) {
     super();
   }
@@ -520,6 +523,7 @@ export class MemoryMonitorStore extends Failable implements MonitorStore {
           (e) => e.deviceRef === d.id && e.type === 'agent_started' && e.occurredAt >= since && e.data.includes('"previous_exit":"unexpected"'),
         ).length,
         openRules: this.alerts.filter((a) => a.deviceRef === d.id && a.state === 'open').map((a) => a.rule),
+        rebootRequiredSince: this.rebootRequired.get(d.id) ?? null,
       }));
   }
   async openAlert(a: AlertOpen) {
@@ -632,7 +636,18 @@ export const certHeaders = (fp = FP) => ({ 'x-client-cert-dn': DN, 'x-client-cer
 /** 指令儲存(記憶體版,與 SqlCommandStore 相同的條件更新語意) */
 export class MemoryCommandStore extends Failable implements CommandStore, CommandFileStore {
   commands: (NewCommand & { id: number; batchRef: number | null; state: CommandState } & Partial<CommandRecord>)[] = [];
-  batches: (NewBatch & { id: number; targetCount: number })[] = [];
+  batches: (NewBatch & {
+    id: number;
+    targetCount: number;
+    state: BatchState;
+    approvedByEmp: string | null;
+    approvedByName: string | null;
+    approvedAt: Date | null;
+    rejectedByEmp: string | null;
+    rejectedByName: string | null;
+    rejectedAt: Date | null;
+    rejectReason: string | null;
+  })[] = [];
   files: (NewCommandFile & { id: number })[] = [];
   constructor(private readonly devices: MemoryDeviceStore) {
     super();
@@ -654,6 +669,7 @@ export class MemoryCommandStore extends Failable implements CommandStore, Comman
       ...c,
       batchId: b?.batchId ?? null,
       batchMaxConcurrent: b?.maxConcurrent ?? null,
+      batchState: b?.state ?? null,
       deviceId: d.deviceId,
       computerName: d.computerName,
       deviceCompany: d.company,
@@ -665,6 +681,10 @@ export class MemoryCommandStore extends Failable implements CommandStore, Comman
     for (const c of this.commands.filter((x) => x.batchRef === b.id)) counts[c.state] = (counts[c.state] ?? 0) + 1;
     return { ...b, counts };
   }
+  private cancelQueued(batchRef: number, at: Date, code: string) {
+    for (const c of this.commands)
+      if (c.batchRef === batchRef && c.state === 'queued') Object.assign(c, { state: 'canceled', errorCode: code, finishedAt: at });
+  }
   async createCommands(batch: NewBatch | null, commands: NewCommand[]) {
     this.hit('createCommands');
     for (const c of commands)
@@ -673,7 +693,19 @@ export class MemoryCommandStore extends Failable implements CommandStore, Comman
     let batchRef: number | null = null;
     if (batch) {
       batchRef = this.batches.length + 1;
-      this.batches.push({ ...batch, id: batchRef, targetCount: commands.length });
+      this.batches.push({
+        ...batch,
+        id: batchRef,
+        targetCount: commands.length,
+        state: batch.requiresApproval ? 'pending_approval' : 'running',
+        approvedByEmp: null,
+        approvedByName: null,
+        approvedAt: null,
+        rejectedByEmp: null,
+        rejectedByName: null,
+        rejectedAt: null,
+        rejectReason: null,
+      });
     }
     for (const c of commands) this.commands.push({ ...c, id: this.commands.length + 1, batchRef, state: 'queued' });
   }
@@ -773,6 +805,64 @@ export class MemoryCommandStore extends Failable implements CommandStore, Comman
     this.hit('dueForSweep');
     return this.commands
       .filter((c) => (['queued', 'sent'].includes(c.state) && c.expiresAt <= now) || (['acked', 'running'].includes(c.state) && c.timeoutAt && c.timeoutAt <= now))
+      .slice(0, limit)
+      .map((c) => this.rec(c));
+  }
+  async approveBatch(batchRef: number, actor: Actor, at: Date, expiresAt: Date) {
+    this.hit('approveBatch');
+    const b = this.batches.find((x) => x.id === batchRef);
+    if (!b || b.state !== 'pending_approval' || b.createdByEmp === actor.emp || at.getTime() - b.createdAt.getTime() >= 24 * 3_600_000) return false;
+    Object.assign(b, { state: 'running', approvedByEmp: actor.emp, approvedByName: actor.name, approvedAt: at });
+    for (const c of this.commands) if (c.batchRef === batchRef && c.state === 'queued') c.expiresAt = expiresAt;
+    return true;
+  }
+  async rejectBatch(batchRef: number, actor: Actor, at: Date, reason: string) {
+    this.hit('rejectBatch');
+    const b = this.batches.find((x) => x.id === batchRef);
+    if (!b || b.state !== 'pending_approval') return false;
+    Object.assign(b, { state: 'rejected', rejectedByEmp: actor.emp, rejectedByName: actor.name, rejectedAt: at, rejectReason: reason });
+    this.cancelQueued(batchRef, at, 'BATCH_REJECTED');
+    return true;
+  }
+  async expirePendingBatches(createdBefore: Date, at: Date) {
+    this.hit('expirePendingBatches');
+    let n = 0;
+    for (const b of this.batches)
+      if (b.state === 'pending_approval' && b.createdAt <= createdBefore) {
+        b.state = 'expired';
+        this.cancelQueued(b.id, at, 'APPROVAL_EXPIRED');
+        n++;
+      }
+    return n;
+  }
+  async finishBatchIfDone(batchRef: number) {
+    this.hit('finishBatchIfDone');
+    const b = this.batches.find((x) => x.id === batchRef);
+    if (b?.state === 'running' && !this.commands.some((c) => c.batchRef === batchRef && ['queued', 'sent', 'acked', 'running'].includes(c.state))) b.state = 'done';
+  }
+  async recentGatedTargets(emp: string, kinds: readonly string[], since: Date) {
+    this.hit('recentGatedTargets');
+    const refs = new Set<number>();
+    for (const c of this.commands) {
+      if (c.createdByEmp !== emp || c.createdAt < since || !kinds.includes(c.kind)) continue;
+      const b = this.batches.find((x) => x.id === c.batchRef);
+      if (b && (b.approvedByEmp !== null || !['running', 'done'].includes(b.state))) continue;
+      refs.add(c.deviceRef);
+    }
+    return refs.size;
+  }
+  async activeOfKinds(kinds: readonly string[]) {
+    this.hit('activeOfKinds');
+    return this.commands.filter((c) => kinds.includes(c.kind) && ['sent', 'acked', 'running'].includes(c.state)).length;
+  }
+  async queuedOfKinds(kinds: readonly string[], now: Date, limit: number, afterId = 0) {
+    this.hit('queuedOfKinds');
+    return this.commands
+      .filter((c) => kinds.includes(c.kind) && c.state === 'queued' && c.expiresAt > now && c.id > afterId)
+      .filter((c) => {
+        const b = this.batches.find((x) => x.id === c.batchRef);
+        return !b || b.state === 'running' || b.state === 'done';
+      })
       .slice(0, limit)
       .map((c) => this.rec(c));
   }

@@ -18,8 +18,11 @@ import { inScope, scopeOf } from '../src/services/scope.js';
 import type { DeviceRecord } from '../src/stores/types.js';
 import { ReleaseFiles } from '../src/services/release-files.js';
 import { ReleaseService } from '../src/services/release-service.js';
+import { SoftwareFiles } from '../src/services/software-files.js';
+import { SoftwareService } from '../src/services/software-service.js';
 import { ALL, inventoryRequest, only, setupCommands } from './helpers.js';
 import { MemoryReleaseStore, releasesDir } from './release-helpers.js';
+import { MemorySoftwareStore, softwareDir } from './software-helpers.js';
 
 const log = Fastify({ logger: { level: 'silent' } }).log;
 const agentCtx = { log, requestId: 'agent' };
@@ -78,6 +81,11 @@ describe('管理 API 的資料範圍(:51240)', () => {
     (id) => env.service.lookup(id),
     { now: env.clock.now },
   );
+  const swDir = softwareDir();
+  const software = new SoftwareService(new MemorySoftwareStore(env.sql, env.store), new SoftwareFiles(swDir.root), env.sql, {
+    now: env.clock.now,
+    commands: () => env.commands,
+  });
   let app: FastifyInstance;
   let jwks: http.Server;
   const tokens: Record<string, string> = {};
@@ -115,6 +123,7 @@ describe('管理 API 的資料範圍(:51240)', () => {
       files: env.files,
       alerts: env.alerts,
       releases,
+      software,
     });
 
     // 甲:憑證 FQDN;乙:憑證判不出、回報網域 b.example;未指定:工作群組
@@ -387,6 +396,58 @@ describe('管理 API 的資料範圍(:51240)', () => {
     assert.equal((await call(tokens.none!, 'GET', '/v1/releases/files')).statusCode, 200);
   });
 
+  it('軟體派送(P7):目錄維護只有全部公司角色;已安裝台數只計範圍內;派送與核可範圍外與不存在相同', async () => {
+    swDir.put('Example Office/16.0.1/office-setup.exe', 'MZ-office');
+    const body = {
+      name: 'Example Office',
+      version: '16.0.1',
+      fileName: 'Example Office/16.0.1/office-setup.exe',
+      installerType: 'exe',
+      installArgs: '/quiet',
+      detectType: 'display_name',
+      detectValue: 'Example Office%',
+    };
+    for (const [method, url, payload] of [
+      ['POST', '/v1/software', body],
+      ['PUT', `/v1/software/${NONE}`, { notes: 'x' }],
+      ['POST', `/v1/software/${NONE}/mark-tested`, { signerThumbprints: ['a'.repeat(40)] }],
+      ['POST', `/v1/software/${NONE}/publish`, undefined],
+      ['POST', `/v1/software/${NONE}/revoke`, undefined],
+    ] as const) {
+      const res = await call(tokens.a!, method, url, payload);
+      assert.deepEqual([res.statusCode, res.json().code], [403, 'ITA_SCOPE_ALL_REQUIRED'], `${method} ${url}`);
+    }
+    const reg = await call(tokens.all!, 'POST', '/v1/software', body);
+    assert.equal(reg.statusCode, 200, reg.body);
+    const pkgId = reg.json().packageId as string;
+    // 已安裝台數:甲只看到 PC-A;全部公司看到 PC-A、PC-B(PC-U 沒有資產)。清單只算已發佈的套件(M6),draft 看詳情
+    assert.equal(((await call(tokens.all!, 'GET', '/v1/software')).json().items as { installedCount: number | null }[])[0]!.installedCount, null);
+    const count = async (token: string) => (await call(token, 'GET', `/v1/software/${pkgId}`)).json().installedCount as number;
+    assert.equal(await count(tokens.all!), 2);
+    assert.equal(await count(tokens.a!), [devA, devB].filter((d) => env.sql.byId(d.id).company === '甲公司').length);
+    assert.equal(await count(tokens.none!), 0);
+    assert.equal((await call(tokens.none!, 'GET', '/v1/software/files')).statusCode, 200);
+    const detail = (await call(tokens.a!, 'GET', `/v1/software/${pkgId}`)).json() as { installedDevices: { deviceId: string }[] };
+    assert.ok(detail.installedDevices.every((d) => env.sql.byId([devA, devB, devU].find((x) => x.deviceId === d.deviceId)!.id).company === '甲公司'));
+    assert.equal((await call(tokens.a!, 'GET', `/v1/software/${NONE}`)).json().code, 'ITA_PACKAGE_NOT_FOUND');
+    // 派送:範圍外的電腦與不存在相同,不建立任何指令
+    const theirs = [devA, devB, devU].find((d) => env.sql.byId(d.id).company !== '甲公司')!;
+    const before = env.store.commands.length;
+    const denied = await call(tokens.a!, 'POST', `/v1/software/${pkgId}/deploy`, { action: 'uninstall', deviceIds: [theirs.deviceId] });
+    const missing = await call(tokens.a!, 'POST', `/v1/software/${pkgId}/deploy`, { action: 'uninstall', deviceIds: [NONE] });
+    assert.equal(denied.statusCode, 404);
+    assert.deepEqual(denied.json(), missing.json());
+    assert.equal(env.store.commands.length, before);
+    // 核可 / 駁回:批次含範圍外裝置與不存在相同;範圍內但不是待核可 409(一般指令批次走 -command 路由)
+    assert.equal((await sameAsMissing(tokens.a!, 'POST', `/v1/batches/${batchB}/approve-command`, `/v1/batches/${NONE}/approve-command`)).code, 'ITA_BATCH_NOT_FOUND');
+    assert.equal(
+      (await sameAsMissing(tokens.a!, 'POST', `/v1/batches/${batchB}/reject-command`, `/v1/batches/${NONE}/reject-command`, { reason: '測試' })).code,
+      'ITA_BATCH_NOT_FOUND',
+    );
+    const notPending = await call(tokens.all!, 'POST', `/v1/batches/${batchB}/approve-command`);
+    assert.deepEqual([notPending.statusCode, notPending.json().code], [409, 'ITA_BATCH_NOT_PENDING']);
+  });
+
   it('路由清單:OpenAPI 的每個 operation 都已在本檔驗證資料範圍', async () => {
     const doc = (await app.inject('/openapi.json')).json() as { paths: Record<string, Record<string, { operationId: string }>> };
     const ops = Object.values(doc.paths)
@@ -399,7 +460,11 @@ describe('管理 API 的資料範圍(:51240)', () => {
       'endpoint.command.admin.create',
       'endpoint.command.basic.batch',
       'endpoint.command.basic.create',
+      'endpoint.command.batch.approve',
+      'endpoint.command.batch.approve-command',
       'endpoint.command.batch.get',
+      'endpoint.command.batch.reject',
+      'endpoint.command.batch.reject-command',
       'endpoint.command.cancel',
       'endpoint.command.file.download',
       'endpoint.command.get',
@@ -422,6 +487,15 @@ describe('管理 API 的資料範圍(:51240)', () => {
       'endpoint.release.publish',
       'endpoint.release.register',
       'endpoint.release.revoke',
+      'endpoint.software.deploy',
+      'endpoint.software.files',
+      'endpoint.software.get',
+      'endpoint.software.list',
+      'endpoint.software.mark-tested',
+      'endpoint.software.publish',
+      'endpoint.software.register',
+      'endpoint.software.revoke',
+      'endpoint.software.update',
     ];
     assert.deepEqual(ops, VERIFIED);
   });

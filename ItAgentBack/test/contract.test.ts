@@ -8,7 +8,10 @@ import path from 'node:path';
 import { describe, it } from 'node:test';
 import { Ajv } from 'ajv';
 import addFormatsModule from 'ajv-formats';
+import { paramErrors } from '../src/commands/kinds.js';
 import { CONTRACT_IDS, compileWsEnvelope, loadContract } from '../src/contracts.js';
+import { argsErrors, installSnapshot, uninstallSnapshot } from '../src/services/software-service.js';
+import type { PackageRecord } from '../src/stores/types.js';
 import { CONTRACTS_DIR, example } from './helpers.js';
 
 const addFormats = ((addFormatsModule as unknown as { default?: unknown }).default ?? addFormatsModule) as (a: Ajv) => Ajv;
@@ -50,9 +53,14 @@ describe('資料契約範例', () => {
       'watchdog-report-upgrade.sample.json',
       'watchdog-report.sample.json',
       'ws-command-log-level.sample.json',
+      'ws-command-software-install.sample.json',
+      'ws-command-software-uninstall.sample.json',
+      'ws-command-system-reboot.sample.json',
       'ws-command-update-ack.sample.json',
       'ws-command-update-diagnose.sample.json',
       'ws-command-update-logs.sample.json',
+      'ws-command-update-software-failed.sample.json',
+      'ws-command-update-software-install.sample.json',
       'ws-command-update.sample.json',
       'ws-command.sample.json',
       'ws-heartbeat-ack.sample.json',
@@ -188,6 +196,43 @@ describe('資料契約範例', () => {
     assert.equal(validate({ ...sample, sha256: 'ABC' }), false);
     const { file_id: _f, ...noId } = sample;
     assert.equal(validate(noId), false);
+  });
+
+  it('P7:software.install / uninstall 參數快照、system.reboot 參數、安裝結果與錯誤代碼範例', () => {
+    for (const f of [
+      'ws-command-software-install',
+      'ws-command-software-uninstall',
+      'ws-command-system-reboot',
+      'ws-command-update-software-install',
+      'ws-command-update-software-failed',
+    ])
+      check(CONTRACT_IDS.wsEnvelope, `${f}.sample.json`);
+    // 主機產生的快照欄位與範例一致(Agent 以同一份範例測解析)
+    const install = example<{ body: { params: Record<string, unknown> } }>('ws-command-software-install.sample.json').body.params;
+    const pkg = {
+      packageId: String(install.package_id),
+      name: String(install.name),
+      version: String(install.version),
+      sha256: String(install.sha256),
+      sizeBytes: Number(install.size_bytes),
+      installerType: install.installer_type,
+      installArgs: String(install.install_args),
+      uninstallArgs: '',
+      detectType: (install.detect as { type: string }).type,
+      detectValue: (install.detect as { value: string }).value,
+      rebootPolicy: install.reboot_policy,
+      signerThumbprints: install.signer_thumbprints,
+    } as unknown as PackageRecord;
+    assert.deepEqual(installSnapshot(pkg), install);
+    const uninstall = example<{ body: { params: Record<string, unknown> } }>('ws-command-software-uninstall.sample.json').body.params;
+    assert.deepEqual(uninstallSnapshot(pkg), uninstall);
+    assert.deepEqual(argsErrors('installArgs', String(install.install_args)), []);
+    assert.equal(paramErrors('system.reboot', example<{ body: { params: unknown } }>('ws-command-system-reboot.sample.json').body.params), null);
+    assert.notEqual(paramErrors('system.reboot', { delay_sec: 90000 }), null);
+    assert.notEqual(paramErrors('system.reboot', { message: '\u202Eevil' }), null);
+    const res = example<{ body: { result: Record<string, unknown> } }>('ws-command-update-software-install.sample.json').body.result;
+    assert.match(String(res.signer), /^[0-9a-f]{40}$/);
+    assert.ok(JSON.stringify(res).length <= 4000);
   });
 
   it('相容規則:不認得的欄位與 type 通過信封驗證;已知 type 缺必要欄位不通過', () => {
