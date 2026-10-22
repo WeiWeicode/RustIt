@@ -2,6 +2,16 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。本檔自 P7-2 起記錄 `RustAgent/` 的修改,先前的 Agent 變更記在 `NewFeatures.md` / `BugFix.md`。
 
+## 2026-10-22 P7-3 Agent system.reboot / system.reboot.cancel / reboot_policy(0.9.0)
+- 內容:分支 `feature/p7-2-agent-software`(`8c8a63f`、`b9032d8`、`1b383f7`);細節與編號見設計 §8.1.3。
+  - `reboot.rs`(新):`system.reboot` 參數再驗(`delay_sec` 0–86400、`message` 單行 ≤ 200、`force`)、提示文字(固定前綴、附發送人)、`InitiateSystemShutdownExW` 排程(`SeShutdownPrivilege`;計畫性、事件 1074 原因「其他」),倒數由 Windows 保存;`abort`(`AbortSystemShutdownW`)。
+  - `command.rs`:新增 `system.reboot`(服務模式才執行、取得串行鎖、等鎖後重驗有效期限、先排程成功後才 `WTSSendMessage`)與 `system.reboot.cancel`(不取串行鎖,結果 `{ aborted }`);排程前記 kv `reboot_command`,重開機後補送 `succeeded`(`{ rebooted, recovered_at }`)。
+  - 需求方 2026-10-22 決定(都照建議):H1 本機上限(開機未滿 30 分鐘不接受、24 小時內最多 3 次含取消、有人登入時倒數至少 60 秒 → `REBOOT_LIMITED`);M1 倒數中 `software.*` / `agent.upgrade` / `agent.restart` 回 `REBOOT_PENDING`;M2 新增 `system.reboot.cancel`。
+  - 修正:發送人工號只顯示英數字 1–16 字(`message.show` 一併套用);字元過濾加 Cf / Zl / Zp、`message` 不可只有空白;`reboot_policy = required` 只在安裝成功且非 1638 時標記 `reboot_required`(`software/mod.rs`);`build-agent-msi.ps1` 兩份簽章者清單有交集時警告。
+  - 未處理:`SeShutdownPrivilege` 啟用後未還原(影響小);`reboot_policy` 觸發的重開機尚無自動排程(只標記)。
+- 檔案:`RustAgent/crates/agent/src/{reboot,command,lib}.rs`、`agent/src/software/{mod,tests}.rs`、`agent/Cargo.toml`、`common/src/config.rs`、`RustAgent/installer/build-agent-msi.ps1`;文件 `docs/contracts/command-kinds.md`、`docs/P7-SOFTWARE-DESIGN.md`、`docs/HANDOFF.md`、`docs/PROJECT-MAP.md`。
+- 驗證:程式端驗證由主工作階段執行(本筆文件回寫未重跑測試);VM 驗收(設計 §8.3)尚未做。
+
 ## 2026-10-22 P7-2 Agent software 模組(0.9.0)
 - 內容:新增 `software.install` / `software.uninstall` 兩個指令類型的 Agent 端(設計 `P7-SOFTWARE-DESIGN.md` §5、§8.1.2);分支 `feature/p7-2-agent-software`(`591ab84`、`11145d6`、`a484b1e`、`4848605`、`f3af32d`)。
   - `software/args`:安裝參數第二道檢查,與 ItAgentBack `argsErrors` 逐條對應,通過契約向量 `docs/contracts/install-args.vectors.json`。

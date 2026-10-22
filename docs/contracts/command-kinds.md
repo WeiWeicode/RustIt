@@ -14,7 +14,7 @@
 | 串行 | 標「是」的類型(會改變系統)在 Agent 上同時間只執行一個;查詢類可並行 |
 | 去重 | Agent 以 `command_id` 去重(本機持久化,保留 7 天);重複收到不重跑,重送最後狀態 |
 | 結果 | `result` 序列化後 4,000 字元內;大量資料(日誌)以 HTTPS 上傳為指令附檔(見「指令附檔」),`result` 只放 `file_id` |
-| 每台上限 | 同一台尚未結束(queued / sent / acked / running)的同類型指令:`message.show`、`software.install`、`software.uninstall` 各 3 筆,`agent.restart`、`agent.diagnose`、`logs.collect`、`agent.log_level`、`agent.upgrade`、`system.reboot` 各 1 筆;超過回 `409 ITA_COMMAND_LIMIT`(避免洗版、反覆重啟) |
+| 每台上限 | 同一台尚未結束(queued / sent / acked / running)的同類型指令:`message.show`、`software.install`、`software.uninstall` 各 3 筆,`agent.restart`、`agent.diagnose`、`logs.collect`、`agent.log_level`、`agent.upgrade`、`system.reboot`、`system.reboot.cancel` 各 1 筆;超過回 `409 ITA_COMMAND_LIMIT`(避免洗版、反覆重啟) |
 | 批次與核可 | P7 起:admin 批次超過 `BATCH_APPROVAL_THRESHOLD`(預設 20)台為 `pending_approval`,指令留在 `queued` 不送出,需建立人以外的 IT 核可(見「批次第二人核可」);`software.*` 同時執行的總數另受 `SOFTWARE_MAX_CONCURRENT`(預設 20,跨批次與單台)限制 |
 | 冪等 | 同一工號 + 同一 `Idempotency-Key` 回傳既有的那筆;用在不同電腦、類型或等級回 `422 ITA_IDEMPOTENCY_KEY_REUSED` |
 
@@ -23,11 +23,13 @@
 | 代碼 | 由誰 | 說明 |
 | --- | --- | --- |
 | `UNSUPPORTED_COMMAND` | Agent / 主機 | 不認得的 `kind`;舊版 Agent 回信封 `unsupported` 時主機以此代碼結束 |
-| `EXPIRED` | Agent | 收到時已超過 `expires_at` |
+| `EXPIRED` | Agent | 收到時已超過 `expires_at`;P7 起也包含「等串行鎖後已過期」(`software.*`、`system.reboot` 等待前一個指令時超過有效期限,不執行) |
+| `REBOOT_LIMITED` | Agent | `system.reboot`:超過本機上限(開機未滿 30 分鐘、24 小時內已排程 3 次、有人登入時倒數少於 60 秒),見 `system.reboot` 段 |
+| `REBOOT_PENDING` | Agent | 重新開機倒數中,`software.install` / `software.uninstall` / `agent.upgrade` / `agent.restart` 不執行(避免被重開機中斷);重開機後或 `system.reboot.cancel` 後重派 |
 | `TIMEOUT` | 主機 | `acked` 後超過執行逾時 |
 | `INVALID_PARAMS` | Agent | 參數不符(主機建立時已驗證;版本差異時才會出現) |
 | `NO_ACTIVE_SESSION` | Agent | `message.show`:主控台沒有登入的使用者 |
-| `NOT_RUNNING_AS_SERVICE` | Agent | `agent.restart`:前景模式(開發)沒有服務失敗復原,無法重啟 |
+| `NOT_RUNNING_AS_SERVICE` | Agent | `agent.restart`:前景模式(開發)沒有服務失敗復原,無法重啟;`system.reboot` / `system.reboot.cancel`:前景模式不重新開機(開發機) |
 | `NO_LOGS` | Agent | `logs.collect`:指定天數內沒有日誌檔 |
 | `UPLOAD_FAILED` | Agent | `logs.collect`:附檔上傳重試後仍失敗,`error_message` 帶 HTTP 狀態或錯誤 |
 | `EXECUTION_FAILED` | Agent | 其他執行錯誤,`error_message` 說明 |
@@ -58,6 +60,7 @@
 | `software.install` | admin | 24 小時 / 4 小時 | 是 | P7(Agent 0.9.0) |
 | `software.uninstall` | admin | 24 小時 / 1 小時 | 是 | P7(Agent 0.9.0) |
 | `system.reboot` | admin | 4 小時 / 30 分鐘 | 是 | P7(Agent 0.9.0) |
+| `system.reboot.cancel` | admin | 1 小時 / 5 分鐘 | 否(不取串行鎖,長時間安裝不擋取消;每台 1 筆) | P7-3(Agent 0.9.0);不帶參數,不受批次與累計核可限制 |
 
 > `software.install` 的逾時含下載與電池延後(安裝本身由 `timeout_sec` 控制,預設 30 分鐘);有效期限 24 小時 = 離線太久回來不再執行過期的安裝。待核可批次的指令有效期限自核可時起算。
 
@@ -169,7 +172,7 @@
 
 - `result`:同安裝(`exit_code`、`reboot_required`、`duration_ms`、`log_tail`),另有 `already_absent`(偵測不到項目時直接 `succeeded`)。找不到可用的移除指令 `UNINSTALL_NOT_SUPPORTED`;**監控本身(GigaNexus / RustIt)與防毒 / EDR 不可移除**(Agent 內建清單,符合同回 `UNINSTALL_NOT_SUPPORTED`);移除程式在 Program Files / Windows / `ProgramData\Package Cache` 以外時需通過 ACL 檢查,否則同回 `UNINSTALL_NOT_SUPPORTED`;移除後 120 秒內仍偵測得到 `DETECT_FAILED`。
 
-### `system.reboot` — 重新開機(P7;Agent 端流程在 P7-3)
+### `system.reboot` — 重新開機(P7-3)
 
 路徑:單台 `admin-commands`(多台走批次,同樣受核可門檻限制)。`params`(範例 `ws-command-system-reboot.sample.json`):
 
@@ -179,7 +182,17 @@
 | `message` | string 1–200、單行 | | 附加說明;安全文字規則同 `message.show`(前綴「【IT 部門通知】」、結尾附發送人) |
 | `force` | boolean | | 預設 `false`;`true` 強制結束應用程式(畫面需二次確認) |
 
-- `result`:`{ "scheduled_at": "...", "delay_sec": 300 }`(已排程即 `succeeded`,關機後無法再回報)。
+- `result`:`{ "scheduled_at": "...", "delay_sec": 300, "force": false, "notified": true }`(已排程即 `succeeded`,關機後無法再回報;`notified` = 訊息框是否已顯示)。
+- **本機上限**(Agent 不靠主機自行檢查,資安 H1,需求方 2026-10-22 決定):開機未滿 30 分鐘不接受;24 小時內最多排程 3 次(取消的也算);有人登入時倒數至少 60 秒(`force` 也一樣)。超過回 `failed REBOOT_LIMITED`。
+- **倒數中**(資安 M1):排程後到重新開機前(開機時間變新,或倒數 + 5 分鐘仍未重開機),`software.*`、`agent.upgrade`、`agent.restart` 回 `failed REBOOT_PENDING`。
+- **先排程、成功後才顯示訊息框**:排程失敗不讓使用者看到不會發生的倒數;`delay_sec = 0` 不顯示訊息框;沒有登入者只記錄。
+- **重開機後補送**:排程前 Agent 在本機記下指令,重開機後補送 `succeeded`,`result` 為 `{ "rebooted": true, "recovered_at": "..." }`(不誤報為中途停止)。
+- **發送人**:訊息結尾的發送人工號只顯示英數字 1–16 字(`message.show` 也一樣);`message` 的字元過濾含格式字元(Cf)與行 / 段落分隔(Zl / Zp)。
+- 前景模式(開發)回 `failed NOT_RUNNING_AS_SERVICE`。
+
+### `system.reboot.cancel` — 取消重新開機(P7-3)
+
+路徑:單台 `admin-commands`(`endpoint.command.admin`),不帶 `params`(範例 `ws-command-system-reboot-cancel.sample.json`)。取消倒數中的 `system.reboot`:`AbortSystemShutdownW`、清除倒數旗標、通知使用者。不取串行鎖(長時間安裝不擋取消)、不納入批次與累計核可(取消不造成破壞);每台 1 筆。`result`:`{ "aborted": true | false }`。前景模式回 `failed NOT_RUNNING_AS_SERVICE`。
 
 ## 批次第二人核可(P7;PLATFORM-PLAN B1)
 

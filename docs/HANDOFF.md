@@ -25,9 +25,10 @@
      - **P7-2 Agent `software` 模組程式完成**(Agent 0.9.0):分支 `feature/p7-2-agent-software`(worktree `D:\檔案分享\程式碼\GigaNexusAI\RustIt-p7-2`)已推 gitlab / origin,最新 commit `f3af32d`(`git log` 為準),**MR 尚未開**。`software.install` / `software.uninstall`、A6 電池 / 計量網路延後;已通過 code-reviewer 與 security-auditor 並修正;`cargo test -p rustit-agent` 116/116。**VM 驗收尚未做**。與設計的差異、需求方決定(C2、H1、H2、M3)、稽核已修與未修(L2、L3)、code-reviewer 未處理建議、Watchdog 升級中斷安裝的風險,全部記在設計 §8.1.2;Agent 修改紀錄 `DevelopmentProcess/AgentCorrection.md`。
      - 需求方 2026-10-22 決定:**C2** draft 套件也必須在本機 `trusted_signers` 內(VM 測 draft 套件前,要先把簽章者指紋加進 `[software] trusted_signers`);**H1** 移除程式 ACL 檢查;**H2** 內建不可移除清單(監控本身、防毒 / EDR);**M3** 另設 `[software] trusted_signers`,**已完成**(`b9242d6`:沒有設定 = 不接受任何派送的套件;升級與替換 Watchdog 仍用 `[upgrade]`;`build-agent-msi.ps1 -SoftwareSigners`)。
    - **下一步(依序)**:
-     1. **P7-3 `system.reboot`**(Agent 0.9.0,主工作階段 Opus 在 `RustIt-p7-2` worktree 繼續)(M3 已完成,`b9242d6`)。
-     2. **開 P7-2 MR → develop**(只開不合併):等 P7-3 一起開,或先開 P7-2,由需求方決定。
+     1. **P7-3 Agent 端已完成**(`system.reboot`、`system.reboot.cancel`、`reboot_policy required`;`8c8a63f`、`b9032d8`、`1b383f7`;M3 `b9242d6`)。**待做 3-3**:MSI 0.9.0 走正式發版流程(建置要帶 `-SoftwareSigners`)。
+     2. **開 P7-2 / P7-3 MR → develop**(只開不合併):等 P7-3 一起開,或先開 P7-2,由需求方決定。
      3. **VM 驗收前置**:7-Zip 測試簽章者與 Notepad++ 簽章者要放進 VM `RUSTIT-P34` `agent.toml` 的 `[software] trusted_signers`(不是 `[upgrade]`;需求方在 VM 操作,或建 MSI 時用 `-SoftwareSigners`);套件放入主機 2 `ita-software/`;MSI 0.9.0 走正式發版流程(P7-3 3-3)。驗收步驟見設計 §8.3。
+   - **P7-3 待辦 / 注意**:ItAgentBack 新類型(`system.reboot.cancel`)要在 P7-2 MR 合併、部署後,才能在 GigaItApp 使用;GigaItApp P7-5 要加「取消重新開機」按鈕;**部署注意**:含 `[software]` 的 `agent.toml` 不可給 0.9.0 以前的 Agent 讀(`deny_unknown_fields` 會讓它啟動失敗),Agent 版本與設定要一起換。P7-3 的決定與未處理項目見設計 §8.1.3。
    - **P7-1 待辦(未修)**:M1 主動定期重算軟體庫雜湊(目前只在下載時複驗)、L4 下載 TOCTOU、L5 單台下載併發上限、L10 補送鏈累積、L11 冪等鍵比對目標電腦;code-reviewer 第 7 點「直接取消的指令其所屬批次是否會收尾」;第 10 點新 SQL 的整合測試覆蓋(`recentGatedTargets`、`cancelQueuedInstalls`、`revoked_from`、`reboot_since`);`software_install_failed` 每台只有一筆開啟中的告警(多套件失敗只留最近一次)的取捨已記在設計 §8.1.1。L12 接受、L13 不屬 P7。
    - **分工提醒**:程式與規劃由 Opus 主工作階段;測試執行、文件、需要需求方操作的步驟開 Sonnet 子任務。
    - **P7 工作項目(2026-10-21)**。分工:**Claude 主工作階段只寫程式與規劃**;測試、寫文件、需要需求方操作的步驟一律開 **Sonnet 子任務**(另開工作階段);下表「子任務」即指 Sonnet 子任務。
@@ -50,12 +51,12 @@
        | 2-1 | 從 `demo/src/deploy.rs` 移植到 `agent/src/software/`:下載(續傳、本機快取)→ 驗 SHA-256 與簽章者 → SYSTEM 靜默安裝 / 移除(逾時、1618 重試)→ 登錄檔確認 → 立即重新蒐集 | Claude | 1-2 修完即可開工,不必等部署 ✅ |
        | 2-2 | A6:電池 / 計量網路延後下載 | Claude | 2-1 ✅ |
        | 2-3 | 單元 / 契約測試(Claude 寫)、執行測試、code-reviewer、security-auditor | Claude 寫測試;子任務執行 | 2-1 單元測試完成(116/116)、code-reviewer 與 security-auditor 已修;VM 驗收待做 |
-     - **P7-3 `system.reboot` 與批次核可 ⬜**
+     - **P7-3 `system.reboot` 與批次核可 🟡 Agent 端完成(`1b383f7`),MSI 0.9.0 待做**
        | # | 工作 | 負責 | 前置 |
        | --- | --- | --- | --- |
-       | 3-1 | Agent `system.reboot`(先提示使用者、可延後、強制期限) | Claude | 2-1 |
-       | 3-2 | `3010` 之後的 `reboot_required` 顯示與一鍵重開機 | Claude | 3-1 |
-       | 3-3 | MSI 0.9.0 走正式發版流程(Runner 建置 → 簽章 → 上架) | 子任務;簽章由需求方 | 2-3、3-1 |
+       | 3-1 | Agent `system.reboot`(先提示使用者、可延後、強制期限;含本機上限、倒數中拒絕、`system.reboot.cancel`) | Claude | 2-1 ✅ 2026-10-22 |
+       | 3-2 | `3010` 之後的 `reboot_required` 顯示與一鍵重開機(Agent 端:`reboot_policy required` 標記;畫面屬 P7-5) | Claude | 3-1 ✅ 2026-10-22(Agent 端) |
+       | 3-3 | MSI 0.9.0 走正式發版流程(Runner 建置 → 簽章 → 上架);建置要帶 `-SoftwareSigners` | 子任務;簽章由需求方 | 2-3、3-1 ⬜ |
      - **VM 驗收(設計 §8.3)⬜**:全部由子任務帶需求方操作
        | # | 工作 |
        | --- | --- |

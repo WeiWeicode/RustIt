@@ -3,7 +3,7 @@
 > 草案 2026-10-20,分支 `docs/p7-software-design`(從 develop `948adf1` 開,P6-2 已合併)。依據:PLATFORM-PLAN §4.4、§4.6、§4.10 A6、§5、§8 P7 列、§8 B1;[ADR 0002](decisions/0002-software-deployment.md)(採方案 B)、[ADR 0003](decisions/0003-code-signing-pki.md);`P4-COMMAND-DESIGN.md`(指令通道、批次);`P6-UPGRADE-DESIGN.md`(`authenticode`、本機信任清單、版本檔目錄、下載 API 模式);`contracts/command-kinds.md`。
 > **狀態**:2026-10-20 需求方確認 §9 全部:第 2 項依建議(未簽章套件由公司憑證加簽),第 11 項先用需求方自己的本機電腦(開發機)加 VM `RUSTIT-P34`,另一台 IT 同意的電腦之後再補;其餘照建議。可開工 P7-1。
 > **進度(2026-10-21,P7-1 後端完成、待 MR)**:P6 已於 2026-10-21 完成,P7 接續。分支 `feature/p7-1-software-catalog`(worktree `../RustIt-p7-1`)已推到 gitlab / origin,**MR 尚未開**。P7-1 後端實作完成:migration 0008(**只套用整合測試庫 `_poc_test`**)、軟體目錄與兩人覆核、`software.*` / `system.reboot` 指令與參數快照、套件下載、批次第二人核可與累計核可、全域並行上限、三個告警規則;需求方 2026-10-21 決定 D1~D6 全部照建議、資安稽核(重跑)已修大部分項目(§8.1.1)。測試:`npm test` 210/210、`test:int` 13/13、typecheck 通過(報告 `test-reports/2026-10-21-p7-1-backend.md`)。下一步:主工作階段處理 code-reviewer 結果後開 MR(HANDOFF §2 1-6)。
-> **進度(2026-10-22,P7-2 Agent 程式完成、VM 驗收待做)**:P7-1 已合併(MR !50)並上測試區(migration 0008 已套 `giganexus_It_Agent_test`、Gateway OpenAPI v56 已發佈、主機 2 `ita-software` 已唯讀掛載)。P7-2 Agent `software` 模組(0.9.0)完成於分支 `feature/p7-2-agent-software`(最新 `f3af32d`,**MR 尚未開**):`software.install` / `software.uninstall`、A6 電池 / 計量網路延後;已通過 code-reviewer 與 security-auditor 並修正;`cargo test -p rustit-agent` 116/116。需求方 2026-10-22 決定 C2(draft 套件也須在本機 `trusted_signers` 內)、H1、H2、M3(見 §8.1.2);**M3 已完成**(`b9242d6`,`agent.toml` `[software] trusted_signers`)。下一步:P7-3(`system.reboot`)、VM 驗收(VM `agent.toml` 的 `[software] trusted_signers` 要加 7-Zip 測試簽章者與 Notepad++ 簽章者指紋)。
+> **進度(2026-10-22,P7-2 Agent 程式完成、VM 驗收待做)**:P7-1 已合併(MR !50)並上測試區(migration 0008 已套 `giganexus_It_Agent_test`、Gateway OpenAPI v56 已發佈、主機 2 `ita-software` 已唯讀掛載)。P7-2 Agent `software` 模組(0.9.0)完成於分支 `feature/p7-2-agent-software`(最新 `f3af32d`,**MR 尚未開**):`software.install` / `software.uninstall`、A6 電池 / 計量網路延後;已通過 code-reviewer 與 security-auditor 並修正;`cargo test -p rustit-agent` 116/116。需求方 2026-10-22 決定 C2(draft 套件也須在本機 `trusted_signers` 內)、H1、H2、M3(見 §8.1.2);**M3 已完成**(`b9242d6`,`agent.toml` `[software] trusted_signers`)。**P7-3 Agent 端完成**(`system.reboot`、`system.reboot.cancel`、`reboot_policy required`;`8c8a63f`、`b9032d8`、`1b383f7`,見 §8.1.3)。下一步:MSI 0.9.0 發版(建置帶 `-SoftwareSigners`)、開 P7-2 / P7-3 MR、VM 驗收(VM `agent.toml` 的 `[software] trusted_signers` 要加 7-Zip 測試簽章者與 Notepad++ 簽章者指紋)。
 > 設計當時的現況:Agent 0.7.0、Watchdog 0.2.0(P6-2 已合併 develop);`rustit-common::authenticode`(WinVerifyTrust + 簽章者指紋)與 `agent.toml` `[upgrade] trusted_signers` 已有;`ita.command_batch` 已有 `requires_approval` / `approved_by_*` 欄位(P4 預留、無邏輯);`kindHooks`、批次 `max_concurrent` 補送(`refillBatch`)已有;`ita.device_software`(P3)有每台最新軟體清單;**NAS `RustIT\` 未掛載、軟體目錄與 `software.*` 指令都還沒有**。`RustAgent/crates/demo/src/deploy.rs`(536 行,Firefox / WinRAR 單機版)是移植來源。
 
 ## 0. 分批
@@ -247,12 +247,13 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
 - 指令參數 `ignore_power: true`(admin 專用,選填)可略過延後(例如 IT 現場處理);預設 `false`。**不略過計量網路判斷**(流量費由使用者承擔)。
 - 偵測失敗(API 不可用、桌機沒有電池)視為「無限制」,不阻擋。
 
-### 5.5 `system.reboot`
+### 5.5 `system.reboot`(P7-3 實作後:以下為最終行為;與原設計差異見 §8.1.3)
 
-1. 使用者端程式(P8)未實作前:一律 `WTSSendMessage` 系統訊息框(沿用 `message.show` 的做法與防偽裝規則,前綴「【IT 部門通知】」、結尾附發送人)提示「電腦將於 N 分鐘後重新開機,請儲存工作」。沒有登入者 → 不提示直接排程。
-2. 排程 `delay_sec` 後以 `InitiateSystemShutdownEx` 重新啟動(`force = false` 不強制關閉應用程式,應用程式可拒絕關閉;`ERROR_SHUTDOWN_IN_PROGRESS` 等失敗記 `EXECUTION_FAILED`)。`force = true`:同上但強制結束應用程式,**只有 admin 且需在畫面二次確認**。
-3. 指令在「已排程」就 `succeeded`(`result: { "scheduled_at": "...", "delay_sec": 300 }`)——關機後無法再回報;下次 `hello` 時主機把該指令對應的 `reboot_required` 標記清除(以 `boot_time` 變新為準,P5 已有 `agent_started.boot_time`)。
+1. 使用者端程式(P8)未實作前:`WTSSendMessage` 系統訊息框(沿用 `message.show` 的做法與防偽裝規則,前綴「【IT 部門通知】」、結尾附發送人,工號只顯示英數字 1–16 字)提示「電腦將於 N 分鐘後重新開機,請儲存工作」。**先排程,成功後才顯示訊息框**;沒有登入者或 `delay_sec = 0` → 不顯示。
+2. 以 `InitiateSystemShutdownExW` 排程(倒數由 Windows 保存,Agent 重啟也照常進行;事件 1074 原因為「其他、計畫性」)`delay_sec` 後重新啟動(`force = false` 不強制關閉應用程式,應用程式可拒絕關閉;`ERROR_SHUTDOWN_IN_PROGRESS` 等失敗記 `EXECUTION_FAILED`)。`force = true`:同上但強制結束應用程式,**只有 admin 且需在畫面二次確認**。
+3. 指令在「已排程」就 `succeeded`(`result: { "scheduled_at": "...", "delay_sec": 300, "force": false, "notified": true }`)——排程前 Agent 在本機 kv `reboot_command` 記下指令,**重開機後補送 `succeeded`**(`result: { "rebooted": true, "recovered_at": "..." }`);下次 `hello` 時主機把該指令對應的 `reboot_required` 標記清除(以 `boot_time` 變新為準,P5 已有 `agent_started.boot_time`)。
 4. 同一時間若有 `software.*` 正在執行 → 先等待(串行),避免重開機中斷安裝。
+4a. **本機上限與倒數中拒絕**(§8.1.3 H1 / M1):開機未滿 30 分鐘不接受、24 小時內最多 3 次(取消的也算)、有人登入時倒數至少 60 秒 → `REBOOT_LIMITED`;倒數中 `software.*` / `agent.upgrade` / `agent.restart` 回 `REBOOT_PENDING`。**`system.reboot.cancel`**(M2)可取消倒數,不取串行鎖。
 5. 該台 `reboot_required` 狀態來源:最近一次成功的 `software.*` 指令 `result.reboot_required = true` 且之後 `boot_time` 沒有變新;GigaItApp 詳情顯示並提供「重新開機」按鈕。
 
 ### 5.6 清理與安全
@@ -382,6 +383,27 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
   3. `purge_stale` 以目錄 mtime 判斷過期(續傳時目錄內檔案更新不一定更新目錄 mtime),宜改為看內容檔時間。
 - **風險(Watchdog 升級)**:Agent 以 Job Object 啟動安裝程式並設 `KILL_ON_JOB_CLOSE`;Watchdog 升級 Agent 時 `prepare_shutdown` 等待執行中指令最多 60 秒,逾時記 `failed AGENT_UPGRADING` 並照樣關閉 Agent,Job 隨之關閉而**中斷進行中的安裝**(MSI 可能半裝)。升級與軟體派送避開同時段,或讓 `prepare_shutdown` 在 `software.*` 執行中時延後(P7-3 評估)。
 - **接手**:P7-3 `system.reboot`(M3 已完成);開 P7-2 MR(等 P7-3 一起或先開由需求方決定);VM 驗收前置見 §8.3(VM `trusted_signers` 要加 7-Zip 測試簽章與 Notepad++ 簽章者指紋)。
+
+### 8.1.3 P7-3 實作、需求方決定與資安稽核(2026-10-22)
+
+分支 `feature/p7-2-agent-software`(`8c8a63f` → `b9032d8` → `1b383f7`),Agent 0.9.0(與 P7-2 同版本);程式在 `RustAgent/crates/agent/src/reboot.rs`、`command.rs`,ItAgentBack 新增類型在 `src/commands/kinds.ts`。
+
+- **需求方決定(2026-10-22,H1、M1、M2 都照建議)**:
+  - **H1 本機上限**:Agent 自行限制重新開機——開機未滿 30 分鐘不接受;24 小時內最多 3 次(取消的也算);有人登入時倒數至少 60 秒。超過回 `REBOOT_LIMITED`。主機被入侵時無法讓電腦反覆重開機。
+  - **M1 倒數中拒絕**:倒數中(開機時間未變新且未超過倒數 + 5 分鐘)`software.*`、`agent.upgrade`、`agent.restart` 回 `REBOOT_PENDING`,不開始會被重開機中斷的工作。
+  - **M2 新增取消**:`system.reboot.cancel`(admin、無參數、1 小時 / 5 分鐘、每台 1 筆;`AbortSystemShutdownW`、清除倒數旗標、通知使用者;結果 `{ aborted }`;不取串行鎖,不納入批次與累計核可)。ItAgentBack 已加類型與契約範例 `ws-command-system-reboot-cancel.sample.json`。
+- **已修(code-reviewer / 資安稽核)**:
+  - 先排程、成功後才顯示訊息框;`delay_sec = 0` 不顯示(排程失敗不讓使用者看到不會發生的倒數)。
+  - 排程前把指令記在本機 kv `reboot_command`,重開機後 recover 回報 `succeeded`(`{ rebooted, recovered_at }`),不誤報為中途停止;沒排成則清除。
+  - 事件 1074 的原因改為「其他、計畫性」;權限調整的錯誤碼在 `CloseHandle` 前取得。
+  - `issued_by` 驗證:發送人工號只顯示英數字 1–16 字(`message.show` 一併套用);字元過濾加入格式字元(Cf)與行 / 段落分隔(Zl / Zp);`message` 不可只有空白。
+  - `reboot_policy = required` 只在安裝成功且非 1638(已安裝)時標記 `reboot_required`;非字串回 `INVALID_PARAMS`。
+  - `build-agent-msi.ps1`:`-TrustedSigners` 與 `-SoftwareSigners` 兩份清單有交集時警告。
+- **未處理**:
+  - `SeShutdownPrivilege` 啟用後沒有還原(只影響 Agent 行程,影響小)。
+  - 以 `reboot_policy` 觸發的重開機尚無自動排程:需求方決定只標記 `reboot_required`,由 IT 在畫面按「重新開機」。
+- **部署注意**:含 `[software]` 區段的 `agent.toml` 不可給 0.9.0 以前的 Agent 讀(設定結構 `deny_unknown_fields`,舊版會啟動失敗),Agent 版本與設定要一起換。
+- **待辦**:ItAgentBack 新類型(`system.reboot.cancel`)要在 P7-2 MR 合併、部署後才能在 GigaItApp 使用;GigaItApp P7-5 要加「取消重新開機」按鈕。
 
 ### 8.2 風險與已知限制(實作前先看)
 
