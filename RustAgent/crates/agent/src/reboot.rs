@@ -170,9 +170,20 @@ pub fn result(p: &Params, notified: bool) -> Value {
     })
 }
 
-/// 啟用本行程權杖的 SeShutdownPrivilege(SYSTEM 有此權限但預設停用)
+/// 呼叫期間啟用 SeShutdownPrivilege,結束後還原為停用(P7-3 未處理項目;還原失敗只記警告)
 #[cfg(windows)]
-fn enable_shutdown_privilege() -> Result<(), String> {
+fn with_shutdown_privilege<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    shutdown_privilege(true)?;
+    let r = f();
+    if let Err(e) = shutdown_privilege(false) {
+        log::warn!("無法還原關機權限:{e}");
+    }
+    r
+}
+
+/// 啟用 / 停用本行程權杖的 SeShutdownPrivilege(SYSTEM 有此權限但預設停用)
+#[cfg(windows)]
+fn shutdown_privilege(enable: bool) -> Result<(), String> {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LUID};
     use windows_sys::Win32::Security::{
         AdjustTokenPrivileges, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
@@ -207,7 +218,7 @@ fn enable_shutdown_privilege() -> Result<(), String> {
                 ..Default::default()
             };
             tp.Privileges[0].Luid = luid;
-            tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+            tp.Privileges[0].Attributes = if enable { SE_PRIVILEGE_ENABLED } else { 0 };
             AdjustTokenPrivileges(
                 token,
                 0,
@@ -234,7 +245,7 @@ fn enable_shutdown_privilege() -> Result<(), String> {
         } else {
             ""
         };
-        return Err(format!("無法啟用關機權限:{e}{hint}"));
+        return Err(format!("無法調整關機權限:{e}{hint}"));
     }
     Ok(())
 }
@@ -246,22 +257,24 @@ pub fn schedule(p: &Params, text: &str) -> Result<(), String> {
         InitiateSystemShutdownExW, SHTDN_REASON_FLAG_PLANNED, SHTDN_REASON_MAJOR_OTHER,
         SHTDN_REASON_MINOR_OTHER,
     };
-    enable_shutdown_privilege()?;
     let msg: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-    // SAFETY:msg 以 NUL 結尾;本機(lpMachineName = NULL)
-    let ok = unsafe {
-        InitiateSystemShutdownExW(
-            std::ptr::null(),
-            msg.as_ptr(),
-            p.delay_sec as u32,
-            p.force as i32,
-            1,
-            // 事件 1074 的原因:IT 遠端指令的計畫性重開機(不記成「應用程式安裝」,稽核時才不會誤判)
-            SHTDN_REASON_MAJOR_OTHER | SHTDN_REASON_MINOR_OTHER | SHTDN_REASON_FLAG_PLANNED,
-        )
-    };
-    if ok == 0 {
-        let e = std::io::Error::last_os_error();
+    let err = with_shutdown_privilege(|| {
+        // SAFETY:msg 以 NUL 結尾;本機(lpMachineName = NULL)
+        let ok = unsafe {
+            InitiateSystemShutdownExW(
+                std::ptr::null(),
+                msg.as_ptr(),
+                p.delay_sec as u32,
+                p.force as i32,
+                1,
+                // 事件 1074 的原因:IT 遠端指令的計畫性重開機(不記成「應用程式安裝」,稽核時才不會誤判)
+                SHTDN_REASON_MAJOR_OTHER | SHTDN_REASON_MINOR_OTHER | SHTDN_REASON_FLAG_PLANNED,
+            )
+        };
+        // 錯誤碼在還原權限之前取得
+        Ok((ok == 0).then(std::io::Error::last_os_error))
+    })?;
+    if let Some(e) = err {
         let hint = match e.raw_os_error() {
             Some(1115) => "(系統已在關機中)",
             Some(1190) => "(已有排程的關機或重新開機)",
@@ -276,12 +289,14 @@ pub fn schedule(p: &Params, text: &str) -> Result<(), String> {
 #[cfg(windows)]
 pub fn abort() -> Result<bool, String> {
     use windows_sys::Win32::System::Shutdown::AbortSystemShutdownW;
-    enable_shutdown_privilege()?;
-    // SAFETY:本機(NULL)
-    if unsafe { AbortSystemShutdownW(std::ptr::null()) } != 0 {
+    // SAFETY:本機(NULL);錯誤碼在還原權限之前取得
+    let err = with_shutdown_privilege(|| {
+        Ok((unsafe { AbortSystemShutdownW(std::ptr::null()) } == 0)
+            .then(std::io::Error::last_os_error))
+    })?;
+    let Some(e) = err else {
         return Ok(true);
-    }
-    let e = std::io::Error::last_os_error();
+    };
     match e.raw_os_error() {
         // ERROR_NO_SHUTDOWN_IN_PROGRESS
         Some(1116) => Ok(false),

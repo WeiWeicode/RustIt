@@ -121,6 +121,31 @@ pub fn classify(status: u16, body: &str, retry_after: Option<&str>) -> SendError
     }
 }
 
+/// [`Transport::download`] 失敗:主機有回應時帶 HTTP 狀態與錯誤代碼(回應的 `code`),
+/// 呼叫端依此判斷是否重試,不比對訊息字串(P7-2 code-reviewer 建議 1)
+#[derive(Debug)]
+pub struct DownloadError {
+    pub status: Option<u16>,
+    pub code: Option<String>,
+    pub error: SendError,
+}
+
+impl DownloadError {
+    fn local(error: SendError) -> Self {
+        Self {
+            status: None,
+            code: None,
+            error,
+        }
+    }
+}
+
+impl fmt::Display for DownloadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
 /// [`Transport::download`] 的結果
 #[derive(Debug, PartialEq, Eq)]
 pub enum Download {
@@ -261,12 +286,11 @@ impl Transport {
         file: &mut std::fs::File,
         offset: u64,
         limit: u64,
-    ) -> Result<Download, SendError> {
+    ) -> Result<Download, DownloadError> {
         use std::io::{Seek, SeekFrom, Write};
-        let url = self
-            .server
-            .join(path)
-            .map_err(|e| SendError::Rejected(format!("路徑錯誤 {path}:{e}")))?;
+        let url = self.server.join(path).map_err(|e| {
+            DownloadError::local(SendError::Rejected(format!("路徑錯誤 {path}:{e}")))
+        })?;
         // 慢速網路以每秒 100 KB 估算,至少 60 秒
         let secs = (limit.saturating_sub(offset) / 100_000).max(60);
         let mut rb = self.http.get(url).timeout(Duration::from_secs(secs));
@@ -276,10 +300,12 @@ impl Transport {
         for (k, v) in &self.extra_headers {
             rb = rb.header(*k, v);
         }
-        let mut res = rb
-            .send()
-            .await
-            .map_err(|e| SendError::Retry(format!("下載連線失敗:{}", error_chain(&e))))?;
+        let mut res = rb.send().await.map_err(|e| {
+            DownloadError::local(SendError::Retry(format!(
+                "下載連線失敗:{}",
+                error_chain(&e)
+            )))
+        })?;
         let status = res.status().as_u16();
         let start = match status {
             200 => 0,
@@ -290,9 +316,9 @@ impl Transport {
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or_default();
                 if !range.starts_with(&format!("bytes {offset}-")) {
-                    return Err(SendError::Retry(format!(
+                    return Err(DownloadError::local(SendError::Retry(format!(
                         "下載續傳位置不符(要求 {offset},回應 {range})"
-                    )));
+                    ))));
                 }
                 offset
             }
@@ -312,23 +338,30 @@ impl Transport {
                     }
                 }
                 let body = String::from_utf8_lossy(&body);
-                return Err(classify(status, &body, retry_after.as_deref()));
+                let code = serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|v| v["code"].as_str().map(|c| c.chars().take(64).collect()));
+                return Err(DownloadError {
+                    status: Some(status),
+                    code,
+                    error: classify(status, &body, retry_after.as_deref()),
+                });
             }
         };
-        let io = |e: std::io::Error| SendError::Retry(format!("寫入下載檔失敗:{e}"));
+        let io = |e: std::io::Error| {
+            DownloadError::local(SendError::Retry(format!("寫入下載檔失敗:{e}")))
+        };
         file.set_len(start).map_err(io)?;
         file.seek(SeekFrom::Start(start)).map_err(io)?;
         let mut total = start;
-        while let Some(chunk) = res
-            .chunk()
-            .await
-            .map_err(|e| SendError::Retry(format!("下載中斷:{}", error_chain(&e))))?
-        {
+        while let Some(chunk) = res.chunk().await.map_err(|e| {
+            DownloadError::local(SendError::Retry(format!("下載中斷:{}", error_chain(&e))))
+        })? {
             total += chunk.len() as u64;
             if total > limit {
-                return Err(SendError::Rejected(format!(
+                return Err(DownloadError::local(SendError::Rejected(format!(
                     "下載內容超過預期大小 {limit} bytes"
-                )));
+                ))));
             }
             file.write_all(&chunk).map_err(io)?;
         }

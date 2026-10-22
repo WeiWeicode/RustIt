@@ -52,6 +52,8 @@ struct Fake {
     replaced: RefCell<Vec<(u32, String)>>,
     events: RefCell<Vec<(&'static str, Value)>>,
     maint: RefCell<Vec<bool>>,
+    /// Agent 管道 status.busy(P7 軟體派送中)
+    busy: RefCell<Option<String>>,
 }
 
 impl Fake {
@@ -78,6 +80,7 @@ impl Fake {
             replaced: RefCell::new(Vec::new()),
             events: RefCell::new(Vec::new()),
             maint: RefCell::new(Vec::new()),
+            busy: RefCell::new(None),
         }
     }
 
@@ -173,6 +176,7 @@ impl UpgradeEnv for Fake {
             version: version.into(),
             pid,
             ws_connected: mode == Mode::Healthy,
+            busy: self.busy.borrow().clone(),
             ..Default::default()
         })
     }
@@ -304,6 +308,26 @@ async fn succeeds_and_keeps_previous() {
     // 已是目標版本:不動作
     let again = upgrader(&f, &s).run(&target(), Some("0.7.1")).await;
     assert_eq!(again, Outcome::Skipped("已是目標版本"));
+}
+
+#[tokio::test]
+async fn agent_busy_defers_install() {
+    let s = setup();
+    let f = Fake::new(&s.paths.install_dir);
+    *f.busy.borrow_mut() = Some("software".into());
+    assert_eq!(
+        run(&f, &s, &target()).await,
+        Outcome::Skipped("Agent 正在執行軟體派送")
+    );
+    // 沒有停止 Agent、紀錄不算失敗;下載檔留在 cache
+    assert_eq!(f.installed(), OLD);
+    assert!(f.calls().is_empty());
+    assert!(f.rec.borrow().is_none());
+    assert!(s.paths.version_dir("0.7.1").join(AGENT_EXE).is_file());
+    // 軟體派送結束後的下一次:沿用已下載的檔案完成升級
+    *f.busy.borrow_mut() = None;
+    assert_eq!(run(&f, &s, &target()).await, Outcome::Succeeded);
+    assert_eq!(f.installed(), NEW);
 }
 
 #[tokio::test]

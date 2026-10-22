@@ -44,6 +44,10 @@ const TIMEOUT_RANGE: std::ops::RangeInclusive<u64> = 60..=14_400;
 /// 1618(另一個安裝進行中)重試
 pub const BUSY_RETRIES: u32 = 3;
 pub const BUSY_WAIT: Duration = Duration::from_secs(60);
+/// 安裝逾時後等 Windows Installer 結束的上限與間隔(L3:結束得了 msiexec 前端,msiserver 內的安裝仍在進行;
+/// 持有串行鎖等它結束,下一筆才不會遇到 1618)
+pub const SETTLE_MAX: Duration = Duration::from_secs(600);
+pub const SETTLE_POLL: Duration = Duration::from_secs(10);
 /// 安裝後 / 移除後的登錄檔輪詢:每 3 秒、共 120 秒
 pub const DETECT_INTERVAL: Duration = Duration::from_secs(3);
 pub const DETECT_POLLS: u32 = 40;
@@ -354,6 +358,8 @@ pub trait Env {
     async fn collect(&self);
     /// A6:電池與計量網路狀態
     async fn power(&self) -> power::PowerState;
+    /// Windows Installer 正在執行安裝(`_MSIExecute` 由 SYSTEM 持有且 msiserver 執行中)
+    fn installer_busy(&self) -> bool;
 }
 
 /// 檔案位置:`cache\software\`(下載與 staging)、`logs\software\`(安裝記錄)
@@ -414,11 +420,24 @@ fn hold_readonly(path: &Path) -> std::io::Result<std::fs::File> {
 }
 
 fn older_than(path: &Path, age: Duration) -> bool {
-    std::fs::symlink_metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
+    newest(path, 2)
         .and_then(|t| t.elapsed().ok())
         .is_some_and(|e| e > age)
+}
+
+/// 最新的修改時間:目錄再看裡面(最多 `depth` 層)。續傳寫入 `.part` 不一定更新目錄的修改時間
+/// (P7-2 code-reviewer 建議 3);不跟隨連結
+fn newest(path: &Path, depth: u8) -> Option<std::time::SystemTime> {
+    let m = std::fs::symlink_metadata(path).ok()?;
+    let mut t = m.modified().ok()?;
+    if m.is_dir() && depth > 0 {
+        for e in std::fs::read_dir(path).ok()?.flatten() {
+            if let Some(c) = newest(&e.path(), depth - 1) {
+                t = t.max(c);
+            }
+        }
+    }
+    Some(t)
 }
 
 /// 清除超過 24 小時的下載殘留與 staging、超過 14 天的安裝記錄(每次執行前)
@@ -526,18 +545,51 @@ async fn run_installer(
             }
             Ok(Exit::Code(c)) => return Ok(c),
             Ok(Exit::Timeout) => {
-                // MSI 的實際安裝在 Windows Installer 服務(msiserver)內進行,不在 Job 內,只結束得了 msiexec 前端(§8.2)
+                // MSI 的實際安裝在 Windows Installer 服務(msiserver)內進行,不在 Job 內,只結束得了 msiexec 前端(§8.2);
+                // 等它結束(最多 SETTLE_MAX)再放開串行鎖(L3)
+                let settled = settle(env).await;
                 return Err(fail(
                     "INSTALL_TIMEOUT",
                     format!(
-                        "超過 {} 秒仍未結束,已結束安裝程式的行程樹(MSI 的安裝可能仍在 Windows Installer 服務內進行)",
-                        timeout.as_secs()
+                        "超過 {} 秒仍未結束,已結束安裝程式的行程樹;{}",
+                        timeout.as_secs(),
+                        if settled {
+                            "Windows Installer 已沒有進行中的安裝"
+                        } else {
+                            "Windows Installer 在 10 分鐘內仍有安裝進行中,下一筆安裝可能遇到 1618"
+                        }
                     ),
                 ));
             }
             Err(e) => return Err(fail("EXECUTION_FAILED", e)),
         }
     }
+}
+
+/// 下載失敗是否不必重試:400 / 401 / 403(憑證、停用)、404(不再指派)、`ITA_PACKAGE_CHANGED`(軟體庫檔案被換掉)
+/// 重試也不會成功;429(同一台下載數超過上限 `ITA_DOWNLOAD_BUSY`、主機忙碌)、其他 4xx、5xx、連線錯誤稍後重試。
+/// 沒有 HTTP 狀態(本機判定)時以是否為 `Rejected`(例如超過預期大小)為準
+pub fn download_permanent(status: Option<u16>, code: Option<&str>, rejected: bool) -> bool {
+    match (status, code) {
+        (_, Some("ITA_PACKAGE_CHANGED")) => true,
+        (Some(400 | 401 | 403 | 404), _) => true,
+        (Some(_), _) => false,
+        (None, _) => rejected,
+    }
+}
+
+/// 等 Windows Installer 沒有進行中的安裝(最多 [`SETTLE_MAX`]);回傳是否已結束
+async fn settle(env: &impl Env) -> bool {
+    let mut waited = Duration::ZERO;
+    while env.installer_busy() {
+        if waited >= SETTLE_MAX {
+            warn!("安裝逾時後 Windows Installer 仍在執行,不再等待");
+            return false;
+        }
+        env.sleep(SETTLE_POLL).await;
+        waited += SETTLE_POLL;
+    }
+    true
 }
 
 /// 輪詢到「有 / 沒有」該項目為止;回傳是否達成
@@ -891,20 +943,14 @@ impl Env for RealEnv {
         {
             Ok(Download::Done(n)) => Ok(Fetched::Done(n)),
             Ok(Download::RangeNotSatisfiable) => Ok(Fetched::RangeNotSatisfiable),
-            Err(e) => {
-                // 4xx(不再指派、停用)與 503 ITA_PACKAGE_CHANGED(軟體庫檔案被換掉)重試也不會成功
-                let permanent = match &e {
-                    SendError::Rejected(_) => true,
-                    SendError::Retry(m) => {
-                        m.starts_with("HTTP 404") || m.contains("ITA_PACKAGE_CHANGED")
-                    }
-                    SendError::Busy(..) => false,
-                };
-                Err(DlError {
-                    permanent,
-                    message: e.to_string(),
-                })
-            }
+            Err(e) => Err(DlError {
+                permanent: download_permanent(
+                    e.status,
+                    e.code.as_deref(),
+                    matches!(e.error, SendError::Rejected(_)),
+                ),
+                message: e.to_string(),
+            }),
         }
     }
 
@@ -956,6 +1002,10 @@ impl Env for RealEnv {
 
     fn progress(&self, pct: u8) {
         crate::command::report_progress(&self.shared, &self.command_id, pct);
+    }
+
+    fn installer_busy(&self) -> bool {
+        rustit_common::scm::installer_running()
     }
 
     async fn power(&self) -> power::PowerState {

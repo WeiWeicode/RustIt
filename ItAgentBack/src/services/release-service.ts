@@ -31,6 +31,7 @@ import type {
 } from '../stores/types.js';
 import type { Ctx } from './device-service.js';
 import { parseRange, RELEASE_COMPONENTS, VERSION_RE, type ReleaseFileInfo, type ReleaseFiles } from './release-files.js';
+import type { OpenedFile } from './rooted-files.js';
 import { inScope, scopeCompanies, type MgmtCtx } from './scope.js';
 
 export const RINGS: readonly Ring[] = ['pilot', 'it', 'all'];
@@ -447,13 +448,35 @@ export class ReleaseService {
       ctx.log.error({ component, version, fileName }, '版本檔不在版本檔目錄(已登錄卻找不到)');
       throw notFound();
     }
-    const sha = await this.files.sha256(f);
+    // 雜湊與回應內容讀同一個檔案代號(P7 資安稽核 L4,與軟體套件下載相同)
+    const opened = await this.files.openChecked(f);
+    try {
+      return await this.respond(ctx, device, opened, rel, { component, version, fileName, range });
+    } catch (err) {
+      await opened.close();
+      throw err;
+    }
+  }
+
+  private async respond(
+    ctx: Ctx,
+    device: DeviceRecord,
+    opened: OpenedFile,
+    rel: { sha256: string; sizeBytes: number },
+    q: { component: string; version: string; fileName: string; range: string | undefined },
+  ): Promise<Download> {
+    const { component, version, fileName, range } = q;
+    const f = { size: opened.size };
+    const sha = await opened.sha256();
     if (sha !== rel.sha256 || f.size !== rel.sizeBytes) {
       ctx.log.error({ component, version, fileName, expected: rel.sha256, actual: sha }, '版本檔內容與登錄不符,拒絕下發');
       throw new AppError(409, 'ITA_RELEASE_FILE_CHANGED', '版本檔內容與登錄不符');
     }
     const r = parseRange(range, f.size);
-    if (r === 'unsatisfiable') return { status: 416, headers: { 'content-range': `bytes */${f.size}` }, stream: null };
+    if (r === 'unsatisfiable') {
+      await opened.close();
+      return { status: 416, headers: { 'content-range': `bytes */${f.size}` }, stream: null };
+    }
     const headers: Record<string, string> = {
       'content-type': 'application/octet-stream',
       'accept-ranges': 'bytes',
@@ -471,11 +494,11 @@ export class ReleaseService {
       );
     }
     ctx.log.info({ deviceId: device.deviceId, component, version, start: r?.start ?? 0, end: r?.end ?? f.size - 1 }, '下載版本檔');
-    if (!r) return { status: 200, headers: { ...headers, 'content-length': String(f.size) }, stream: this.files.open(f.file) };
+    if (!r) return { status: 200, headers: { ...headers, 'content-length': String(f.size) }, stream: opened.stream() };
     return {
       status: 206,
       headers: { ...headers, 'content-length': String(r.end - r.start + 1), 'content-range': `bytes ${r.start}-${r.end}/${f.size}` },
-      stream: this.files.open(f.file, r),
+      stream: opened.stream(r),
     };
   }
 

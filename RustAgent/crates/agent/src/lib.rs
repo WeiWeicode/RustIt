@@ -110,6 +110,8 @@ pub(crate) struct Shared {
     pub upgrading: AtomicBool,
     /// 執行中的指令 command_id(prepare_shutdown 等它們結束,最多 60 秒)
     pub running_commands: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// 執行中的 software.*(含延後下載、下載、等串行鎖;P7):管道 status.busy = software,Watchdog 不在這時升級 Agent
+    pub software_busy: std::sync::atomic::AtomicUsize,
     /// prepare_shutdown 的次數(5 分鐘自動恢復只解除同一次的收尾)
     pub prepare_gen: AtomicU64,
     /// true = WebSocket 送完待送狀態後以 1000 關閉並暫停重連(prepare_shutdown)
@@ -292,6 +294,7 @@ pub async fn run(settings: Settings, mut shutdown: watch::Receiver<bool>) -> Res
         cert_not_after: std::sync::Mutex::new(String::new()),
         upgrading: AtomicBool::new(false),
         running_commands: std::sync::Mutex::new(std::collections::HashSet::new()),
+        software_busy: std::sync::atomic::AtomicUsize::new(0),
         prepare_gen: AtomicU64::new(0),
         ws_hold: watch::channel(false).0,
         upgrade_requested: std::sync::Mutex::new(None),

@@ -11,7 +11,7 @@
 | 0. 版本號 | 開發者 | 改 `RustAgent/crates/agent/Cargo.toml` / `watchdog/Cargo.toml` 的 `version`(Agent 與 Watchdog 各自的版本,semver),合併 `develop` 後在 `main` 建 tag `rustit-v<Agent 版本>`(Maintainer) |
 | 1. 建置 | CI(Windows Runner) | tag 觸發 `build:release`(或在 pipeline 手動執行):產出 `release-out/`,**未簽章**:`agent\<版本>\rustit-agent.exe`、`watchdog\<版本>\rustit-watchdog.exe`、`SHA256SUMS.txt`、`RELEASE-INFO.txt`。MSI 因為設定隨部署區寫入,在開發機以 `installer\build-agent-msi.ps1` 另外建置(或 `build-release.ps1 -Env …`) |
 | 2. 核對與簽章 | 簽章人員(**自己的電腦**) | 下載 artifact 解壓成 `C:\release-out`,執行 `powershell -ExecutionPolicy Bypass -File RustAgent\installer\sign-release.ps1 -Dir C:\release-out -Thumbprint <正式憑證指紋>`。腳本先核對每個檔案的雜湊與 `SHA256SUMS.txt`(對不上就整批中止),再 `signtool sign /fd SHA256 /tr <時間戳記> /td SHA256`、`signtool verify /pa`,輸出 `SHA256SUMS.signed.txt` 與 `SIGNED-INFO.txt` |
-| 3. 上架 | 簽章人員 | `powershell -ExecutionPolicy Bypass -File RustAgent\installer\publish-release.ps1 -Dir C:\release-out -Environment <test|prod>`(必填;先加 `-DryRun` 看會做什麼。`prod` 拒絕測試憑證、要求時間戳記,且不可指向主機 2)。複製到主機的版本檔目錄 `{元件}/{版本}/{檔名}`,主機重算 SHA-256 比對;**不覆蓋既有版本檔** |
+| 3. 上架 | 簽章人員 | `powershell -ExecutionPolicy Bypass -File RustAgent\installer\publish-release.ps1 -Dir C:\release-out -Environment <test|prod>`(必填;先加 `-DryRun` 看會做什麼。`prod` 拒絕測試憑證、要求時間戳記,且要指定 `-NasReleasesDir` 與正式區主機 `-HostAlias`)。執行前先以有 NAS `RustIT` 寫入權的帳號連上 NAS(`net use`)。腳本從本機以 SMB 寫入 NAS 版本檔目錄 `RustIT\releases\{元件}\{版本}\{檔名}`(test 預設測試區 NAS),重算 SHA-256 比對;**不覆蓋既有版本檔**。放好後經 ssh 以主機的唯讀掛載再算一次雜湊,確認 endpoint-server 讀得到(主機只唯讀掛載,不能經主機寫入;NAS 之前的主機本機目錄改用 `-HostDir`)。**只放有新版本號的元件**:同一版本號重新建置的檔案內容不同,會被拒絕(`REFUSE`,結束碼非 0,中止前已放好的不回滾);例如只改 Agent 時 CI 也會建一份未改版本的 Watchdog,上架前把它從 `SHA256SUMS.signed.txt` 拿掉,或確認被拒的只有它 |
 | 4. 登錄 | IT 管理員 | GigaItApp「端點管理 › 電腦清單 › Agent 版本」→「登錄版本」:挑檔案、填預期簽章者指紋(`SIGNED-INFO.txt` 的 `signer_thumbprint`)。登錄後是**草稿**,SHA-256 與大小由主機計算 |
 | 5. pilot | IT 管理員 | 發佈環表把 `pilot` 環的目標設為新版(草稿可以);確認 pilot 的測試機(所屬環 `pilot`)升級成功、運作正常,至少觀察 24 小時 |
 | 6. 發佈與推進 | IT 管理員 | 版本清單「發佈」→ 依序把 `it`、`all` 環設為新版。`pilot` 未滿 24 小時就推進會被擋,確認後才能 `force`(寫入稽核)。同時升級台數有上限(`RELEASE_MAX_CONCURRENT`),其餘電腦下次上報再排 |
@@ -91,7 +91,7 @@
 | 步驟 | 誰 | 做什麼 |
 | --- | --- | --- |
 | 1. 取得新指紋 | IT 管理員 | 向廠商或從新版安裝檔取得簽章者指紋(`Get-AuthenticodeSignature <檔> \| Select -Expand SignerCertificate \| Select Thumbprint`);用官方管道核對,不要只相信下載頁面。公司加簽的檔案則是新的公司程式碼簽章憑證(§1) |
-| 2. 本機清單加入新指紋(舊的**保留**) | GPO 管理者 | 以 MSI(`build-agent-msi.ps1 -SoftwareSigners "<舊>,<新>"`)或 GPO 把 `[software] trusted_signers` 更新為「舊 + 新」。**含 `[software]` 區段的 `agent.toml` 不可給 0.9.0 以前的 Agent 讀**(設定結構會讓舊版啟動失敗),先確認發佈環已將 Agent 全數升到 0.9.0 以上 |
+| 2. 本機清單加入新指紋(舊的**保留**) | GPO 管理者 | 以 MSI(`build-agent-msi.ps1 -SoftwareSigners "<舊>,<新>"`)或 GPO 把 `[software] trusted_signers` 更新為「舊 + 新」。**同一個區段只能有一行 `trusted_signers`,多個指紋放在同一個陣列**(`trusted_signers = ["<舊>", "<新>"]`):寫成兩行是 TOML 重複鍵,Agent 下次重啟讀不了設定而啟動失敗(2026-10-22 VM 實際發生)。**含 `[software]` 區段的 `agent.toml` 不可給 0.9.0 以前的 Agent 讀**(設定結構會讓舊版啟動失敗),先確認發佈環已將 Agent 全數升到 0.9.0 以上 |
 | 3. 確認散佈完成 | IT 管理員 | 抽查各環電腦的 `agent.toml`(或 `agent.diagnose`、事件);GPO 套用有延遲,至少等一個 GPO 更新週期,並確認 pilot 測試機已有新指紋 |
 | 4. 主機清單新舊並列 | IT 管理員 | 新版套件登錄時,`signer_thumbprints` 填「新 + 舊」(新舊並列);舊版套件維持原清單 |
 | 5. draft 測試 | IT 管理員 | 新版套件(`draft`)派到 pilot 測試機(VM);`result.signer` 應為新指紋 → `mark-tested`(填實際簽章者)→ 第二人發佈(§3 後半) |
