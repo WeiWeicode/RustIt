@@ -11,6 +11,7 @@
 //!   `agent.log_level`(暫時調整日誌等級,記在本機 kv,重啟後仍有效直到到期):P4-2,PLATFORM-PLAN A4。
 //! - `agent.upgrade`(P6-2):只記下要求,經本機管道 `status.upgrade_requested` 交給 Watchdog(結果 `handed_to_watchdog`);
 //!   升級中(Watchdog 已送 `prepare_shutdown`)收到的新指令回 `failed AGENT_UPGRADING`。
+//! - `software.install` / `software.uninstall`(P7-2,[`crate::software`]):取得串行鎖後執行;失敗時 `result` 也帶摘要(結束代碼、記錄)。
 
 use crate::Shared;
 use crate::protocol::{
@@ -28,7 +29,7 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 
 /// 本版支援的類型(與 command-kinds.md 一致)
-pub const KINDS: [&str; 7] = [
+pub const KINDS: [&str; 9] = [
     "inventory.collect",
     "agent.restart",
     "message.show",
@@ -36,6 +37,8 @@ pub const KINDS: [&str; 7] = [
     "logs.collect",
     "agent.log_level",
     "agent.upgrade",
+    "software.install",
+    "software.uninstall",
 ];
 /// agent.upgrade 交給 Watchdog 的要求有效多久(與指令有效期限相同)
 pub const UPGRADE_REQUEST_TTL: Duration = Duration::from_secs(3600);
@@ -54,16 +57,18 @@ const TITLE_PREFIX: &str = "【IT 部門通知】";
 /// message.show 內文最多行數(與主機相同)
 const MESSAGE_MAX_LINES: usize = 30;
 
-/// 指令失敗(錯誤代碼見 command-kinds.md)
+/// 指令失敗(錯誤代碼見 command-kinds.md);`result` 為失敗時也回報的摘要(P7 軟體派送)
 struct Failure {
     code: &'static str,
     message: String,
+    result: Option<Value>,
 }
 
 fn fail(code: &'static str, message: impl Into<String>) -> Failure {
     Failure {
         code,
         message: message.into(),
+        result: None,
     }
 }
 
@@ -105,7 +110,13 @@ fn report_failure(shared: &Shared, id: &str, f: Failure) {
     report(shared, id, "failed", |u| {
         u.error_code = Some(f.code.to_string());
         u.error_message = Some(f.message);
+        u.result = f.result;
     });
+}
+
+/// 執行中進度(軟體派送下載 / 安裝階段,P7-2)
+pub(crate) fn report_progress(shared: &Shared, id: &str, pct: u8) {
+    report(shared, id, "running", |u| u.progress = Some(pct.min(99)));
 }
 
 /// 啟動時:上次執行的 agent.restart 回報成功;其他執行到一半的指令(Agent 中途被結束)回報失敗;清除舊紀錄
@@ -243,6 +254,10 @@ async fn execute(shared: Arc<Shared>, cmd: CommandBody) {
             report(&shared, &id, "running", |_| {});
             agent_upgrade(&shared, &id, &cmd.params)
         }
+        "software.install" | "software.uninstall" => {
+            report(&shared, &id, "running", |_| {});
+            software(&shared, &id, &cmd.kind, &cmd.params).await
+        }
         "agent.restart" => return agent_restart(&shared, &id).await,
         _ => Err(fail("UNSUPPORTED_COMMAND", cmd.kind.clone())),
     };
@@ -334,6 +349,38 @@ fn agent_upgrade(shared: &Shared, id: &str, p: &Value) -> Result<Value, Failure>
         *r = Some((req, std::time::Instant::now()));
     }
     Ok(json!({ "handed_to_watchdog": true }))
+}
+
+/// software.install / software.uninstall(P7-2):參數再驗一次 → 取得串行鎖(會改變系統的指令同時只跑一個)→ 執行
+#[cfg(windows)]
+async fn software(shared: &Arc<Shared>, id: &str, kind: &str, p: &Value) -> Result<Value, Failure> {
+    use crate::software::{self as sw, RealEnv};
+    let from = |f: sw::Failure| Failure {
+        code: f.code,
+        message: f.message,
+        result: f.result,
+    };
+    let env = RealEnv {
+        shared: shared.clone(),
+        command_id: id.to_string(),
+    };
+    let paths = sw::real_paths(shared);
+    // 參數錯誤不必排隊
+    if kind == "software.install" {
+        let ins = sw::parse_install(p).map_err(from)?;
+        let _guard = shared.exclusive.lock().await;
+        sw::install(&env, &paths, id, &ins, &shared.trusted_signers).await
+    } else {
+        let unins = sw::parse_uninstall(p).map_err(from)?;
+        let _guard = shared.exclusive.lock().await;
+        sw::uninstall(&env, &paths, id, &unins).await
+    }
+    .map_err(from)
+}
+
+#[cfg(not(windows))]
+async fn software(_: &Arc<Shared>, _: &str, _: &str, _: &Value) -> Result<Value, Failure> {
+    Err(fail("EXECUTION_FAILED", "只支援 Windows"))
 }
 
 /// expires_at 是主機時間;本機時間 − 偏差 = 主機時間
