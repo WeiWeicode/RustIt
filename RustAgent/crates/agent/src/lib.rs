@@ -8,7 +8,7 @@
 //!   - 升級(P6-2):Watchdog 經本機管道 `prepare_shutdown` 要求停止前收尾([`pipe`]);指令 `agent.upgrade` 經管道 `status.upgrade_requested` 通知 Watchdog
 //!   - 替換 Watchdog(P6-3):Watchdog 驗證新版後經管道 `replace_watchdog` 交給 Agent,Agent 再驗一次、停止服務、替換、檢查並在失敗時還原(`upgrade_watchdog`)
 //!   - 指令([`command`],P4):WebSocket 收到 `command` 在背景執行,結果先寫本機再經 WebSocket 回報;
-//!     遠端診斷([`diagnose`]、[`logs`],P4-2)。另有每分鐘檢查暫時日誌等級是否到期
+//!     遠端診斷([`diagnose`]、[`logs`],P4-2);軟體派送(`software`,P7-2)。另有每分鐘檢查暫時日誌等級是否到期
 //!
 //! 共用一個 `rustit_common::transport::Transport`(同一個 rustls 設定)。蒐集一律經 rustit-collector,Agent 不直接呼叫 WMI。
 //! 連不上主機時照常蒐集與記錄,恢復後補傳並回報離線期間([`conn`],PLATFORM-PLAN §4.2)。
@@ -26,8 +26,11 @@ mod logs;
 #[cfg(windows)]
 mod pipe;
 pub mod protocol;
+mod reboot;
 #[cfg(windows)]
 pub mod service;
+#[cfg(windows)]
+mod software;
 pub mod store;
 #[cfg(windows)]
 mod upgrade_watchdog;
@@ -120,6 +123,8 @@ pub(crate) struct Shared {
     /// 本機信任簽章者(agent.toml [upgrade] trusted_signers)與下載快取目錄(替換 Watchdog 的第二道驗證)
     pub trusted_signers: Vec<String>,
     pub cache_dir: std::path::PathBuf,
+    /// 軟體派送安裝檔簽章者的本機信任清單(agent.toml [software],與升級分開,P7-3 資安 M3)
+    pub software_signers: Vec<String>,
 }
 
 impl Shared {
@@ -293,6 +298,7 @@ pub async fn run(settings: Settings, mut shutdown: watch::Receiver<bool>) -> Res
         watchdog_replacing: Arc::new(AtomicBool::new(false)),
         watchdog_seen: std::sync::Mutex::new(None),
         trusted_signers: settings.trusted_signers.clone(),
+        software_signers: settings.software_signers.clone(),
         cache_dir: settings
             .state_dir
             .parent()

@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。本檔自 P7-1 起記錄 `ItAgentBack/` 的修改,先前的後端變更記在 `NewFeatures.md` / `BugFix.md`。
 
+## 2026-10-22 P7-3 新增 system.reboot.cancel 指令類型
+- 內容:`ItAgentBack/src/commands/kinds.ts` 新增 `system.reboot.cancel`(admin、無參數 `NO_PARAMS`、有效 1 小時 / 逾時 5 分鐘、每台未結束 1 筆);不受串行與累計核可限制(取消不造成破壞)。需求方 2026-10-22 決定 M2(設計 §8.1.3);Agent 端 0.9.0 實作(`AgentCorrection.md` 同日記錄)。部署後 GigaItApp 才能使用,「取消重新開機」按鈕屬 P7-5。
+- 檔案:`ItAgentBack/src/commands/kinds.ts`、`ItAgentBack/test/contract.test.ts`、`docs/contracts/examples/ws-command-system-reboot-cancel.sample.json`(commit `1b383f7`)、`docs/contracts/command-kinds.md`。
+- 驗證:契約測試隨 commit 更新;本筆文件回寫未重跑測試(測試由主工作階段執行)。
+
 ## 2026-10-21 P7-1 需求方決定 D1~D6 與資安稽核修補
 - 內容:需求方決定 D1~D6 全部照建議;依資安稽核(2026-10-21 重跑)修補,細節與編號見 `P7-SOFTWARE-DESIGN.md` §8.1.1。
   - D2-1:同一人 24 小時內累計派送 > 20 台需第二人核可(軟體安裝 / 移除一組、`system.reboot` 一組);單台超過時建立待核可的單台批次,`CommandView` 加 `batchState`;「計數 → 建立」程序內序列化;`ita.command` 加索引 `ix_command_creator`。

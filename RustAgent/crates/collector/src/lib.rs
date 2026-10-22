@@ -9,7 +9,7 @@ mod registry;
 mod wmi_query;
 
 pub use health::{Health, HealthSampler, boot_time};
-pub use registry::find_installed;
+pub use registry::{find_installed, machine_uninstall_entries};
 
 use serde::Serialize;
 use std::time::Instant;
@@ -134,6 +134,19 @@ pub struct InstalledApp {
     pub uninstall_string: String,
     pub quiet_uninstall_string: String,
     pub install_location: String,
+}
+
+/// 整台電腦（HKLM）的一筆 Uninstall 項目，含子機碼名稱（MSI 為產品代碼）；Agent 軟體派送的偵測與移除用。
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct UninstallEntry {
+    /// Uninstall 下的子機碼名稱（MSI 安裝為 `{產品代碼}`）
+    pub key: String,
+    pub name: String,
+    pub version: String,
+    pub uninstall_string: String,
+    pub quiet_uninstall_string: String,
+    /// `WindowsInstaller = 1`：MSI 安裝
+    pub windows_installer: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

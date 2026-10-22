@@ -3,6 +3,7 @@
 > 草案 2026-10-20,分支 `docs/p7-software-design`(從 develop `948adf1` 開,P6-2 已合併)。依據:PLATFORM-PLAN §4.4、§4.6、§4.10 A6、§5、§8 P7 列、§8 B1;[ADR 0002](decisions/0002-software-deployment.md)(採方案 B)、[ADR 0003](decisions/0003-code-signing-pki.md);`P4-COMMAND-DESIGN.md`(指令通道、批次);`P6-UPGRADE-DESIGN.md`(`authenticode`、本機信任清單、版本檔目錄、下載 API 模式);`contracts/command-kinds.md`。
 > **狀態**:2026-10-20 需求方確認 §9 全部:第 2 項依建議(未簽章套件由公司憑證加簽),第 11 項先用需求方自己的本機電腦(開發機)加 VM `RUSTIT-P34`,另一台 IT 同意的電腦之後再補;其餘照建議。可開工 P7-1。
 > **進度(2026-10-21,P7-1 後端完成、待 MR)**:P6 已於 2026-10-21 完成,P7 接續。分支 `feature/p7-1-software-catalog`(worktree `../RustIt-p7-1`)已推到 gitlab / origin,**MR 尚未開**。P7-1 後端實作完成:migration 0008(**只套用整合測試庫 `_poc_test`**)、軟體目錄與兩人覆核、`software.*` / `system.reboot` 指令與參數快照、套件下載、批次第二人核可與累計核可、全域並行上限、三個告警規則;需求方 2026-10-21 決定 D1~D6 全部照建議、資安稽核(重跑)已修大部分項目(§8.1.1)。測試:`npm test` 210/210、`test:int` 13/13、typecheck 通過(報告 `test-reports/2026-10-21-p7-1-backend.md`)。下一步:主工作階段處理 code-reviewer 結果後開 MR(HANDOFF §2 1-6)。
+> **進度(2026-10-22,P7-2 Agent 程式完成、VM 驗收待做)**:P7-1 已合併(MR !50)並上測試區(migration 0008 已套 `giganexus_It_Agent_test`、Gateway OpenAPI v56 已發佈、主機 2 `ita-software` 已唯讀掛載)。P7-2 Agent `software` 模組(0.9.0)完成於分支 `feature/p7-2-agent-software`(最新 `f3af32d`,**MR 尚未開**):`software.install` / `software.uninstall`、A6 電池 / 計量網路延後;已通過 code-reviewer 與 security-auditor 並修正;`cargo test -p rustit-agent` 116/116。需求方 2026-10-22 決定 C2(draft 套件也須在本機 `trusted_signers` 內)、H1、H2、M3(見 §8.1.2);**M3 已完成**(`b9242d6`,`agent.toml` `[software] trusted_signers`)。**P7-3 Agent 端完成**(`system.reboot`、`system.reboot.cancel`、`reboot_policy required`;`8c8a63f`、`b9032d8`、`1b383f7`,見 §8.1.3)。下一步:MSI 0.9.0 發版(建置帶 `-SoftwareSigners`)、開 P7-2 / P7-3 MR、VM 驗收(VM `agent.toml` 的 `[software] trusted_signers` 要加 7-Zip 測試簽章者與 Notepad++ 簽章者指紋)。
 > 設計當時的現況:Agent 0.7.0、Watchdog 0.2.0(P6-2 已合併 develop);`rustit-common::authenticode`(WinVerifyTrust + 簽章者指紋)與 `agent.toml` `[upgrade] trusted_signers` 已有;`ita.command_batch` 已有 `requires_approval` / `approved_by_*` 欄位(P4 預留、無邏輯);`kindHooks`、批次 `max_concurrent` 補送(`refillBatch`)已有;`ita.device_software`(P3)有每台最新軟體清單;**NAS `RustIT\` 未掛載、軟體目錄與 `software.*` 指令都還沒有**。`RustAgent/crates/demo/src/deploy.rs`(536 行,Firefox / WinRAR 單機版)是移植來源。
 
 ## 0. 分批
@@ -24,7 +25,7 @@ P7-1 先做(後端可單獨用 API 與 curl 驗證);P7-2 依賴 P7-1 的下載�
 | --- | --- | --- |
 | 對 3 台 IT 電腦派送 7-Zip(MSI)與 Notepad++(Inno),再移除;每台狀態與結束代碼正確 | P7-1、P7-2 | 測試機(VM `RUSTIT-P34` + 另 2 台 IT 同意的電腦)登錄兩個套件 → 測試機驗證 → `tested` → 第二人 `published` → 派送;每台 `succeeded`、`exit_code = 0`;資產出現 `software_installed` 事件;`software.uninstall` 後出現 `software_removed`,詳細步驟 §8.3 |
 | 雜湊不符時拒絕安裝 | P7-2 | 換掉 `software\` 內檔案(主機複驗擋下一次;再以 Agent 單元測試與「繞過主機複驗」的測試參數驗端點自己驗)→ `HASH_MISMATCH`,沒有啟動安裝程式 |
-| 簽章者不在本機信任清單時拒絕安裝 | P7-2 | 套件簽章者已在主機 `signer_thumbprints`、但不在 VM `agent.toml` `trusted_signers` → `SIGNER_NOT_TRUSTED` |
+| 簽章者不在本機信任清單時拒絕安裝 | P7-2 | 套件簽章者已在主機 `signer_thumbprints`、但不在 VM `agent.toml` `[software] trusted_signers` → `SIGNER_NOT_TRUSTED` |
 | 派送中斷線,重連後結果正確 | P7-2 | 安裝中停用 VM 網卡 → 安裝完成後結果存本機 → 重連補送 `command_update`,主機最終 `succeeded`(沿用 P4 去重與補送) |
 
 ## 1. 資料表(`0008_software.sql`,SQL Server 2012)
@@ -83,7 +84,7 @@ IT 只送 `{ packageId }`;Server 建立指令時查目錄(必須 `published`,測
 | `url` | `/agent/v1/packages/{packageId}`(Agent 以同一組 mTLS 連線下載,不跟隨重新導向) |
 | `sha256`、`size_bytes` | 驗整個檔案 |
 | `installer_type`、`install_args` | 見 §2.3 |
-| `signer_thumbprints` | 預期簽章者;`draft` 套件在測試機上為空 → Agent 仍須簽章有效(`Valid`),回報實際簽章者,**不採信空清單放行**(見 §3.3) |
+| `signer_thumbprints` | 預期簽章者;`draft` 套件在測試機上為空 → Agent 仍須簽章有效(`Valid`)、回報實際簽章者,且**簽章者仍須在本機 `[software] trusted_signers` 內**(C2,需求方 2026-10-22 決定,見 §5.2、§8.1.2);**不採信空清單放行**(見 §3.3) |
 | `detect` | `{ type, value }` |
 | `timeout_sec` | 安裝逾時,預設 1800 |
 | `reboot_policy` | |
@@ -217,7 +218,7 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
 1. 驗參數(§2.3 字元白名單、`url` 必須是 `/agent/v1/packages/{package_id}`、`size_bytes` ≤ 4 GB)。
 2. **`detect` 已通過 → 直接 `succeeded` + `already_installed = true`**(派送是冪等的;版本差異由 IT 先移除舊版,不做自動升級取代)。
 3. **A6 延後**(§5.4)→ 進度 `deferred`。
-4. 下載(進度 `downloading` + 百分比,每 5% 或 5 秒 `command_update`)→ 驗大小與 SHA-256(`HASH_MISMATCH`)→ 驗 Authenticode(`SIGNATURE_INVALID`)→ 簽章者:**主機 `signer_thumbprints` ∩ 本機 `agent.toml` `[upgrade] trusted_signers`** 必須非空且包含實際簽章者(`SIGNER_NOT_TRUSTED`);沿用 P6 的 `signer_allowed`。
+4. 下載(進度 `downloading` + 百分比,每 5% 或 5 秒 `command_update`)→ 驗大小與 SHA-256(`HASH_MISMATCH`)→ 驗 Authenticode(`SIGNATURE_INVALID`)→ 簽章者:**主機 `signer_thumbprints` ∩ 本機 `agent.toml` `[software] trusted_signers`**(M3,與升級用的 `[upgrade]` 分開)必須非空且包含實際簽章者(`SIGNER_NOT_TRUSTED`);沿用 P6 的 `signer_allowed`。
 5. 安裝(進度 `installing`):§5.3 命令列,逾時 `timeout_sec`(`INSTALL_TIMEOUT`,Job Object 結束行程樹);1618 重試 3 次(`INSTALL_BUSY`)。
 6. 偵測(進度 `detecting`):輪詢 `detect` 最多 120 秒(`DETECT_FAILED`)。
 7. 立即重新蒐集並 `POST /agent/v1/inventory`(不等 24 小時),讓主機的 `device_software` 與 `software_installed` 事件即時反映;失敗只記警告,不影響指令結果。
@@ -225,7 +226,7 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
 
 結果先寫本機持久化(P2 `store`)再回報;指令以 `command_id` 去重,重連後補送(P4)。
 
-**測試機 `draft` 套件(`signer_thumbprints` 為空)**:第 4 步簽章者檢查改為「簽章必須 `Valid`(鏈到受信任的根)並回報實際簽章者,不比對清單」。因為只有 `pilot` 環的裝置會收到 `draft` 的指令(§3.3)、且 IT 後續要核對 `observed_signers` 才能 `tested`,所以可行;**未簽章的檔案在任何狀態都拒絕**(§9-2:未簽章套件由 IT 以公司憑證簽章後再登錄)。
+**測試機 `draft` 套件(`signer_thumbprints` 為空)**:第 4 步簽章者檢查改為「簽章必須 `Valid`(鏈到受信任的根)、**簽章者必須在本機 `agent.toml` `[software] trusted_signers` 內**(C2,需求方 2026-10-22 決定;本機清單空白不接受任何套件),並回報實際簽章者,但不比對主機清單」。因為只有 `pilot` 環的裝置會收到 `draft` 的指令(§3.3)、且 IT 後續要核對 `observed_signers` 才能 `tested`,所以可行;原設計的「draft 只要簽章有效」會讓主機被入侵時對 pilot 電腦推任意已簽章程式,故不採用。**未簽章的檔案在任何狀態都拒絕**(§9-2:未簽章套件由 IT 以公司憑證簽章後再登錄)。**代價**:測試機要先把該廠商簽章者指紋加進本機 `[software] trusted_signers`,才能測 `draft` 套件(VM 驗收前置,§8.3)。
 
 ### 5.3 命令列組法(Agent 端寫死,不由主機給完整命令)
 
@@ -246,12 +247,13 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
 - 指令參數 `ignore_power: true`(admin 專用,選填)可略過延後(例如 IT 現場處理);預設 `false`。**不略過計量網路判斷**(流量費由使用者承擔)。
 - 偵測失敗(API 不可用、桌機沒有電池)視為「無限制」,不阻擋。
 
-### 5.5 `system.reboot`
+### 5.5 `system.reboot`(P7-3 實作後:以下為最終行為;與原設計差異見 §8.1.3)
 
-1. 使用者端程式(P8)未實作前:一律 `WTSSendMessage` 系統訊息框(沿用 `message.show` 的做法與防偽裝規則,前綴「【IT 部門通知】」、結尾附發送人)提示「電腦將於 N 分鐘後重新開機,請儲存工作」。沒有登入者 → 不提示直接排程。
-2. 排程 `delay_sec` 後以 `InitiateSystemShutdownEx` 重新啟動(`force = false` 不強制關閉應用程式,應用程式可拒絕關閉;`ERROR_SHUTDOWN_IN_PROGRESS` 等失敗記 `EXECUTION_FAILED`)。`force = true`:同上但強制結束應用程式,**只有 admin 且需在畫面二次確認**。
-3. 指令在「已排程」就 `succeeded`(`result: { "scheduled_at": "...", "delay_sec": 300 }`)——關機後無法再回報;下次 `hello` 時主機把該指令對應的 `reboot_required` 標記清除(以 `boot_time` 變新為準,P5 已有 `agent_started.boot_time`)。
+1. 使用者端程式(P8)未實作前:`WTSSendMessage` 系統訊息框(沿用 `message.show` 的做法與防偽裝規則,前綴「【IT 部門通知】」、結尾附發送人,工號只顯示英數字 1–16 字)提示「電腦將於 N 分鐘後重新開機,請儲存工作」。**先排程,成功後才顯示訊息框**;沒有登入者或 `delay_sec = 0` → 不顯示。
+2. 以 `InitiateSystemShutdownExW` 排程(倒數由 Windows 保存,Agent 重啟也照常進行;事件 1074 原因為「其他、計畫性」)`delay_sec` 後重新啟動(`force = false` 不強制關閉應用程式,應用程式可拒絕關閉;`ERROR_SHUTDOWN_IN_PROGRESS` 等失敗記 `EXECUTION_FAILED`)。`force = true`:同上但強制結束應用程式,**只有 admin 且需在畫面二次確認**。
+3. 指令在「已排程」就 `succeeded`(`result: { "scheduled_at": "...", "delay_sec": 300, "force": false, "notified": true }`)——排程前 Agent 在本機 kv `reboot_command` 記下指令,**重開機後補送 `succeeded`**(`result: { "rebooted": true, "recovered_at": "..." }`);下次 `hello` 時主機把該指令對應的 `reboot_required` 標記清除(以 `boot_time` 變新為準,P5 已有 `agent_started.boot_time`)。
 4. 同一時間若有 `software.*` 正在執行 → 先等待(串行),避免重開機中斷安裝。
+4a. **本機上限與倒數中拒絕**(§8.1.3 H1 / M1):開機未滿 30 分鐘不接受、24 小時內最多 3 次(取消的也算)、有人登入時倒數至少 60 秒 → `REBOOT_LIMITED`;倒數中 `software.*` / `agent.upgrade` / `agent.restart` 回 `REBOOT_PENDING`。**`system.reboot.cancel`**(M2)可取消倒數,不取串行鎖。
 5. 該台 `reboot_required` 狀態來源:最近一次成功的 `software.*` 指令 `result.reboot_required = true` 且之後 `boot_time` 沒有變新;GigaItApp 詳情顯示並提供「重新開機」按鈕。
 
 ### 5.6 清理與安全
@@ -340,6 +342,69 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
   2. 用 `GITLAB_TOKEN` 開 MR → develop(只開不合併),描述註明:依賴 MR !39 先合併;**部署前必須先套用 migration 0008**(新版所有指令查詢讀 `command_batch.state`;0008 現在含 `editors`、`revoked_from`、`ix_command_creator`);migration 內容請需求方先看,再經同意套用 `giganexus_It_Agent_test`;測試區 compose 已加 `SOFTWARE_DIR=/srv/software`。
   3. 不推送或合併 develop / main。
 
+### 8.1.2 P7-2 實作、需求方決定與資安稽核(2026-10-22)
+
+分支 `feature/p7-2-agent-software`(`591ab84` → `11145d6` → `a484b1e` → `4848605` → `f3af32d`),Agent 0.9.0;`cargo test -p rustit-agent` 116/116(`cargo test -p rustit-common` 單獨執行會因 `log::set_boxed_logger` 編譯失敗,為既有問題)。
+
+- **與設計的差異**:
+  - 磁碟需求為「安裝檔 × 2 + 1 GB」(§5.1 原為檔案大小 + 1 GB):staging 複本(§5.6)也佔空間。
+  - A6 延後上限是常數 4 小時(`power::DEFER_MAX`,且不超過指令剩餘有效時間),**沒有加** `agent.toml [software] defer_max_min`(§5.4)。
+  - A6 在**取得串行鎖之前**延後,延後期間不擋其他指令;已完整下載的安裝檔不延後。
+  - 只有 `UninstallString`、目錄也沒有 `uninstall_args` 時,回 `UNINSTALL_NOT_SUPPORTED`。
+  - MSI 移除只附加 `installer_type = msi` 的屬性參數(其他類型的開關 msiexec 不認得)。
+  - running 進度只回報百分比:主機不存 running 的 `result`。
+  - `signer_subject` 已過濾控制字元與雙向文字控制字元、最多 200 字(L6)。
+- **需求方決定(2026-10-22)**:
+  - **C2**:`draft` 套件(主機簽章者清單為空)的簽章者也必須在本機 `[software] trusted_signers` 內;本機清單空白不接受任何套件。已改正文 §2.2 `signer_thumbprints` 與 §5.2「測試機 draft 套件」。
+  - **H1**:移除程式在 Program Files / Windows / `ProgramData\Package Cache` 以外時,檔案與上層目錄只能由 SYSTEM / Administrators / TrustedInstaller 寫入(`scm::admin_only_writable`);路徑不可含 `..`。
+  - **H2**:內建不可移除清單——DisplayName 含 GigaNexus / RustIt、常見防毒 / EDR(Defender、Symantec、Norton、Trend Micro、Sophos、Kaspersky、ESET、McAfee、CrowdStrike 等共 22 個詞,以程式 `uninstall.rs` `PROTECTED` 為準)者回 `UNINSTALL_NOT_SUPPORTED`;單字比對「詞以它開頭」(避免 `eset` 比到 `Preset`)。
+  - **M3**:`trusted_signers` 分開——**已完成**(`b9242d6`,與 P7-3 同分支):`agent.toml` 新增 `[software] trusted_signers`(格式與 `[upgrade]` 相同,共用 `signer_list` 檢查);沒有設定 = 不接受任何派送的套件;Agent 軟體派送改用這份清單,升級與替換 Watchdog 仍用 `[upgrade]`;`build-agent-msi.ps1` 新增 `-SoftwareSigners` 寫入 `[software]` 區段。
+- **資安稽核(security-auditor)已修**:
+
+  | 編號 | 內容 | 修法 |
+  | --- | --- | --- |
+  | C1 | `command_id` 組 staging / 記錄路徑並於結束時 `remove_dir_all` | `command_id` 必須是 UUID;staging 確認安全後才登記結束時刪除 |
+  | C2 | draft 套件空簽章者清單放行任何有效簽章 | 見需求方決定 |
+  | H1 | 移除程式位於可被一般使用者寫入的位置 | 見需求方決定 |
+  | H2 | 對全公司移除監控本身或防毒 / EDR | 見需求方決定 |
+  | M1 | 快取 / staging / 記錄目錄被他人擁有 | 擁有者必須是 SYSTEM 或 Administrators(`scm::owner_is_admin`) |
+  | M2 | 安裝程式使用共用的 `C:\Windows\Temp` | `TEMP` / `TMP` 指到 `staging\{commandId}	mp` |
+  | L4、L5 | 低風險項目(稽核報告編號) | 隨 code-reviewer 修正一併處理:`split_command` 改 ASCII 小寫(Unicode 小寫改變長度會 panic);安裝子行程等待改用剩餘逾時、1618 重試計入整體逾時(`a484b1e`) |
+  | L6 | `signer_subject` 可含控制字元 / 雙向文字控制字元 | 過濾並限長 200 |
+  | L7 | staging 安裝檔驗證後被換掉(TOCTOU) | 驗證前以只允許讀取的共用模式開啟,持有到安裝程式結束 |
+
+  L4、L5 兩列依 commit 訊息(`a484b1e`)整理,逐項編號對應以稽核報告為準。
+- **資安稽核未修**:
+  - **L2**:`ACTION=` 與重開機類開關尚未全面禁止;要 Agent、ItAgentBack、契約向量 `install-args.vectors.json` 三處同步修改,待排。
+  - **L3**:MSI 逾時後安裝仍在 msiserver 進行(結束行程樹殺不掉 msiserver 的工作),下一筆指令可能遇到 1618(`INSTALL_BUSY`);`INSTALL_TIMEOUT` 訊息已註明。
+- **code-reviewer 未處理的建議**:
+  1. `transport` 下載帶狀態碼取代字串比對(目前以錯誤字串判斷「主機拒絕(4xx)不重試」,宜改為回傳狀態碼)。
+  2. `software::Failure` 與 `command::Failure` 重複,可合併。
+  3. `purge_stale` 以目錄 mtime 判斷過期(續傳時目錄內檔案更新不一定更新目錄 mtime),宜改為看內容檔時間。
+- **風險(Watchdog 升級)**:Agent 以 Job Object 啟動安裝程式並設 `KILL_ON_JOB_CLOSE`;Watchdog 升級 Agent 時 `prepare_shutdown` 等待執行中指令最多 60 秒,逾時記 `failed AGENT_UPGRADING` 並照樣關閉 Agent,Job 隨之關閉而**中斷進行中的安裝**(MSI 可能半裝)。升級與軟體派送避開同時段,或讓 `prepare_shutdown` 在 `software.*` 執行中時延後(P7-3 評估)。
+- **接手**:P7-3 `system.reboot`(M3 已完成);開 P7-2 MR(等 P7-3 一起或先開由需求方決定);VM 驗收前置見 §8.3(VM `trusted_signers` 要加 7-Zip 測試簽章與 Notepad++ 簽章者指紋)。
+
+### 8.1.3 P7-3 實作、需求方決定與資安稽核(2026-10-22)
+
+分支 `feature/p7-2-agent-software`(`8c8a63f` → `b9032d8` → `1b383f7`),Agent 0.9.0(與 P7-2 同版本);程式在 `RustAgent/crates/agent/src/reboot.rs`、`command.rs`,ItAgentBack 新增類型在 `src/commands/kinds.ts`。
+
+- **需求方決定(2026-10-22,H1、M1、M2 都照建議)**:
+  - **H1 本機上限**:Agent 自行限制重新開機——開機未滿 30 分鐘不接受;24 小時內最多 3 次(取消的也算);有人登入時倒數至少 60 秒。超過回 `REBOOT_LIMITED`。主機被入侵時無法讓電腦反覆重開機。
+  - **M1 倒數中拒絕**:倒數中(開機時間未變新且未超過倒數 + 5 分鐘)`software.*`、`agent.upgrade`、`agent.restart` 回 `REBOOT_PENDING`,不開始會被重開機中斷的工作。
+  - **M2 新增取消**:`system.reboot.cancel`(admin、無參數、1 小時 / 5 分鐘、每台 1 筆;`AbortSystemShutdownW`、清除倒數旗標、通知使用者;結果 `{ aborted }`;不取串行鎖,不納入批次與累計核可)。ItAgentBack 已加類型與契約範例 `ws-command-system-reboot-cancel.sample.json`。
+- **已修(code-reviewer / 資安稽核)**:
+  - 先排程、成功後才顯示訊息框;`delay_sec = 0` 不顯示(排程失敗不讓使用者看到不會發生的倒數)。
+  - 排程前把指令記在本機 kv `reboot_command`,重開機後 recover 回報 `succeeded`(`{ rebooted, recovered_at }`),不誤報為中途停止;沒排成則清除。
+  - 事件 1074 的原因改為「其他、計畫性」;權限調整的錯誤碼在 `CloseHandle` 前取得。
+  - `issued_by` 驗證:發送人工號只顯示英數字 1–16 字(`message.show` 一併套用);字元過濾加入格式字元(Cf)與行 / 段落分隔(Zl / Zp);`message` 不可只有空白。
+  - `reboot_policy = required` 只在安裝成功且非 1638(已安裝)時標記 `reboot_required`;非字串回 `INVALID_PARAMS`。
+  - `build-agent-msi.ps1`:`-TrustedSigners` 與 `-SoftwareSigners` 兩份清單有交集時警告。
+- **未處理**:
+  - `SeShutdownPrivilege` 啟用後沒有還原(只影響 Agent 行程,影響小)。
+  - 以 `reboot_policy` 觸發的重開機尚無自動排程:需求方決定只標記 `reboot_required`,由 IT 在畫面按「重新開機」。
+- **部署注意**:含 `[software]` 區段的 `agent.toml` 不可給 0.9.0 以前的 Agent 讀(設定結構 `deny_unknown_fields`,舊版會啟動失敗),Agent 版本與設定要一起換。
+- **待辦**:ItAgentBack 新類型(`system.reboot.cancel`)要在 P7-2 MR 合併、部署後才能在 GigaItApp 使用;GigaItApp P7-5 要加「取消重新開機」按鈕。
+
 ### 8.2 風險與已知限制(實作前先看)
 
 1. **全公司任意程式執行**:最高風險功能。防線:目錄第二人覆核、`published` 才能派送、參數字元白名單且不經 shell、簽章者需同時符合主機與本機清單(GPO)、SHA-256、> 20 台第二人核可、全部稽核。
@@ -351,7 +416,7 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
 
 ### 8.3 測試區 VM 驗收步驟(草案,`RUSTIT-P34` + 另 2 台 IT 同意的電腦;VM 內指令由需求方執行)
 
-**前置**:P7-1 已合併 develop 並部署測試區、migration 0008 已套用 `giganexus_It_Agent_test`、Gateway OpenAPI 草稿批次已發佈、主機 2 `/srv/giganexus/ita-software/` 已建立並放入兩個套件(`7-Zip\<版本>\*.msi`,以測試憑證簽章;`Notepad++\<版本>\*.exe`)、VM 已裝 Agent 0.9.0、Notepad++ 的簽章者指紋已加入該機 `trusted_signers`、VM 設為 `pilot` 環。
+**前置**:P7-1 已合併 develop 並部署測試區、migration 0008 已套用 `giganexus_It_Agent_test`、Gateway OpenAPI 草稿批次已發佈、主機 2 `/srv/giganexus/ita-software/` 已建立並放入兩個套件(`7-Zip\<版本>\*.msi`,以測試憑證簽章;`Notepad++\<版本>\*.exe`)、VM 已裝 Agent 0.9.0、7-Zip 測試簽章者與 Notepad++ 簽章者指紋已加入該機 `agent.toml` 的 `[software] trusted_signers`(不是 `[upgrade]`)、VM 設為 `pilot` 環。
 
 | # | 步驟 | 通過條件 |
 | --- | --- | --- |
@@ -361,7 +426,7 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
 | 4 | `software.uninstall` 兩個套件 | `succeeded`;`software_removed` 事件;NSIS/Inno 以登錄檔輪詢確認消失 |
 | 5 | 重複派送已安裝套件 | `succeeded` + `already_installed = true` |
 | 6 | 反向:替換 `software\` 內檔案(同檔名內容不同) | 主機複驗 `ITA_PACKAGE_CHANGED`(下載被拒);繞過主機複驗的測試版 → `HASH_MISMATCH`,安裝程式未啟動 |
-| 7 | 反向:移除 VM `trusted_signers` 內的簽章者指紋後重派 | `SIGNER_NOT_TRUSTED`;未簽章檔 → `SIGNATURE_INVALID` |
+| 7 | 反向:移除 VM `[software] trusted_signers` 內的簽章者指紋後重派 | `SIGNER_NOT_TRUSTED`;未簽章檔 → `SIGNATURE_INVALID` |
 | 8 | 安裝中斷線:派送後 `Disable-NetAdapter`、安裝完成後再啟用 | 重連後主機收到最終結果,指令只執行一次 |
 | 9 | 逾時:`timeout_sec` 設 30 的長時間安裝程式 | `INSTALL_TIMEOUT`,行程樹已結束 |
 | 10 | 3010:套件模擬回傳 3010(測試用) | `succeeded` + `reboot_required`;`system.reboot` 排程,畫面提示;重開機後標記清除 |
