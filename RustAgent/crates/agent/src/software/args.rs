@@ -37,7 +37,7 @@ fn names_file(v: &str) -> bool {
 }
 
 /// 禁止的屬性(完全比對,不分大小寫);另含 `CONFIG*`、`INI*`、`REBOOT*`、`*FILE`
-const BANNED_PROPS: [&str; 27] = [
+const BANNED_PROPS: [&str; 28] = [
     "TRANSFORMS",
     "TRANSFORMSATSOURCE",
     "TRANSFORMSSECURE",
@@ -58,6 +58,7 @@ const BANNED_PROPS: [&str; 27] = [
     "EXECUTEACTION",
     "MSIRMSHUTDOWN",
     "MSIRESTARTMANAGERCONTROL",
+    "MSIDISABLERMRESTART",
     "MSILOGGINGMODE",
     "LIMITUI",
     "ARPSYSTEMCOMPONENT",
@@ -126,11 +127,14 @@ fn banned_switch(name: &str) -> bool {
         || n.starts_with("burn.")
 }
 
-/// 重開機類開關(`/forcerestart`、`/promptrestart`、`-reboot`、`/RESTARTAPPLICATIONS`…):重開機由 Agent 依 `reboot_policy` 處理,
-/// 只允許 no 開頭的(`/norestart`;L2)。對應 ItAgentBack `RESTART_SWITCH`
+/// 重開機與強制關閉程式類開關(`/forcerestart`、`/promptrestart`、`-reboot`、`/RESTARTAPPLICATIONS`、`/FORCECLOSEAPPLICATIONS`…):
+/// 重開機由 Agent 依 `reboot_policy` 處理,只允許 no 開頭的(`/norestart`、`/NOCLOSEAPPLICATIONS`;L2)。對應 ItAgentBack `RESTART_SWITCH`
 fn restart_switch(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
-    !n.starts_with("no") && (n.contains("restart") || n.contains("reboot"))
+    !n.starts_with("no")
+        && ["restart", "reboot", "closeapplications"]
+            .iter()
+            .any(|w| n.contains(w))
 }
 
 /// exe / burn / 未指定類型:名稱含這些字的開關多半是寫檔或指定路徑
@@ -247,6 +251,13 @@ fn grammar_error(v: &str, kind: Option<Installer>) -> Option<String> {
             (*i == 0 || rest.as_bytes()[i - 1] == b' ') && !rest[i + 3..].contains('"')
         });
         if let Some((i, _)) = found {
+            // 值裡不可再夾開關(類型標錯時,不是 NSIS 的安裝程式會把它當成開關)
+            let d = rest[i + 3..].as_bytes();
+            if d.windows(2)
+                .any(|w| w[0].is_ascii_whitespace() && matches!(w[1], b'/' | b'-'))
+            {
+                return Some("/D= 的路徑裡不可再含 / 或 - 開頭的參數(/D= 必須放最後)".into());
+            }
             if let Some(e) = value_error(rest[i + 3..].trim()) {
                 return Some(e.into());
             }
@@ -424,8 +435,8 @@ mod tests {
             "/d= 不分大小寫"
         );
         assert!(
-            args_error("/D=C:/Program Files/a /S", Some(Installer::Nsis)).is_none(),
-            "/D= 吃到結尾,值含 /S 仍在 Program Files 底下"
+            args_error("/D=C:/Program Files/a /S", Some(Installer::Nsis)).is_some(),
+            "/D= 吃到結尾:值裡夾 /S 會被 NSIS 當成路徑(不靜默),類型標錯時又會被當成開關,一律拒絕(L2)"
         );
         assert!(
             args_error("INSTALLDIR=\"c:/program files/x\"", Some(Installer::Msi)).is_none(),

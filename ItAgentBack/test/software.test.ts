@@ -6,7 +6,7 @@
  */
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync, symlinkSync, writeFileSync, type ReadStream } from 'node:fs';
+import { readFileSync, rmSync, symlinkSync, writeFileSync, type ReadStream } from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { loadGatewayEnv, loadMonitorEnv, type GatewayIdentity } from '@giganexus/backend-sdk';
@@ -23,6 +23,7 @@ import {
   DOWNLOADS_PER_DEVICE,
   installSnapshot,
   qualifyingSigners,
+  type Download,
   type RegisterPackageInput,
 } from '../src/services/software-service.js';
 import type { DeviceRecord, InstallerType, InstallResultRow, PackageRecord } from '../src/stores/types.js';
@@ -717,6 +718,37 @@ describe('軟體目錄、覆核與派送(SoftwareService + CommandDispatcher)', 
     assert.equal((await install(pilot, r.packageId)).kind, 'software.install');
   });
 
+  it('M1 定期複驗:找不到檔案要連續兩輪才處理;軟體庫一個檔案都沒有(掛載中斷)整輪略過;取消失敗下一輪再試', async () => {
+    const r = await register();
+    const queued = async () => (await install(pilot, r.packageId)).commandId;
+    const state = (id: string) => env.commandStore.commands.find((c) => c.commandId === id)!.state;
+    // 軟體庫全空:不處理
+    rmSync(path.join(env.dir.root, '7-Zip'), { recursive: true });
+    const c1 = await queued();
+    assert.deepEqual(await env.software.verifyFiles(ctx), { checked: 0, changed: 0 });
+    assert.equal(state(c1), 'queued');
+    // 只有這個檔案不見:第一輪只記下,第二輪才取消
+    env.dir.put('Other/1.0/other.msi', 'other');
+    await env.software.verifyFiles(ctx);
+    assert.equal(state(c1), 'queued', '第一輪不處理');
+    await env.software.verifyFiles(ctx);
+    assert.equal(state(c1), 'canceled');
+    await assert.rejects(queued(), { code: 'ITA_PACKAGE_CHANGED' });
+    // 恢復後解除;再換掉檔案時取消失敗 → 新的安裝已拒絕,下一輪再取消
+    env.dir.put(FILE, CONTENT);
+    await env.software.verifyFiles(ctx);
+    const c2 = await queued();
+    env.dir.put(FILE, 'MSI-tampered!!');
+    const original = env.store.cancelQueuedInstalls.bind(env.store);
+    env.store.cancelQueuedInstalls = () => Promise.reject(new Error('SQL 中斷'));
+    await env.software.verifyFiles(ctx);
+    assert.equal(state(c2), 'queued');
+    await assert.rejects(queued(), { code: 'ITA_PACKAGE_CHANGED' });
+    env.store.cancelQueuedInstalls = original;
+    await env.software.verifyFiles(ctx);
+    assert.equal(state(c2), 'canceled');
+  });
+
   it('L11:同一個 Idempotency-Key 用在不同的目標電腦 → 422;相同電腦(順序不同)回傳同一批', async () => {
     const id = await published();
     const a = await env.software.deploy(ctx, IT, id, { action: 'install', deviceIds: [pilot.deviceId, other.deviceId] }, 'key-1');
@@ -901,5 +933,17 @@ describe('套件下載 API 與管理 API', () => {
     const d = await env.software.download(ctx, device, r.packageId, undefined);
     assert.equal(d.status, 200);
     for (const s of [...open.slice(1), d.stream!]) s.destroy();
+    // 同時進來的請求也不能超過上限(檢查後立即預留名額);沒有交出串流的(416)不佔名額
+    await new Promise((ok) => setTimeout(ok, 20));
+    const all = await Promise.allSettled(Array.from({ length: 5 }, () => env.software.download(ctx, device, r.packageId, undefined)));
+    const ok = all.filter((x) => x.status === 'fulfilled').map((x) => (x as PromiseFulfilledResult<Download>).value);
+    assert.equal(ok.length, DOWNLOADS_PER_DEVICE);
+    for (const x of ok) x.stream!.destroy();
+    await new Promise((ok) => setTimeout(ok, 20));
+    assert.equal((await env.software.download(ctx, device, r.packageId, 'bytes=999-')).status, 416);
+    assert.equal((await env.software.download(ctx, device, r.packageId, 'bytes=999-')).status, 416);
+    const last = await env.software.download(ctx, device, r.packageId, undefined);
+    assert.equal(last.status, 200, '416 沒有佔用名額');
+    last.stream!.destroy();
   });
 });

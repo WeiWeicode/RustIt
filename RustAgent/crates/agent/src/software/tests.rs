@@ -417,6 +417,30 @@ async fn exit_codes() {
     );
 }
 
+#[test]
+fn download_permanent_by_status() {
+    assert!(download_permanent(Some(404), None, false), "不再指派");
+    assert!(download_permanent(Some(403), None, true), "停用");
+    assert!(download_permanent(
+        Some(503),
+        Some("ITA_PACKAGE_CHANGED"),
+        false
+    ));
+    assert!(!download_permanent(
+        Some(429),
+        Some("ITA_DOWNLOAD_BUSY"),
+        false
+    ));
+    assert!(!download_permanent(
+        Some(503),
+        Some("ITA_PACKAGE_UNAVAILABLE"),
+        false
+    ));
+    assert!(!download_permanent(Some(408), None, false));
+    assert!(!download_permanent(None, None, false), "連線錯誤");
+    assert!(download_permanent(None, None, true), "超過預期大小");
+}
+
 #[tokio::test]
 async fn timeout_waits_for_windows_installer() {
     let content = b"settle";

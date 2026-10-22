@@ -6,7 +6,7 @@
  *   - 檔案或目錄不存在視為「沒有」;其他錯誤(權限、NAS 掛載中斷)回 503 ITA_FILES_UNAVAILABLE,不當成不存在(AGENT.md §5)
  */
 import { createHash } from 'node:crypto';
-import { createReadStream, type ReadStream, type Stats } from 'node:fs';
+import type { ReadStream, Stats } from 'node:fs';
 import { open, readdir, realpath, stat, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { AppError } from '../errors.js';
@@ -31,6 +31,7 @@ export interface OpenedFile {
 }
 
 const keyOf = (s: Stats) => `${s.size}:${s.mtimeMs}:${s.ctimeMs}:${s.ino}`;
+const withoutIno = (key: string) => key.slice(0, key.lastIndexOf(':'));
 
 /** 不存在(含路徑中間是檔案)視為沒有;其他錯誤丟 503 */
 function missingOrThrow(err: unknown): null {
@@ -58,18 +59,19 @@ export class RootedFiles {
     }
   }
 
-  /** 同一檔案同時多個請求只算一次(計算中的 Promise 共用);失敗不快取 */
-  sha256(file: ResolvedFile): Promise<string> {
+  /**
+   * 同一檔案同時多個請求只算一次(計算中的 Promise 共用);失敗不快取。
+   * 經 openChecked 從檔案代號讀:快取的雜湊一定是「resolve 時那個檔案」的內容(P7 資安稽核 LOW-1,避免 stat 後換檔汙染快取)
+   */
+  async sha256(file: ResolvedFile): Promise<string> {
     const cached = this.hashes.get(file.file);
     if (cached?.key === file.key) return cached.sha256;
-    const sha256 = (async () => {
-      const h = createHash('sha256');
-      for await (const chunk of createReadStream(file.file)) h.update(chunk as Buffer);
-      return h.digest('hex');
-    })();
-    this.hashes.set(file.file, { key: file.key, sha256 });
-    sha256.catch(() => this.hashes.delete(file.file));
-    return sha256;
+    const opened = await this.openChecked(file);
+    try {
+      return await opened.sha256();
+    } finally {
+      await opened.close();
+    }
   }
 
   /** 重新計算(不用快取)並更新快取;定期複驗用(資安稽核 M1) */
@@ -97,10 +99,13 @@ export class RootedFiles {
       await h.close().catch(() => undefined);
       throw err;
     }
-    if (key !== file.key) {
+    // 比對大小、修改時間、狀態變更時間;不比 inode(CIFS noserverino 時 stat 與 fstat 的 inode 可能不同)。
+    // 換檔(含 rename、cp -p)都會改變狀態變更時間。相符後沿用 resolve 時的鍵(雜湊快取)
+    if (withoutIno(key) !== withoutIno(file.key)) {
       await h.close().catch(() => undefined);
       throw new AppError(503, 'ITA_FILES_CHANGED', '檔案剛被移動或替換,請稍後重試');
     }
+    key = file.key;
     const cachePath = file.file;
     return {
       size: file.size,
@@ -117,7 +122,8 @@ export class RootedFiles {
         sha256.catch(() => this.hashes.delete(cachePath));
         return sha256;
       },
-      stream: (range) => h.createReadStream({ ...range, autoClose: true }),
+      // 沒有 Range 時明確從 0 開始(不依賴雜湊後檔案代號的目前位置)
+      stream: (range) => h.createReadStream({ start: 0, ...range, autoClose: true }),
       close: () => h.close().catch(() => undefined),
     };
   }

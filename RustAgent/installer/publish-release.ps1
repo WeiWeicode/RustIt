@@ -110,7 +110,8 @@ if ($DryRun) {
 function Write-Registration {
     Write-Host ''
     Write-Host '上架完成。到 GigaItApp「端點管理 › 電腦清單 › Agent 版本」→「登錄版本」,登錄資料:'
-    foreach ($it in $items) { Write-Host ("  {0,-8} {1,-14} {2}  預期簽章者 {3}" -f $it.Component, $it.Version, $it.File, $signer) }
+    foreach ($it in $items) { Write-Host ("  {0,-8} {1,-14} {2}  預期簽章者 {3}  SHA-256 {4}" -f $it.Component, $it.Version, $it.File, $signer, $it.Sha) }
+    Write-Host '登錄後主機算出的 SHA-256 要與上面相同。'
     Write-Host '登錄後是草稿:先設給 pilot 環,驗證後再發佈,才能推到 it / all 環(P6-UPGRADE-DESIGN §1)。'
 }
 
@@ -132,31 +133,44 @@ if (-not $HostDir) {
             }
             throw "REFUSE $tag 已存在但內容不同、或是連結 / 目錄(不覆蓋);中止前已放好的項目不會回滾"
         }
-        New-Item -ItemType Directory -Force -Path $ddir | Out-Null
+        # 不用 New-Item -Path(會把 [ ] 當萬用字元)
+        [void][IO.Directory]::CreateDirectory($ddir)
         $tmp = Join-Path $ddir ".$($it.File).tmp.$guid"
         try {
             Copy-Item -LiteralPath $it.Path -Destination $tmp
             $got = (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash.ToLower()
             if ($got -ne $it.Sha) { throw "MISMATCH $tag(複製後雜湊不符)" }
-            # File.Move 在目的地已存在時失敗:放置時被別人搶先也不覆蓋
-            try { [IO.File]::Move($tmp, $dest) } catch { throw "REFUSE $tag 放置時別人已經放了同一個版本(不覆蓋)" }
+            # File.Move 在目的地已存在時失敗:放置時被別人搶先也不覆蓋;其他錯誤(網路、權限)照實回報
+            try { [IO.File]::Move($tmp, $dest) } catch {
+                if (Test-Path -LiteralPath $dest) { throw "REFUSE $tag 放置時別人已經放了同一個版本(不覆蓋)" }
+                throw "無法放置 ${tag}:$($_.Exception.Message)"
+            }
         } finally {
             Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
         }
         Write-Host "OK     $tag $got"
         $placed += $it
     }
-    # 主機唯讀掛載讀到的內容(endpoint-server 讀這裡);只警告,不影響上架結果
+    # 主機唯讀掛載讀到的內容(endpoint-server 讀這裡);檔案已放好,不符時印出登錄資料後以失敗結束,先到主機確認再登錄
+    $mountBad = 0
     if ($MountCheckDir) {
         foreach ($it in $placed) {
             $m = "$MountCheckDir/$($it.Component)/$($it.Version)/$($it.File)"
-            $out = & ssh -o BatchMode=yes $HostAlias "wsl -u root -e sha256sum '$m'" 2>$null
-            $have = if ($LASTEXITCODE -eq 0 -and "$out" -match '^([0-9a-f]{64})\s') { $Matches[1] } else { '' }
+            # $ErrorActionPreference = Stop 時 PowerShell 5.1 會把 ssh 的 stderr 當成錯誤:包起來,結果由下面判斷
+            $have = ''
+            try {
+                $out = & ssh -o BatchMode=yes $HostAlias "wsl -u root -e sha256sum '$m'" 2>$null
+                if ($LASTEXITCODE -eq 0 -and "$out" -match '^([0-9a-f]{64})\s') { $have = $Matches[1] }
+            } catch { $have = '' }
             if ($have -eq $it.Sha) { Write-Host "掛載確認 $($it.Component)/$($it.Version):$HostAlias 讀到的雜湊相符" }
-            else { Write-Warning "${HostAlias}:$m 讀不到或雜湊不同(掛載中斷?),到主機確認後再登錄" }
+            else {
+                Write-Warning "${HostAlias}:$m 讀不到或雜湊不同(掛載中斷?),到主機確認後再登錄"
+                $mountBad++
+            }
         }
     }
     Write-Registration
+    if ($mountBad) { throw "NAS 已放好,但 $HostAlias 的唯讀掛載有 $mountBad 個檔案讀不到或雜湊不同:確認掛載後再登錄" }
     return
 }
 

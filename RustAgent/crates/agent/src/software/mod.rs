@@ -566,6 +566,18 @@ async fn run_installer(
     }
 }
 
+/// 下載失敗是否不必重試:400 / 401 / 403(憑證、停用)、404(不再指派)、`ITA_PACKAGE_CHANGED`(軟體庫檔案被換掉)
+/// 重試也不會成功;429(同一台下載數超過上限 `ITA_DOWNLOAD_BUSY`、主機忙碌)、其他 4xx、5xx、連線錯誤稍後重試。
+/// 沒有 HTTP 狀態(本機判定)時以是否為 `Rejected`(例如超過預期大小)為準
+pub fn download_permanent(status: Option<u16>, code: Option<&str>, rejected: bool) -> bool {
+    match (status, code) {
+        (_, Some("ITA_PACKAGE_CHANGED")) => true,
+        (Some(400 | 401 | 403 | 404), _) => true,
+        (Some(_), _) => false,
+        (None, _) => rejected,
+    }
+}
+
 /// 等 Windows Installer 沒有進行中的安裝(最多 [`SETTLE_MAX`]);回傳是否已結束
 async fn settle(env: &impl Env) -> bool {
     let mut waited = Duration::ZERO;
@@ -914,7 +926,6 @@ impl Env for RealEnv {
         limit: u64,
     ) -> Result<Fetched, DlError> {
         use rustit_common::transport::{Download, SendError};
-        const PACKAGE_CHANGED: &str = "ITA_PACKAGE_CHANGED";
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -932,20 +943,14 @@ impl Env for RealEnv {
         {
             Ok(Download::Done(n)) => Ok(Fetched::Done(n)),
             Ok(Download::RangeNotSatisfiable) => Ok(Fetched::RangeNotSatisfiable),
-            Err(e) => {
-                // 4xx(不再指派、停用)與 503 ITA_PACKAGE_CHANGED(軟體庫檔案被換掉)重試也不會成功;
-                // 429(同一台下載數超過上限 ITA_DOWNLOAD_BUSY、主機忙碌)稍後重試
-                let permanent = match (e.status, e.code.as_deref()) {
-                    (Some(429), _) => false,
-                    (Some(s), _) if (400..500).contains(&s) => true,
-                    (_, Some(PACKAGE_CHANGED)) => true,
-                    _ => matches!(e.error, SendError::Rejected(_)),
-                };
-                Err(DlError {
-                    permanent,
-                    message: e.to_string(),
-                })
-            }
+            Err(e) => Err(DlError {
+                permanent: download_permanent(
+                    e.status,
+                    e.code.as_deref(),
+                    matches!(e.error, SendError::Rejected(_)),
+                ),
+                message: e.to_string(),
+            }),
         }
     }
 
