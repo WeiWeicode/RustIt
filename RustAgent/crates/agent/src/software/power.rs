@@ -32,12 +32,35 @@ pub fn metered(cost: u32) -> bool {
     cost & (COST_VARIABLE | COST_OVERDATALIMIT | COST_ROAMING | COST_APPROACHINGDATALIMIT) != 0
 }
 
+/// 延後原因
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Defer {
+    Battery,
+    Metered,
+}
+
+impl Defer {
+    /// 回報主機的代碼(`result.deferred.reason`,command-kinds.md)
+    pub fn code(self) -> &'static str {
+        match self {
+            Defer::Battery => "battery",
+            Defer::Metered => "metered",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Defer::Battery => "電池供電",
+            Defer::Metered => "計量網路",
+        }
+    }
+}
+
 /// 延後原因;不延後回 None
-pub fn defer_reason(s: PowerState, ignore_power: bool) -> Option<&'static str> {
+pub fn defer_reason(s: PowerState, ignore_power: bool) -> Option<Defer> {
     if s.metered {
-        Some("計量網路")
+        Some(Defer::Metered)
     } else if s.on_battery && !ignore_power {
-        Some("電池供電")
+        Some(Defer::Battery)
     } else {
         None
     }
@@ -112,12 +135,16 @@ mod tests {
             metered: true,
         };
         assert_eq!(defer_reason(PowerState::default(), false), None);
-        assert_eq!(defer_reason(battery, false), Some("電池供電"));
+        assert_eq!(defer_reason(battery, false), Some(Defer::Battery));
         assert_eq!(defer_reason(battery, true), None, "ignore_power 略過電池");
         assert_eq!(
             defer_reason(metered, true),
-            Some("計量網路"),
+            Some(Defer::Metered),
             "ignore_power 不略過計量網路"
+        );
+        assert_eq!(
+            (Defer::Battery.code(), Defer::Metered.code()),
+            ("battery", "metered")
         );
     }
 

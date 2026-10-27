@@ -14,7 +14,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { buildAgentApp } from '../src/agent-app.js';
 import { commandTimeoutSec } from '../src/commands/kinds.js';
 import { buildMgmtApp } from '../src/mgmt-app.js';
-import { APPROVAL_WINDOW_MS } from '../src/services/command-dispatcher.js';
+import { APPROVAL_WINDOW_MS, deferredOf } from '../src/services/command-dispatcher.js';
 import { SoftwareFiles, splitSoftwarePath } from '../src/services/software-files.js';
 import {
   argsErrors,
@@ -337,6 +337,49 @@ describe('軟體目錄、覆核與派送(SoftwareService + CommandDispatcher)', 
     assert.equal((c.params as { timeout_sec: number }).timeout_sec, 7200);
   });
 
+  it('A6 延後中(Agent 0.9.3):running 帶 result.deferred → 暫存延後狀態、重設執行逾時;不帶 deferred 的 running 清除', async () => {
+    const r = await register();
+    await online(pilot);
+    const a = await install(pilot, r.packageId);
+    await env.commands.onUpdate(ctx, pilot.id, { command_id: a.commandId, state: 'acked' });
+    const cmd = env.commandStore.commands.find((c) => c.commandId === a.commandId)!;
+    const old = new Date(0);
+    cmd.timeoutAt = old;
+    const next = '2026-10-27T08:05:00Z';
+    await env.commands.onUpdate(ctx, pilot.id, {
+      command_id: a.commandId,
+      state: 'running',
+      progress: 0,
+      result: { deferred: { reason: 'battery', next_check_at: next, extra: 'x'.repeat(5000) } },
+    });
+    assert.deepEqual(JSON.parse(cmd.resultSummary!), { deferred: { reason: 'battery', next_check_at: '2026-10-27T08:05:00.000Z' } }, '只存原因代碼與時間');
+    assert.ok(cmd.timeoutAt!.getTime() > old.getTime() + 3 * 3600 * 1000, '延後期間重設執行逾時');
+    // 重設有上限:開始 + 4 小時 + 類型逾時(資安 M1:不能一直延後佔住名額)
+    cmd.startedAt = new Date(0);
+    await env.commands.onUpdate(ctx, pilot.id, { command_id: a.commandId, state: 'running', progress: 0, result: { deferred: { reason: 'metered', next_check_at: next } } });
+    assert.equal(cmd.timeoutAt!.getTime(), 4 * 3600 * 1000 + 4 * 3600 * 1000);
+    // 解除:不帶 deferred 的 running 清除延後狀態
+    await env.commands.onUpdate(ctx, pilot.id, { command_id: a.commandId, state: 'running', progress: 10 });
+    assert.equal(cmd.resultSummary, null);
+    // 進入下載後不再接受延後
+    await env.commands.onUpdate(ctx, pilot.id, { command_id: a.commandId, state: 'running', progress: 0, result: { deferred: { reason: 'battery', next_check_at: next } } });
+    assert.equal(cmd.resultSummary, null);
+    // 不認得的原因 / 時間不採用
+    await env.commands.onUpdate(ctx, pilot.id, { command_id: a.commandId, state: 'running', result: { deferred: { reason: 'other', next_check_at: next } } });
+    assert.equal(cmd.resultSummary, null);
+    await succeed(pilot, a.commandId);
+    assert.equal(JSON.parse(cmd.resultSummary!).deferred, undefined, '終態的 result 覆寫');
+  });
+
+  it('deferredOf:原因只收 battery / metered、時間要能解析', () => {
+    assert.deepEqual(deferredOf({ deferred: { reason: 'metered', next_check_at: '2026-10-27T08:05:00+08:00' } }), {
+      reason: 'metered',
+      next_check_at: '2026-10-27T00:05:00.000Z',
+    });
+    for (const bad of [undefined, {}, { deferred: 'battery' }, { deferred: { reason: 'battery' } }, { deferred: { reason: 'battery', next_check_at: 'soon' } }, { deferred: { reason: '<b>', next_check_at: '2026-10-27T08:05:00Z' } }])
+      assert.equal(deferredOf(bad), null, JSON.stringify(bad));
+  });
+
   it('draft 只能派到 pilot;參數換成目錄快照(Agent 只信任快照)', async () => {
     const r = await register();
     await assert.rejects(install(other, r.packageId), { code: 'ITA_PACKAGE_NOT_PUBLISHED' });
@@ -500,6 +543,22 @@ describe('軟體目錄、覆核與派送(SoftwareService + CommandDispatcher)', 
     });
     await assert.rejects(env.software.update(ctx, IT, r.packageId, { notes: 'x' }), { code: 'ITA_PACKAGE_REVOKED' });
     await assert.rejects(env.software.revoke(ctx, IT, r.packageId), { code: 'ITA_PACKAGE_STATUS' });
+  });
+
+  it('撤回後釋放安裝檔路徑(0010):同一檔案可重新登錄(版本號仍不可重用);未撤回的仍佔用', async () => {
+    const r = await register();
+    assert.deepEqual((await env.software.unregisteredFiles(ctx)).items, []);
+    await assert.rejects(register({ version: '24.09.1' }), { code: 'ITA_PACKAGE_EXISTS' }, '未撤回仍佔用路徑');
+    await env.software.revoke(ctx, IT, r.packageId);
+    assert.deepEqual(
+      (await env.software.unregisteredFiles(ctx)).items.map((f) => f.fileName),
+      [FILE],
+      '撤回後出現在可登錄清單',
+    );
+    await assert.rejects(register(), { code: 'ITA_PACKAGE_EXISTS' }, '已撤回的版本號不可重用');
+    const again = await register({ version: '24.09.1' });
+    assert.equal(again.fileName, FILE);
+    assert.deepEqual((await env.software.unregisteredFiles(ctx)).items, []);
   });
 
   /** 登錄 → pilot 測試 → tested → 第二人發佈 */

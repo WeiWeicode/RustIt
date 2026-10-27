@@ -297,7 +297,8 @@ export class SqlCommandStore implements CommandStore, CommandFileStore {
       .input('code', sql.VarChar(64), cut(p.errorCode, 64))
       .input('msg', sql.NVarChar(1000), cut(p.errorMessage, 1000))
       .input('timeout', sql.DateTime2(3), p.timeoutAt ?? null)
-      .input('markStarted', sql.Bit, p.markStarted === true);
+      .input('markStarted', sql.Bit, p.markStarted === true)
+      .input('resetTimeout', sql.Bit, p.resetTimeout === true && p.timeoutAt !== undefined);
     const states = from.map((s, k) => {
       req.input(`f${k}`, sql.VarChar(16), s);
       return `@f${k}`;
@@ -310,7 +311,7 @@ export class SqlCommandStore implements CommandStore, CommandFileStore {
         result_summary = CASE WHEN @setResult = 1 THEN @result ELSE result_summary END,
         error_code = COALESCE(@code, error_code),
         error_message = COALESCE(@msg, error_message),
-        timeout_at = COALESCE(timeout_at, @timeout),
+        timeout_at = CASE WHEN @resetTimeout = 1 THEN @timeout ELSE COALESCE(timeout_at, @timeout) END,
         send_count = CASE WHEN @state = 'sent' THEN send_count + 1 ELSE send_count END,
         sent_at = CASE WHEN @state = 'sent' THEN @at ELSE sent_at END,
         acked_at = CASE WHEN @state IN ('acked', 'running', 'succeeded', 'failed') AND acked_at IS NULL AND sent_at IS NOT NULL THEN @at ELSE acked_at END,

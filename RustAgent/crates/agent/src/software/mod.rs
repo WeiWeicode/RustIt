@@ -47,10 +47,13 @@ const VERSION_MAX: usize = 50;
 /// 1618(另一個安裝進行中)重試
 pub const BUSY_RETRIES: u32 = 3;
 pub const BUSY_WAIT: Duration = Duration::from_secs(60);
-/// 安裝逾時後等 Windows Installer 結束的上限與間隔(L3:結束得了 msiexec 前端,msiserver 內的安裝仍在進行;
-/// 持有串行鎖等它結束,下一筆才不會遇到 1618)
-pub const SETTLE_MAX: Duration = Duration::from_secs(600);
+/// 安裝逾時後確認 Windows Installer 是否結束的上限與間隔(L3:結束得了 msiexec 前端,msiserver 內的安裝可能仍在進行;
+/// 短暫等待後如實回報,下一筆 MSI 由 [`IDLE_WAIT_MAX`] 先等空閒)
+pub const SETTLE_MAX: Duration = Duration::from_secs(60);
 pub const SETTLE_POLL: Duration = Duration::from_secs(10);
+/// 執行 msiexec 前等 Windows Installer 空閒的上限與間隔(0.9.3,P7 驗收 L3);超過回 `INSTALL_BUSY`、不啟動安裝
+pub const IDLE_WAIT_MAX: Duration = Duration::from_secs(15 * 60);
+pub const IDLE_POLL: Duration = Duration::from_secs(30);
 /// 安裝後 / 移除後的登錄檔輪詢:每 3 秒、共 120 秒
 pub const DETECT_INTERVAL: Duration = Duration::from_secs(3);
 pub const DETECT_POLLS: u32 = 40;
@@ -363,8 +366,10 @@ pub trait Env {
     async fn collect(&self);
     /// A6:電池與計量網路狀態
     async fn power(&self) -> power::PowerState;
-    /// Windows Installer 正在執行安裝(`_MSIExecute` 由 SYSTEM 持有且 msiserver 執行中)
+    /// Windows Installer 有安裝工作階段在執行([`msi_busy`])
     fn installer_busy(&self) -> bool;
+    /// A6 延後中:回報 `running` + `result.deferred`(原因代碼、下次檢查時間),畫面顯示「延後中」(0.9.3)
+    fn deferred(&self, reason: &str, next_check_at: &str);
 }
 
 /// 檔案位置:`cache\software\`(下載與 staging)、`logs\software\`(安裝記錄)
@@ -518,14 +523,57 @@ pub fn log_tail(path: &Path) -> Option<String> {
     (!tail.is_empty()).then_some(tail)
 }
 
+/// Windows Installer 是否有安裝工作階段在執行(P7 驗收 L3,0.9.3):`Global\_MSIExecute` 由特權帳號持有且 msiserver 執行中。
+///
+/// 為什麼用 `_MSIExecute`:msiserver 執行安裝指令碼(含 deferred 自訂動作與回復)的整段期間持有它,與 msiexec 前端行程
+/// 是否還在無關;Windows Installer 自己也是看它回 1618。「msiserver 底下還有沒有安裝工作階段」沒有公開 API,
+/// 只能列舉 msiserver 的子行程,而閒置的自訂動作伺服器也是 msiexec 子行程,會誤判。
+/// 擁有者要是 SYSTEM 或 Administrators:一般使用者也能建立同名 mutex(擁有者是自己),不能讓他擋住派送;
+/// SYSTEM 權杖的預設擁有者是 Administrators 群組,0.9.2 只認 SYSTEM,所以 msiserver 建立的 mutex 永遠不算(L3 的原因)
+pub fn msi_busy(mutex: rustit_common::scm::MsiMutex, msiserver_running: bool) -> bool {
+    mutex == rustit_common::scm::MsiMutex::Privileged && msiserver_running
+}
+
 /// 1618 重試後的結束代碼
-/// 整體不超過 `timeout`(含 1618 重試與等待,不會超過主機的執行逾時);`drain` = 主行程結束後等子行程的上限
+/// 整體不超過 `timeout`(含 1618 重試與等待,不會超過主機的執行逾時);`drain` = 主行程結束後等子行程的上限。
+/// 執行 msiexec 前先等 Windows Installer 空閒(最多 [`IDLE_WAIT_MAX`],不計入 `timeout`)
 async fn run_installer(
     env: &impl Env,
     cmd: &CmdLine,
     timeout: Duration,
     drain: Duration,
 ) -> Result<u32, Failure> {
+    if cmd.program == env.msiexec() && env.installer_busy() {
+        info!(
+            "Windows Installer 仍在執行,等它結束再執行 msiexec(每 {} 秒檢查,最多 {} 分鐘)",
+            IDLE_POLL.as_secs(),
+            IDLE_WAIT_MAX.as_secs() / 60
+        );
+        match wait_idle(env, IDLE_WAIT_MAX, IDLE_POLL).await {
+            Settle::Done => info!("Windows Installer 已空閒,開始執行"),
+            Settle::Busy => {
+                return Err(with_result(
+                    fail(
+                        "INSTALL_BUSY",
+                        format!(
+                            "Windows Installer 仍在執行(已等 {} 分鐘),未啟動安裝程式;請稍後重新派送",
+                            IDLE_WAIT_MAX.as_secs() / 60
+                        ),
+                    ),
+                    json!({ "installer_busy": true }),
+                ));
+            }
+            Settle::Stopped => {
+                return Err(with_result(
+                    fail(
+                        "EXECUTION_FAILED",
+                        "等待 Windows Installer 空閒時 Agent 停止(服務停止或關機),未啟動安裝程式;請重新派送",
+                    ),
+                    json!({ "interrupted": true }),
+                ));
+            }
+        }
+    }
     let mut retried = 0;
     let mut left = timeout;
     loop {
@@ -551,23 +599,26 @@ async fn run_installer(
             Ok(Exit::Code(c)) => return Ok(c),
             Ok(Exit::Timeout) => {
                 // MSI 的實際安裝在 Windows Installer 服務(msiserver)內進行,不在 Job 內,只結束得了 msiexec 前端(§8.2);
-                // 等它結束(最多 SETTLE_MAX)再放開串行鎖(L3)
-                let settled = settle(env).await;
-                return Err(fail(
-                    "INSTALL_TIMEOUT",
-                    format!(
-                        "超過 {} 秒仍未結束,已結束安裝程式的行程樹;{}",
-                        timeout.as_secs(),
-                        match settled {
-                            Settle::Done => "Windows Installer 已沒有進行中的安裝",
-                            Settle::Busy => {
-                                "Windows Installer 在 10 分鐘內仍有安裝進行中,下一筆安裝可能遇到 1618"
+                // 短暫等它結束(最多 SETTLE_MAX)後如實回報;仍在執行時下一筆 MSI 先等空閒(L3)。逾時前的變更不回復(已知行為)
+                let settled = wait_idle(env, SETTLE_MAX, SETTLE_POLL).await;
+                return Err(with_result(
+                    fail(
+                        "INSTALL_TIMEOUT",
+                        format!(
+                            "超過 {} 秒仍未結束,已結束安裝程式的行程樹;{}",
+                            timeout.as_secs(),
+                            match settled {
+                                Settle::Done => "Windows Installer 已沒有進行中的安裝",
+                                Settle::Busy => {
+                                    "Windows Installer 仍在執行(安裝在 Windows Installer 服務內繼續進行,逾時前的變更不回復);同一台的下一筆 MSI 派送會先等它結束"
+                                }
+                                Settle::Stopped => {
+                                    "等待 Windows Installer 結束時 Agent 停止(服務停止或關機),未確認安裝是否仍在進行"
+                                }
                             }
-                            Settle::Stopped => {
-                                "等待 Windows Installer 結束時 Agent 停止(服務停止或關機),未確認安裝是否仍在進行"
-                            }
-                        }
+                        ),
                     ),
+                    json!({ "installer_busy": settled != Settle::Done }),
                 ));
             }
             Err(e) => return Err(fail("EXECUTION_FAILED", e)),
@@ -597,19 +648,22 @@ enum Settle {
     Stopped,
 }
 
-/// 等 Windows Installer 沒有進行中的安裝(最多 [`SETTLE_MAX`]);收到停止 / 關機立即結束(不卡住關機)
-async fn settle(env: &impl Env) -> Settle {
+/// 等 Windows Installer 沒有進行中的安裝(最多 `max`,每 `poll` 檢查);收到停止 / 關機立即結束(不卡住關機)
+async fn wait_idle(env: &impl Env, max: Duration, poll: Duration) -> Settle {
     let mut waited = Duration::ZERO;
     while env.installer_busy() {
-        if waited >= SETTLE_MAX {
-            warn!("安裝逾時後 Windows Installer 仍在執行,不再等待");
+        if waited >= max {
+            warn!(
+                "Windows Installer 等了 {} 秒仍在執行,不再等待",
+                waited.as_secs()
+            );
             return Settle::Busy;
         }
-        if env.pause(SETTLE_POLL).await {
+        if env.pause(poll).await {
             warn!("等待 Windows Installer 結束時收到停止訊號,不再等待");
             return Settle::Stopped;
         }
-        waited += SETTLE_POLL;
+        waited += poll;
     }
     Settle::Done
 }
@@ -763,6 +817,8 @@ pub async fn defer(env: &impl Env, p: &Install, max: Duration) -> Result<(), Fai
         let Some(reason) = power::defer_reason(env.power().await, p.ignore_power) else {
             if !waited.is_zero() {
                 info!("{} {} 延後條件解除,繼續", p.name, p.version);
+                // 不帶 deferred 的 running:主機清除延後狀態,畫面回到「執行中」
+                env.progress(0);
             }
             return Ok(());
         };
@@ -770,23 +826,26 @@ pub async fn defer(env: &impl Env, p: &Install, max: Duration) -> Result<(), Fai
             return Err(fail(
                 "DEFERRED_TIMEOUT",
                 format!(
-                    "{reason},已延後 {} 分鐘仍未解除;請接上電源或回到非計量網路後重新派送",
+                    "{},已延後 {} 分鐘仍未解除;請接上電源或回到非計量網路後重新派送",
+                    reason.label(),
                     waited.as_secs() / 60
                 ),
             ));
         }
-        if waited.is_zero() {
-            info!(
-                "{} {}:{reason},延後下載(每 {} 分鐘重新檢查,最多 {} 分鐘)",
-                p.name,
-                p.version,
-                power::CHECK_EVERY.as_secs() / 60,
-                max.as_secs() / 60
-            );
-        }
-        // 進度 0 的 running 也讓主機重設逾時(延後期間不被判逾時)
-        env.progress(0);
         let step = power::CHECK_EVERY.min(max - waited);
+        let next = (chrono::Utc::now() + chrono::Duration::seconds(step.as_secs() as i64))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        // 每次檢查都記一行(P7 驗收 §5-4:延後期間日誌只有「收到指令」無從判斷)
+        info!(
+            "{} {}:{},延後下載,下次檢查 {next}(已延後 {} 分鐘,最多 {} 分鐘)",
+            p.name,
+            p.version,
+            reason.label(),
+            waited.as_secs() / 60,
+            max.as_secs() / 60
+        );
+        // running + result.deferred:畫面顯示「延後中(原因)」,主機重設執行逾時(延後期間不被判逾時)
+        env.deferred(reason.code(), &next);
         env.sleep(step).await;
         waited += step;
     }
@@ -1123,7 +1182,14 @@ impl Env for RealEnv {
     }
 
     fn installer_busy(&self) -> bool {
-        rustit_common::scm::installer_running()
+        msi_busy(
+            rustit_common::scm::msi_mutex(),
+            rustit_common::scm::msiserver_running(),
+        )
+    }
+
+    fn deferred(&self, reason: &str, next_check_at: &str) {
+        crate::command::report_deferred(&self.shared, &self.command_id, reason, next_check_at);
     }
 
     async fn power(&self) -> power::PowerState {

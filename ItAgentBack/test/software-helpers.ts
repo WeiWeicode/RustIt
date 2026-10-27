@@ -54,7 +54,7 @@ export class MemorySoftwareStore implements SoftwareStore {
     return p ? { ...p } : null;
   }
   async addPackage(n: NewPackage) {
-    if (this.packages.some((x) => (x.name === n.name && x.version === n.version) || x.fileName === n.fileName))
+    if (this.packages.some((x) => (x.name === n.name && x.version === n.version) || (x.fileName === n.fileName && x.status !== 'revoked')))
       throw new AppError(409, 'ITA_PACKAGE_EXISTS', `${n.name} ${n.version} 或檔案 ${n.fileName} 已登錄`);
     const p: PackageRecord = {
       id: ++this.seq,

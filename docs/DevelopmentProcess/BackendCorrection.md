@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。本檔自 P7-1 起記錄 `ItAgentBack/` 的修改,先前的後端變更記在 `NewFeatures.md` / `BugFix.md`。
 
+## 2026-10-27 P7 驗收後修正:延後回報、撤回釋放安裝檔路徑(migration 0010)
+- 內容:需求方 2026-10-27 決定(設計 §8.1.5)。分支 `feature/p7-0.9.3`。(1)`command-dispatcher.ts` `deferredOf`:`software.install` 的 running 帶 `result.deferred`(只收 `battery` / `metered` 與可解析時間)時暫存為 result 並重設執行逾時(`CommandPatch.resetTimeout`,`sql-command-store.ts`);不帶時清除。(2)migration 0010:`uq_software_package_file` 改篩選唯一索引(只限未撤回),`unregisteredFiles` 不算已撤回;**只寫未套用**。
+- 檔案:`src/services/command-dispatcher.ts`、`src/stores/types.ts`、`src/stores/sql-command-store.ts`、`src/services/software-service.ts`、`db/migrations/0010_software_file_release.sql`、`docs/DB_SCHEMA.md`;測試 `test/software.test.ts`、`test/software-helpers.ts`、`test/helpers.ts`、`test/int/stores.int.test.ts`。
+- 驗證:`npm run typecheck` 通過、`npm test` 224/224、`test:int` 14/14(本機 Docker Desktop + `giganexus_It_Agent_poc_test`,含 0010 篩選索引:撤回後同檔重新登錄、未撤回仍佔用)。
+
 ## 2026-10-27 P7 VM 驗收修正:套件安裝逾時(migration 0009)、禁止 REMOVE=ALL 與 /v、版本與角色欄位
 - 內容:需求方 2026-10-27 決定(設計 §8.1.4)。分支 `feature/p7-acceptance-fixes`。
   - B-1:migration `0009_software_timeout.sql`(`software_package.timeout_sec INT NOT NULL DEFAULT 1800`、CHECK 300–7200;既有資料以預設值補 1800)。**只寫未套用測試區**,需求方看過後再經同意套用 `giganexus_It_Agent_test`;部署順序:先 0009、再新版 endpoint-server。登錄 / 修改 API(schema + 服務層)驗範圍;取代固定的 `INSTALL_TIMEOUT_SEC`,`software.install` / `software.uninstall` 快照帶套件值;主機指令逾時 `commandTimeoutSec`(`commands/kinds.ts`)= 類型逾時 + 超過 1800 的部分(`command-dispatcher.ts` acked / running 時使用);修改逾時不退回 draft。

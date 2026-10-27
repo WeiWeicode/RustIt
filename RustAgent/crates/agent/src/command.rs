@@ -136,6 +136,15 @@ pub(crate) fn report_progress(shared: &Shared, id: &str, pct: u8) {
     report(shared, id, "running", |u| u.progress = Some(pct.min(99)));
 }
 
+/// 軟體派送 A6 延後中(0.9.3):`running` + `result.deferred`;之後不帶 deferred 的 running 由主機清除(command-kinds.md)
+pub(crate) fn report_deferred(shared: &Shared, id: &str, reason: &str, next_check_at: &str) {
+    report(shared, id, "running", |u| {
+        u.progress = Some(0);
+        u.result =
+            Some(json!({ "deferred": { "reason": reason, "next_check_at": next_check_at } }));
+    });
+}
+
 /// 啟動時:上次執行的 agent.restart 回報成功;其他執行到一半的指令(Agent 中途被結束)回報失敗;清除舊紀錄
 pub fn recover(shared: &Shared) {
     let (restart, reboot, unfinished) = {

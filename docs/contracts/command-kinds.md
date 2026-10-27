@@ -36,8 +36,8 @@
 | `AGENT_UPGRADING` | Agent | P6-2 起:Watchdog 升級 Agent 中(已送 `prepare_shutdown`)收到的新指令,或執行中等 60 秒仍未結束的指令;升級完成後可重新下達 |
 | `DOWNLOAD_FAILED`、`HASH_MISMATCH`、`SIGNATURE_INVALID`、`SIGNER_NOT_TRUSTED`、`DISK_FULL` | Agent | P7 起 `software.install`:與 P6 升級同義(下載失敗、SHA-256 不符、Authenticode 無效或未簽章、簽章者不在主機與本機信任清單的交集、磁碟不足);**驗證失敗時不啟動安裝程式** |
 | `INSTALL_FAILED` | Agent | P7:安裝 / 移除程式結束代碼不是成功碼,`result.exit_code` 帶值 |
-| `INSTALL_TIMEOUT` | Agent | P7:超過 `timeout_sec`,已結束安裝程式的行程樹 |
-| `INSTALL_BUSY` | Agent | P7:結束代碼 1618(另一個安裝進行中),間隔 60 秒重試 3 次仍失敗 |
+| `INSTALL_TIMEOUT` | Agent | P7:超過 `timeout_sec`,已結束安裝程式的行程樹;0.9.3 起 `result.installer_busy` = 之後 60 秒內 Windows Installer 是否仍在執行(MSI 的 deferred 自訂動作在 msiserver 內繼續,逾時前的變更不回復) |
+| `INSTALL_BUSY` | Agent | P7:結束代碼 1618(另一個安裝進行中),間隔 60 秒重試 3 次仍失敗;0.9.3 起另含「執行 msiexec 前 Windows Installer 仍在執行,等 15 分鐘仍未空閒」(未啟動安裝程式,`result.installer_busy = true`) |
 | `DETECT_FAILED` | Agent | P7:結束代碼成功,但登錄檔找不到(安裝)或 120 秒內仍存在(移除)該項目 |
 | `UNINSTALL_NOT_SUPPORTED` | Agent | P7:找得到項目,但沒有可用的移除指令 |
 | `DEFERRED_TIMEOUT` | Agent | P7:電池 / 計量網路延後下載超過上限(預設 4 小時) |
@@ -164,6 +164,8 @@
 - 主機檢查(不符就不建立指令):套件存在(`404 ITA_PACKAGE_NOT_FOUND`)、未撤回(`409 ITA_PACKAGE_REVOKED`)、`draft` / `tested` 只能派到 **pilot 環**(`409 ITA_PACKAGE_NOT_PUBLISHED`)、已發佈套件的授權數(`409 ITA_LICENSE_EXCEEDED`)。
 - `result`(序列化後 4,000 字元內;範例 `ws-command-update-software-install.sample.json`):`exit_code`、`reboot_required`、`signer`(實際簽章者 SHA-1 指紋)、`signer_subject`、`duration_ms`、`detected`、`already_installed`、`log_tail`(安裝記錄最後 20 行,經 `logs.collect` 同一套遮罩)。結束代碼 `0` 成功;`3010` / `1641` 成功且 `reboot_required = true`;`1638` 視為 `already_installed`;其餘 `INSTALL_FAILED`。
   - **版本比對(Agent 0.9.2 起,P7 VM 驗收 B-2)**:`detect` 找到項目時比對登錄檔 DisplayVersion 與快照的 `version`(數字分段比較,段數不同補 0:`24.09` = `24.09.00.0`、`26.05` < `26.05.2`)。較舊 → 繼續安裝(升級),結果帶 `previous_version`;相同或較新 → 直接 `succeeded` + `already_installed = true`;**無法解析(例如沒有 DisplayVersion、`1.2-beta`)→ 保守視為已安裝**(0.9.1 的行為,不重新安裝、不降版),帶 `version_unknown: true`。多個項目符合時任一個相同或較新即算已安裝。結果一律帶 `installed_version`(偵測到的版本,最多 50 字、已去控制字元)。安裝後的登錄檔確認(120 秒)要等到版本相同或較新;仍是舊版 → `DETECT_FAILED`。0.9.1 以前的 Agent 不比對版本、不帶這些欄位。
+  - **延後中(Agent 0.9.3 起,P7 驗收 §5-4)**:電池 / 計量網路延後下載期間,每次檢查(5 分鐘)回報 `running`、`progress = 0`、`result = { "deferred": { "reason": "battery" | "metered", "next_check_at": "<UTC>" } }`,並寫一行日誌(原因、下次檢查時間)。主機只採用已知原因代碼與可解析的時間,暫存為該指令的 `result`(畫面顯示「延後中(電池供電 / 計量網路)」),並**重設執行逾時**(延後最多 4 小時,不被判 `TIMEOUT`;上限為開始 + 4 小時 + 類型逾時,進度 > 0 後不再接受延後);延後解除時 Agent 送不帶 `deferred` 的 `running`,主機清除;終態的 `result` 覆寫。只有 `software.install` 採用,0.9.2 以前的 Agent 延後時只送 `running`(畫面顯示「執行中」)。
+  - **Windows Installer 忙碌(Agent 0.9.3 起,P7 驗收 L3)**:以 `Global\_MSIExecute` 由 SYSTEM / Administrators 持有且 msiserver 執行中判斷(設計 §8.1.5)。執行 msiexec(MSI 安裝、MSI 移除)前仍忙碌 → 每 30 秒檢查、最多 15 分鐘,超過 `INSTALL_BUSY`(不撞 1618);逾時結束行程樹後再看 60 秒,仍忙碌時訊息為「Windows Installer 仍在執行」。exe 類型不等,1618 由重試處理。
   - 安裝後等登錄檔、或逾時後等 Windows Installer 時收到服務停止 / 關機:立即結束(不卡住關機)。前者回 `EXECUTION_FAILED` 且 `result.interrupted = true`(帶 `exit_code`),後者 `INSTALL_TIMEOUT` 訊息註明;結果先寫本機,重啟後補送。重新派送時已安裝會直接 `already_installed`。
 - 測試機(pilot)回報的 `signer` 是 IT 標記 `tested` 的依據:`mark-tested` 填的簽章者必須等於回報值。
 - 安裝檔下載:`GET /agent/v1/packages/{packageId}`(`:9443` mTLS)。只給有**尚未結束**(`sent` / `acked` / `running`)的此套件 `software.install` 的裝置,否則 `404 ITA_PACKAGE_NOT_FOUND`;支援 `Range` / `206`,起點超出檔案 `416`(`Content-Range: bytes */大小`);主機回應前複驗 SHA-256,檔案被換掉 `503 ITA_PACKAGE_CHANGED`、軟體庫讀不到 `503 ITA_PACKAGE_UNAVAILABLE`(稍後重試)。回應標頭 `x-file-sha256` 僅供除錯,**端點以快照的 `sha256` 驗證**。
