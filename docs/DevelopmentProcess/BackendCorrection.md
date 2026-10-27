@@ -2,6 +2,15 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。本檔自 P7-1 起記錄 `ItAgentBack/` 的修改,先前的後端變更記在 `NewFeatures.md` / `BugFix.md`。
 
+## 2026-10-27 P7 VM 驗收修正:套件安裝逾時(migration 0009)、禁止 REMOVE=ALL 與 /v、版本與角色欄位
+- 內容:需求方 2026-10-27 決定(設計 §8.1.4)。分支 `feature/p7-acceptance-fixes`。
+  - B-1:migration `0009_software_timeout.sql`(`software_package.timeout_sec INT NOT NULL DEFAULT 1800`、CHECK 300–7200;既有資料以預設值補 1800)。**只寫未套用測試區**,需求方看過後再經同意套用 `giganexus_It_Agent_test`;部署順序:先 0009、再新版 endpoint-server。登錄 / 修改 API(schema + 服務層)驗範圍;取代固定的 `INSTALL_TIMEOUT_SEC`,`software.install` / `software.uninstall` 快照帶套件值;主機指令逾時 `commandTimeoutSec`(`commands/kinds.ts`)= 類型逾時 + 超過 1800 的部分(`command-dispatcher.ts` acked / running 時使用);修改逾時不退回 draft。
+  - L2:`argsErrors` 拒絕 `REMOVE=ALL`;資安稽核 M1:Inno 以外拒絕 `v` 開頭的開關;契約向量同步。
+  - B-2 / B-5:套件詳情的測試機結果加 `installedVersion`、`previousVersion`、`alreadyInstalled`(Agent 0.9.2 回報,`reportedVersion` 再淨化,資安 L3);詳情加 `viewerScopeAll`(GigaItApp 依此停用發佈)。
+  - Gateway OpenAPI 不需要再發佈(2026-10-27 部署後確認:路由表不存請求 / 回應 schema,註冊結果不變、`pendingPublish: false`)。
+- 檔案:`ItAgentBack/db/migrations/0009_software_timeout.sql`、`src/{commands/kinds.ts,routes/software.ts,services/software-service.ts,services/command-dispatcher.ts,stores/types.ts,stores/sql-software-store.ts}`、`test/{software.test.ts,software-helpers.ts,contract.test.ts,int/stores.int.test.ts}`、`docs/DB_SCHEMA.md`、`docs/PROJECT-MAP.md`。
+- 驗證:`npm run typecheck` 通過;`npm test` 221/221;`test:int` 14/14(本機 Docker Desktop 的 Mongo / Redis + `giganexus_It_Agent_poc_test`,整合測試重建 schema 時已含 0009;測試區資料庫未動)。
+
 ## 2026-10-22 P7-5 新增 GET /batches 批次清單(給 GigaItApp 待核可清單)
 - 內容:GigaItApp 軟體派送畫面需要「待核可批次清單」,原有 API 只能 `GET /batches/{id}`、`GET /commands`(無批次狀態篩選)。新增 `GET /v1/batches`(`endpoint.command.batch.list`,`endpoint.device.read`):`state`、`cursor`、`limit`(≤100)、新到舊;`state=pending_approval` 另限 24 小時核可期限內(逾期的等每分鐘掃描設為 expired);含資料範圍外電腦的批次略過(同 `getBatch`,E6),游標取自掃描到的最後一筆。需求方 2026-10-22 同意跨 repo 修改。部署後 Gateway 需再發佈 OpenAPI 批次。
 - 檔案:`ItAgentBack/src/routes/commands.ts`、`src/services/command-dispatcher.ts`(`listBatches`)、`src/stores/{types,sql-command-store}.ts`(`listBatches`、抽出 `toBatch`)、`test/{helpers,software,scope}.test.ts`、`test/int/stores.int.test.ts`、`docs/contracts/command-kinds.md`、`docs/P7-SOFTWARE-DESIGN.md` §3.5

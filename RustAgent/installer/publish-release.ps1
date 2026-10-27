@@ -10,10 +10,15 @@
        test:測試區主機(預設 host2);測試憑證與正式憑證都可
        prod:**拒絕**測試 / 自簽憑證(憑證本身判定)、要求簽章狀態 Valid 且有時間戳記;不可指向 host2(測試區主機)
      -Environment test 不可指向 host3(正式區主機)
+  2a. 版本號查重(P7 VM 驗收 B-3,需求方 2026-10-27):經 ssh 到 -HostAlias,在目標區 endpoint-server 容器(-ServerContainer)內以唯讀查詢
+     ita.agent_release(含已撤回);同一元件同一版本號已登錄過就停止(換新版本號重建)。查不到(連不上、容器不在、正式區尚未部署)也停止,
+     除非加 -SkipRegistryCheck(印警告;只在確定該版本沒登錄過時用)。-DryRun 不查。
   3. 放進版本檔目錄 {元件}/{版本}/{檔名}:先複製到同目錄的暫存檔、重算 SHA-256 比對,再不覆蓋地放置;**絕不覆蓋既有版本檔**
      (已存在且相同 → 略過;內容不同、連結、或放置時被別人搶先 → 中止)。中途中止時已放好的項目不會回滾。
      同一版本號重新建置的檔案內容會不同(例如只改 Agent,CI 又建了一次未改版本的 Watchdog)而被拒絕:只放有新版本號的元件目錄
-     - 預設(P7 起):NAS -NasReleasesDir(UNC;test 不給時用測試區 NAS 的 RustIT\releases),由本機以 SMB 直接寫入;
+     - 預設(P7 起):NAS -NasReleasesDir(UNC),由本機以 SMB 直接寫入。同一台 NAS 兩區路徑分開(需求方 2026-10-27,B-3):
+       test = \\10.10.130.31\docker-folder\RustIT\test\releases、prod = \\10.10.130.31\docker-folder\RustIT\prod\releases,
+       不給時依 -Environment 選;給了但與環境不一致(例如 test 指到 prod\ 或舊的 RustIT\releases)就停止;
        執行的 Windows 帳號要有 NAS RustIT 的寫入權(IT 寫入帳號,先 net use)。主機只唯讀掛載,不能經主機寫入。
        放好後經 ssh 到 -HostAlias,以唯讀掛載(-MountCheckDir)重算 SHA-256,確認 endpoint-server 讀得到(失敗只警告)
      - -HostDir:舊方式(NAS 之前),以 scp 複製到主機的暫存(每次一個 GUID 子目錄,ACL 只有登入帳號 / SYSTEM / Administrators),
@@ -21,8 +26,8 @@
   4. 印出登錄資料(元件、版本、檔名、預期簽章者指紋)。登錄在 GigaItApp「端點管理 › 電腦清單 › Agent 版本」→「登錄版本」
      (或 POST /api/endpoint/releases);登錄是草稿,先設給 pilot 環驗證,再發佈,才能推到 it / all
 
-  正式區(-Environment prod)必須明確指定 -NasReleasesDir 與 -HostAlias(或 -HostDir 加 -HostAlias / -HostStage / -ReleasesDir;
-  換主機要一起傳 -HostStage:預設是主機 2 `user` 帳號的路徑)。-DryRun:只核對與列出會做的事,不連線、不複製。
+  正式區(-Environment prod)必須明確指定 -HostAlias 與 -ServerContainer(或 -HostDir 加 -HostAlias / -HostStage / -ReleasesDir;
+  換主機要一起傳 -HostStage:預設是主機 2 `user` 帳號的路徑);主機的 docker 不在 WSL 時加 -DockerCmd docker。-DryRun:只核對與列出會做的事,不連線、不複製。
   請用受保護 tag 或 main 的 checkout 執行本腳本(腳本本身也在信任鏈內)。
 
 .EXAMPLE
@@ -33,10 +38,14 @@ param(
     [Parameter(Mandatory)][string]$Dir,
     [Parameter(Mandatory)][ValidateSet('test', 'prod')][string]$Environment,
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')][string]$HostAlias = 'host2',
-    # NAS 版本檔目錄(UNC);test 不給時用測試區 NAS
+    # NAS 版本檔目錄(UNC);不給時依環境(test\releases / prod\releases),給了必須與環境一致
     [string]$NasReleasesDir = '',
-    # 主機唯讀掛載的同一個目錄(放好後經 ssh 重算雜湊確認;空字串 = 不檢查)
-    [string]$MountCheckDir = '/srv/giganexus/nas-rustit/releases',
+    # 主機唯讀掛載的同一個目錄(放好後經 ssh 重算雜湊確認);auto = /srv/giganexus/nas-rustit/{環境}/releases,空字串 = 不檢查
+    [string]$MountCheckDir = 'auto',
+    # 版本號查重:目標區 endpoint-server 容器(test 預設測試區;prod 必填)與主機上執行 docker 的方式
+    [ValidatePattern('^$|^[A-Za-z0-9][A-Za-z0-9_.-]*$')][string]$ServerContainer = '',
+    [ValidateSet('wsl -u root -e docker', 'docker')][string]$DockerCmd = 'wsl -u root -e docker',
+    [switch]$SkipRegistryCheck,
     # 舊方式:放進主機本機目錄 -ReleasesDir
     [switch]$HostDir,
     [string]$ReleasesDir = '/srv/giganexus/ita-releases',
@@ -53,11 +62,20 @@ if ($ReleasesDir -notmatch '^/[A-Za-z0-9/_.-]+$' -or $ReleasesDir -match '\.\.')
 if ($HostStage -notmatch '^[A-Za-z]:/[A-Za-z0-9/_.-]+$' -or $HostStage -match '\.\.') { throw "HostStage 要是 Windows 路徑(正斜線):$HostStage" }
 if ($Environment -eq 'prod' -and $HostAlias -eq 'host2') { throw 'host2 是測試區主機:正式區請指定正式區主機(-HostAlias / -HostStage / -ReleasesDir)' }
 if ($Environment -eq 'test' -and $HostAlias -eq 'host3') { throw 'host3 是正式區主機:-Environment test 不可指向它' }
+# 同一台 NAS、兩區路徑分開(B-3):目的地必須與環境一致
+$NasReleaseDirs = @{
+    test = '\\10.10.130.31\docker-folder\RustIT\test\releases'
+    prod = '\\10.10.130.31\docker-folder\RustIT\prod\releases'
+}
 if (-not $HostDir) {
-    if (-not $NasReleasesDir) {
-        if ($Environment -eq 'prod') { throw '正式區要明確指定 -NasReleasesDir(或 -HostDir)' }
-        $NasReleasesDir = '\\10.10.130.31\docker-folder\RustIT\releases'
+    $expectedNas = $NasReleaseDirs[$Environment]
+    if (-not $NasReleasesDir) { $NasReleasesDir = $expectedNas }
+    # -ne 不分大小寫(UNC 不分大小寫);去掉結尾的 \ 再比
+    $NasReleasesDir = $NasReleasesDir.TrimEnd('\')
+    if ($NasReleasesDir -ne $expectedNas) {
+        throw "-NasReleasesDir 與 -Environment $Environment 不一致:$NasReleasesDir(${Environment} 區應為 $expectedNas;舊的 RustIT\releases 已停用)"
     }
+    if ($MountCheckDir -eq 'auto') { $MountCheckDir = "/srv/giganexus/nas-rustit/$Environment/releases" }
     if ($NasReleasesDir -notmatch '^\\\\[A-Za-z0-9._-]+(\\[^\\/:*?"<>|]+)+$' -or $NasReleasesDir -match '\.\.') { throw "NasReleasesDir 要是 UNC 路徑(\\主機\共用\...):$NasReleasesDir" }
     if ($MountCheckDir -and ($MountCheckDir -notmatch '^/[A-Za-z0-9/_.-]+$' -or $MountCheckDir -match '\.\.')) { throw "MountCheckDir 不合法:$MountCheckDir" }
 }
@@ -100,6 +118,53 @@ if ($items.Count -eq 0) { throw '沒有可上架的 agent / watchdog 檔案' }
 if ($testCert) { Write-Warning '這批檔案是測試憑證簽的:只能放測試區' }
 Write-Host "核對通過;環境 $Environment,預期簽章者 $signer"
 $items | Format-Table Component, Version, File, Size, @{ n = 'SHA-256(前 16 碼)'; e = { $_.Sha.Substring(0, 16) } } -AutoSize | Out-String | Write-Host
+
+# 2a. 版本號查重(B-3):目標區已登錄過同一個版本(含已撤回)就停止;查不到也停止(-SkipRegistryCheck 例外)
+if (-not $ServerContainer -and $Environment -eq 'test') { $ServerContainer = 'giganexus-ita-test-endpoint-server-1' }
+function Get-RegisteredReleases {
+    # 在容器內以應用程式自己的 SQL 帳號唯讀查詢(密碼只在容器內讀取,不經本機);元件與版本已由上面的路徑規則驗過
+    $pairs = ($items | ForEach-Object { '["{0}","{1}"]' -f $_.Component, $_.Version }) -join ','
+    $js = @"
+const fs=require('fs');const sql=require('mssql');const e=process.env;
+(async()=>{const pool=await new sql.ConnectionPool({server:e.ITA_DB_HOST,port:Number(e.ITA_DB_PORT||1433),database:e.ITA_DB_NAME,user:e.ITA_DB_USER,
+password:e.ITA_DB_PASSWORD_FILE?fs.readFileSync(e.ITA_DB_PASSWORD_FILE,'utf8').trim():e.ITA_DB_PASSWORD,
+options:{encrypt:false,trustServerCertificate:true,appName:'publish-release-check'},connectionTimeout:10000,requestTimeout:15000}).connect();
+const out=[];for(const [c,v] of [$pairs]){const r=await pool.request().input('c',sql.VarChar(16),c).input('v',sql.VarChar(40),v)
+.query('SELECT component, version, status FROM ita.agent_release WHERE component = @c AND version = @v');for(const x of r.recordset)out.push('REGISTERED '+x.component+' '+x.version+' '+x.status);}
+await pool.close();console.log('REGISTRY-OK '+e.ITA_DB_NAME);for(const l of out)console.log(l);})().catch((err)=>{console.log('REGISTRY-ERROR '+((err&&(err.code||err.name))||'ERROR'));process.exit(2);});
+"@
+    # 以 base64 經 ssh / PowerShell / wsl / docker exec 傳遞,避免各層引號規則不同;程式碼只含上面固定的查詢。
+    # 注意:$js 只可放已驗證的元件 / 版本(上面的路徑規則),且只能是 ASCII(atob 不是 UTF-8 解碼)
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($js))
+    $out = @()
+    try {
+        $out = @(& ssh -o BatchMode=yes $HostAlias "$DockerCmd exec $ServerContainer node -e 'eval(atob(process.argv[1]))' $b64" 2>$null)
+    } catch { $out = @() }
+    $ok = $out | Where-Object { $_ -match '^REGISTRY-OK ' } | Select-Object -First 1
+    if ($LASTEXITCODE -ne 0 -or -not $ok) {
+        $why = ($out | Where-Object { $_ -match '^REGISTRY-ERROR ' } | Select-Object -First 1)
+        return [pscustomobject]@{ Ok = $false; Why = $(if ($why) { $why } else { "ssh / docker exec 失敗(結束碼 $LASTEXITCODE)" }); Rows = @() }
+    }
+    [pscustomobject]@{ Ok = $true; Why = $ok; Rows = @($out | Where-Object { $_ -match '^REGISTERED ' }) }
+}
+if ($DryRun) {
+    Write-Host '[DryRun] 未查版本表(上架時會查目標區是否已登錄過同一版本)。'
+} elseif ($SkipRegistryCheck) {
+    Write-Warning "-SkipRegistryCheck:未查 $Environment 區的版本表;同一版本號已登錄(含已撤回)時,放好的檔案將無法登錄(409 ITA_RELEASE_EXISTS)"
+} else {
+    if (-not $ServerContainer) { throw '正式區要指定 -ServerContainer(endpoint-server 容器名稱)才能查版本表;或確定版本沒登錄過時加 -SkipRegistryCheck' }
+    $reg = Get-RegisteredReleases
+    if (-not $reg.Ok) { throw "查不到 $Environment 區的版本表(${HostAlias} / $ServerContainer):$($reg.Why)。確定版本沒登錄過時才加 -SkipRegistryCheck" }
+    # 查到的資料庫必須屬於目標區(避免 -HostAlias / -ServerContainer 指到另一區而照樣通過;資安稽核 M1)
+    $db = ($reg.Why -replace '^REGISTRY-OK\s+', '').Trim()
+    $dbOk = if ($Environment -eq 'test') { $db -eq 'giganexus_It_Agent_test' } else { $db -like 'giganexus_It_Agent*' -and $db -notmatch 'test' }
+    if (-not $dbOk) { throw "查到的資料庫 $db 不是 $Environment 區的(${HostAlias} / $ServerContainer):檢查 -HostAlias 與 -ServerContainer" }
+    if ($reg.Rows.Count) {
+        $reg.Rows | ForEach-Object { Write-Host $_ }
+        throw "$Environment 區已登錄過上面的版本(含已撤回的也不能重用):改用新的版本號重新建置,不上架"
+    }
+    Write-Host "版本表確認:$($reg.Why) 沒有登錄過這些版本"
+}
 
 if ($DryRun) {
     if ($HostDir) { Write-Host "[DryRun] 會複製到 ${HostAlias}:$ReleasesDir/{元件}/{版本}/{檔名}(不覆蓋既有檔),未連線。" }

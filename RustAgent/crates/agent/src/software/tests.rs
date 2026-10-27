@@ -40,6 +40,12 @@ struct Fake {
     drains: Mutex<Vec<Duration>>,
     /// installer_busy 還會回 true 的次數(L3)
     msi_busy: Mutex<u32>,
+    /// 登錄檔項目目前的 DisplayVersion(B-2)
+    version: Mutex<String>,
+    /// 安裝程式執行成功後把版本改成這個(升級:項目留著、版本更新);None = 依 run_changes 切換有 / 沒有
+    upgrade_to: Option<String>,
+    /// 第幾次 pause 時收到停止訊號(1 = 第一次);None = 不停止
+    stop_at: Mutex<Option<u32>>,
 }
 
 impl Fake {
@@ -66,7 +72,16 @@ impl Fake {
             power: Mutex::new(VecDeque::new()),
             drains: Mutex::new(Vec::new()),
             msi_busy: Mutex::new(0),
+            version: Mutex::new(String::new()),
+            upgrade_to: None,
+            stop_at: Mutex::new(None),
         }
+    }
+    /// 已安裝某版本
+    fn installed_version(self, v: &str) -> Self {
+        *self.installed.lock().unwrap() = true;
+        *self.version.lock().unwrap() = v.into();
+        self
     }
     fn exits(self, e: &[Result<Exit, String>]) -> Self {
         *self.exits.lock().unwrap() = e.iter().cloned().collect();
@@ -82,9 +97,13 @@ impl Fake {
 }
 
 impl Env for Fake {
-    async fn find(&self, d: &Detect) -> Option<UninstallEntry> {
-        (*self.installed.lock().unwrap() && detect::matches(d, &self.entry))
-            .then(|| self.entry.clone())
+    async fn find(&self, d: &Detect) -> Vec<UninstallEntry> {
+        let mut e = self.entry.clone();
+        e.version = self.version.lock().unwrap().clone();
+        (*self.installed.lock().unwrap() && detect::matches(d, &e))
+            .then_some(e)
+            .into_iter()
+            .collect()
     }
     fn prepare_dir(&self, dir: &Path) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())
@@ -146,7 +165,13 @@ impl Env for Fake {
             .unwrap_or(Ok(Exit::Code(0)));
         if self.run_changes && matches!(exit, Ok(Exit::Code(0 | 3010 | 1641 | 1638 | 1605))) {
             let mut i = self.installed.lock().unwrap();
-            *i = !*i;
+            match &self.upgrade_to {
+                Some(v) => {
+                    *i = true;
+                    *self.version.lock().unwrap() = v.clone();
+                }
+                None => *i = !*i,
+            }
         }
         exit
     }
@@ -158,6 +183,18 @@ impl Env for Fake {
     }
     async fn sleep(&self, d: Duration) {
         self.sleeps.lock().unwrap().push(d);
+    }
+    async fn pause(&self, d: Duration) -> bool {
+        self.sleeps.lock().unwrap().push(d);
+        let mut s = self.stop_at.lock().unwrap();
+        match s.as_mut() {
+            Some(1) => true,
+            Some(n) => {
+                *n -= 1;
+                false
+            }
+            None => false,
+        }
     }
     fn progress(&self, pct: u8) {
         self.progress.lock().unwrap().push(pct);
@@ -287,6 +324,135 @@ async fn already_installed_skips_everything() {
     assert_eq!(r["detected"], true);
     assert!(env.offsets.lock().unwrap().is_empty(), "沒有下載");
     assert_eq!(env.runs(), 0);
+}
+
+/// B-2:已安裝較舊的版本 → 安裝(升級),結果帶安裝前後的版本;相同或較新 → already_installed
+#[tokio::test]
+async fn older_version_is_upgraded() {
+    let content = b"npp 8.9.8";
+    let (_d, paths) = paths();
+    let mut p = install_params(content, &[SIGNER]);
+    p.version = "8.9.8".into();
+    let mut env = Fake::new(content).installed_version("8.8.9");
+    env.upgrade_to = Some("8.9.8".into());
+    let r = run_install(&env, &p, &paths).await.unwrap();
+    assert_eq!(env.runs(), 1, "較舊:執行安裝程式");
+    assert_eq!(
+        (
+            &r["already_installed"],
+            &r["detected"],
+            &r["installed_version"],
+            &r["previous_version"]
+        ),
+        (
+            &json!(false),
+            &json!(true),
+            &json!("8.9.8"),
+            &json!("8.8.9")
+        )
+    );
+
+    // 相同(段數不同也相等)/ 較新:不安裝,結果帶偵測到的版本
+    for v in ["8.9.8", "8.9.8.0", "9.0"] {
+        let env = Fake::new(content).installed_version(v);
+        let r = run_install(&env, &p, &paths).await.unwrap();
+        assert_eq!(env.runs(), 0, "{v}");
+        assert_eq!(
+            (&r["already_installed"], &r["installed_version"]),
+            (&json!(true), &json!(v))
+        );
+        assert!(r.get("version_unknown").is_none());
+    }
+
+    // 版本無法解析:保守視為已安裝(0.9.1 行為),標 version_unknown
+    let env = Fake::new(content).installed_version("8.9-beta");
+    let r = run_install(&env, &p, &paths).await.unwrap();
+    assert_eq!(env.runs(), 0);
+    assert_eq!(
+        (&r["already_installed"], &r["version_unknown"]),
+        (&json!(true), &json!(true))
+    );
+}
+
+/// B-2:安裝程式成功但登錄檔版本一直沒更新 → DETECT_FAILED(版本未到位),結果帶仍偵測到的舊版
+#[tokio::test]
+async fn upgrade_must_reach_package_version() {
+    let content = b"7z 26.05.2";
+    let (_d, paths) = paths();
+    let mut p = install_params(content, &[SIGNER]);
+    p.version = "26.05.2".into();
+    let mut env = Fake::new(content).installed_version("26.05");
+    env.upgrade_to = Some("26.05".into());
+    let f = run_install(&env, &p, &paths).await.unwrap_err();
+    assert_eq!(f.code, "DETECT_FAILED");
+    assert!(f.message.contains("仍是 26.05"), "{}", f.message);
+    let r = f.result.unwrap();
+    assert_eq!(
+        (
+            &r["detected"],
+            &r["installed_version"],
+            &r["previous_version"]
+        ),
+        (&json!(false), &json!("26.05"), &json!("26.05"))
+    );
+}
+
+/// 安裝後等登錄檔 / 逾時後等 Windows Installer 期間收到停止 / 關機:立即結束並留下可回報的結果
+#[tokio::test]
+async fn stop_signal_ends_waits_after_install() {
+    let content = b"stop";
+    let (_d, paths) = paths();
+    let p = install_params(content, &[SIGNER]);
+    // 安裝成功、登錄檔還沒出現,第 2 次等待時停止
+    let mut env = Fake::new(content);
+    env.run_changes = false;
+    *env.stop_at.lock().unwrap() = Some(2);
+    let f = run_install(&env, &p, &paths).await.unwrap_err();
+    assert_eq!(f.code, "EXECUTION_FAILED");
+    let r = f.result.unwrap();
+    assert_eq!(
+        (&r["interrupted"], &r["exit_code"], &r["detected"]),
+        (&json!(true), &json!(0), &json!(false))
+    );
+    let waits = env
+        .sleeps
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|d| **d == DETECT_INTERVAL)
+        .count();
+    assert_eq!(waits, 2, "收到停止就不再輪詢");
+    assert!(!paths.staging(CMD).exists(), "staging 已刪除");
+
+    // 逾時後等 Windows Installer:第一次等待就停止
+    let env = Fake::new(content).exits(&[Ok(Exit::Timeout)]);
+    *env.msi_busy.lock().unwrap() = u32::MAX;
+    *env.stop_at.lock().unwrap() = Some(1);
+    let f = run_install(&env, &p, &paths).await.unwrap_err();
+    assert_eq!(f.code, "INSTALL_TIMEOUT");
+    assert!(f.message.contains("Agent 停止"), "{}", f.message);
+    assert_eq!(
+        env.sleeps
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|d| **d == SETTLE_POLL)
+            .count(),
+        1
+    );
+
+    // 移除後等項目消失:停止
+    let mut env = Fake::new(b"");
+    env.run_changes = false;
+    *env.installed.lock().unwrap() = true;
+    *env.stop_at.lock().unwrap() = Some(1);
+    let f = uninstall(&env, &paths, CMD, &uninstall_params("msi", ""))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (f.code, &f.result.unwrap()["interrupted"]),
+        ("EXECUTION_FAILED", &json!(true))
+    );
 }
 
 #[tokio::test]

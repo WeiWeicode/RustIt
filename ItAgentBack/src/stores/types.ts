@@ -766,6 +766,8 @@ export interface PackageRecord {
   detectType: DetectType;
   detectValue: string;
   rebootPolicy: RebootPolicy;
+  /** Agent 執行安裝 / 移除程式的逾時(秒,300–7200;0009) */
+  timeoutSec: number;
   signerThumbprints: string[];
   observedSigners: string[];
   licenseLimit: number | null;
@@ -801,6 +803,7 @@ export interface NewPackage {
   detectType: DetectType;
   detectValue: string;
   rebootPolicy: RebootPolicy;
+  timeoutSec: number;
   licenseLimit: number | null;
   notes: string | null;
   actor: Actor;
@@ -815,6 +818,7 @@ export interface PackagePatch {
   detectType?: DetectType;
   detectValue?: string;
   rebootPolicy?: RebootPolicy;
+  timeoutSec?: number;
   licenseLimit?: number | null;
   notes?: string | null;
   /** 改到安裝參數 / 偵測規則 / 重開機政策:記錄修改人(editors;已發佈時重設為此人) */
