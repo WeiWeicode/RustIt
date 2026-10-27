@@ -429,14 +429,14 @@ VM 驗收(§8.3)#1、#2 通過時發現的問題(報告 `test-reports/2026-10-22
 | --- | --- | --- |
 | M1 | `/v` 黏著寫(`/vREMOVE=ALL`、`/s /v/qn`)以開關形式把參數轉交 msiexec(InstallShield 類),繞過 `REMOVE=ALL` 與整份 MSI 屬性禁止清單(修改前就存在) | **已修**:Inno 以外的類型一律拒絕 `v` 開頭的開關(Agent `args.rs`、ItAgentBack `argsGrammarError`),契約向量補 6 組 |
 | L3 | 主機只信 Agent 的版本字串淨化 | **已修**:套件詳情輸出前 `reportedVersion` 去控制 / 雙向字元、限 50 字 |
-| L1 | 修改逾時不需第二人覆核:單一管理者可把已發佈套件調到 300 秒(大量電腦半安裝)或 7200 秒(佔住串行與並行名額) | **未改,待需求方決定**:需求的決定是「範圍 300–7200」,未提覆核;可選:逾時變更也記入 `editors`(發佈需他人),或調短低於 pilot 實際耗時時退回 draft |
-| L2 | `REMOVE=` 列出全部功能名稱效果等同 `REMOVE=ALL` | **未改,待需求方決定**:需求只禁 `REMOVE=ALL`(契約向量有 `REMOVE={GUID}` 合法案例);可選整個禁止 `REMOVE` 屬性(移除走 `msiexec /x`,不需要它),或維持由覆核者人工判斷 |
+| L1 | 修改逾時不需第二人覆核:單一管理者可把已發佈套件調到 300 秒(大量電腦半安裝)或 7200 秒(佔住串行與並行名額) | **接受,不改**(需求方 2026-10-27):逾時只影響 Agent 等待安裝程式的時間,不改變安裝的內容(檔案、參數、偵測規則、簽章者都仍受兩人覆核);範圍 300–7200 由 API、服務層、DB CHECK 與 Agent 四處限制,修改有稽核日誌(`changes.timeoutSec`) |
+| L2 | `REMOVE=` 列出全部功能名稱效果等同 `REMOVE=ALL` | **列為已知限制**(需求方 2026-10-27,§8.2-11):程式只擋 `REMOVE=ALL`,逐一列出功能名稱由第二人覆核時人工判斷 |
 
 **B-3 上架腳本防呆**(`RustAgent/installer/publish-release.ps1`;需求方 2026-10-27 決定):
 
 - **兩區路徑分開**:同一台 NAS,test = `\\10.10.130.31\docker-folder\RustIT\test\releases`、prod = `\\10.10.130.31\docker-folder\RustIT\prod\releases`;不給 `-NasReleasesDir` 時依 `-Environment` 選,給了但與環境不一致(例如 test 指到 `prod\`、或舊的 `RustIT\releases`)就停止(比對不分大小寫、忽略結尾 `\`)。掛載確認預設 `/srv/giganexus/nas-rustit/{環境}/releases`(`-MountCheckDir` 可改,空字串不檢查)。
 - **版本號查重(只查目標區)**:經 ssh 到 `-HostAlias`,在目標區 endpoint-server 容器(test 預設 `giganexus-ita-test-endpoint-server-1`;prod 必須給 `-ServerContainer`)內以應用程式的 SQL 帳號唯讀查 `ita.agent_release`(component + version,**含已撤回**);有就停止。查詢程式碼固定,以 base64 經 ssh / PowerShell / wsl / docker exec 傳遞;密碼只在容器內讀取。查不到(連不上、容器不在、正式區未部署)也停止,除非加 `-SkipRegistryCheck`(印警告)。`-DryRun` 不查。主機的 docker 不在 WSL 時加 `-DockerCmd docker`。
-- **資安稽核(2026-10-27)**:無 Critical / High;遠端指令、JS、SQL 注入都找不到路徑,失敗時停止。已修:查到的資料庫名稱必須屬於目標區(test = `giganexus_It_Agent_test`、prod 不得含 `test`),避免 `-HostAlias` / `-ServerContainer` 指錯區仍通過(M1);錯誤只印代碼,不帶 SQL 帳號 / 主機(L2);版本參數長度 40(L3)。**未修、待需求方決定**:M2 查詢用 endpoint-server 的 SQL 帳號(有寫入權,唯讀只靠程式碼)且簽章人員要能 ssh 進主機以 root 執行 docker——上正式區前建議改走 `GET /api/endpoint/releases`(唯讀 IT 帳號)或只有 SELECT 權的帳號 + 映像內建檢查腳本;L4 NAS `RustIT\test` / `RustIT\prod` 建議設不同寫入群組(路徑分區目前只靠腳本)。
+- **資安稽核(2026-10-27)**:無 Critical / High;遠端指令、JS、SQL 注入都找不到路徑,失敗時停止。已修:查到的資料庫名稱必須屬於目標區(test = `giganexus_It_Agent_test`、prod 不得含 `test`),避免 `-HostAlias` / `-ServerContainer` 指錯區仍通過(M1);錯誤只印代碼,不帶 SQL 帳號 / 主機(L2);版本參數長度 40(L3)。**列為上線前待辦**(需求方 2026-10-27,§8.2-13、§8.2-14):M2 查詢用 endpoint-server 的 SQL 帳號(有寫入權,唯讀只靠程式碼)且簽章人員要能 ssh 進主機以 root 執行 docker——上正式區前改走唯讀 API(`GET /api/endpoint/releases`,唯讀 IT 帳號)或只能 SELECT 的帳號;L4 NAS `RustIT\test` / `RustIT\prod` 的寫入群組分開(NAS 管理員;路徑分區目前只靠腳本)。
 - **實測(2026-10-27,測試區唯讀)**:watchdog 0.3.3 / 0.3.4 查到 `revoked`(驗收報告 §5-3 的情況會被擋)、agent 0.9.1 `published`、agent 0.9.2 未登錄;容器名稱錯誤時停止。路徑防呆:test→`prod\`、test→舊 `RustIT\releases`、prod→`test\` 都停止。
 - **軟體庫也拆開**(需求方 2026-10-27 補充):test = `RustIT\test\software`、prod = `RustIT\prod\software`。軟體庫的安裝檔由 IT 直接放置(不經上架腳本);compose 預設值改為 `/srv/giganexus/nas-rustit/test/releases`、`/test/software`,`host2-set-nas-credentials.sh` 與 `test.env.example` 一併更新。
 - **切換步驟**(測試區目前讀舊的 `RustIT\releases`、`RustIT\software`;建目錄、複製並比對雜湊、改 `ita.env`、重跑 deploy-test、確認後再處理舊目錄,屬部署步驟,**本分支沒有執行**):RUNBOOK §1.1。
@@ -455,8 +455,12 @@ VM 驗收(§8.3)#1、#2 通過時發現的問題(報告 `test-reports/2026-10-22
 6. **7-Zip 官方 MSI 未簽章**(實作時再確認當時版本):依 §9-2 由 IT 以公司憑證簽章後登錄;測試期用 P6 的測試簽章憑證(`new-test-signing-cert.ps1`)簽章。
 7. **定期複驗在沒有排隊中安裝時不發告警**(需求方 2026-10-27 決定不改):`verifyFiles`(M1)發現軟體庫安裝檔被換掉或不見時,告警 `software_file_tampered` 開在「被取消安裝的裝置」上;該套件當下沒有排隊中的安裝時,只記日誌並拒絕之後的新安裝指令,畫面不會出現告警。
 8. **`listPackages` 最多 500 筆**(需求方 2026-10-27 決定不改):軟體目錄清單與「尚未登錄的安裝檔」比對都只取前 500 筆(依名稱);超過時清單不完整,且第 501 筆以後已登錄的檔案會被當成未登錄列出(登錄時仍會因重複回 409)。
-9. **版本無法解析的軟體不會自動升級**(§8.1.4 B-2 的保守做法):DisplayVersion 空白或帶非數字後綴時視為已安裝,IT 需先移除再安裝,或改用可比較的偵測規則。
+9. **版本字串無法解析時當成已安裝**(需求方 2026-10-27 確認列為已知限制;§8.1.4 B-2 的保守做法),所以這類軟體不會自動升級:DisplayVersion 空白或帶非數字後綴時視為已安裝,IT 需先移除再安裝,或改用可比較的偵測規則。
 10. **套件的「版本」要與安裝程式寫入的 DisplayVersion 同格式**(§8.1.4 B-2):例如套件填 `2024.1`、登錄檔寫 `24.1`,安裝後確認會判為「仍是舊版」回 `DETECT_FAILED`,之後每次派送都會重裝。登錄前先在測試機確認 DisplayVersion(登錄畫面已提示);pilot 測試會發現。
+11. **`REMOVE=` 逐一列出所有功能,效果等於 `REMOVE=ALL`**(需求方 2026-10-27 列為已知限制):程式只擋 `REMOVE=ALL`(含逗號清單、引號、大小寫、`/v` 轉交),把產品的所有功能名稱全部列在 `REMOVE=` 裡仍會移除整個產品;由第二人覆核(發佈前檢視完整安裝參數)時人工判斷。
+12. **修改已發佈套件的安裝逾時不需第二人確認**(需求方 2026-10-27 接受):逾時只影響等待時間,不影響安裝的內容;調短可能讓較慢的電腦 `INSTALL_TIMEOUT`、調長會較久佔住串行與並行名額,修改留稽核日誌。
+13. **上線前待辦:上架腳本的版本表查詢改用唯讀權限**(需求方 2026-10-27):目前經 ssh 以 root 執行主機 docker、在 endpoint-server 容器內用其 SQL 帳號(有寫入權)查詢,唯讀只靠程式碼,且簽章人員要有主機管理權;正式區上線前改為唯讀 API 或只能 SELECT 的帳號。
+14. **上線前待辦:NAS `RustIT\test`、`RustIT\prod` 寫入群組分開**(需求方 2026-10-27,NAS 管理員):路徑分區目前只靠上架腳本檢查,直接用檔案總管或 robocopy 仍可寫入另一區;正式區只給正式簽章人員寫入權。
 
 ### 8.3 測試區 VM 驗收步驟(草案,`RUSTIT-P34` + 另 2 台 IT 同意的電腦;VM 內指令由需求方執行)
 
