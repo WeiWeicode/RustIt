@@ -8,8 +8,8 @@
 | --- | --- |
 | 基本階段(INTEGRATION-PLAN M0–M4、M6) | ✅ 完成:Agent 經 Gateway `:9443` 回報 ItAgentBack,GigaItApp「電腦清單」看得到 |
 | `RustAgent/crates/collector` | ✅ 硬體、軟體、網路、防毒、USB 儲存、RustDesk 狀態 |
-| `RustAgent/crates/watchdog`(`rustit-watchdog`) | ✅ **0.3.2**(2026-10-21 已發佈,測試區 pilot VM 驗收):0.2.0(P6-2)升級 Agent、還原、冷卻;0.3.0(P6-3)交給 Agent 替換自己;0.3.2 rustls 弱點修補。0.1.0(P5-2):`GigaNexusWatchdog` 服務看守 Agent、自己經 `:9443` 上報 |
-| `RustAgent/crates/agent`(`rustit-agent`) | ✅ **0.8.2**(2026-10-21 已發佈,測試區 pilot VM 驗收;P6 升級見 §2 第 0 項):0.7.0(P6-2)`prepare_shutdown`、`agent.upgrade`;0.8.0(P6-3)替換 Watchdog;0.8.2 rustls 弱點修補。0.6.0(2026-10-19 測試區 VM 由 0.4.2 升級驗收通過):0.5.0(P5-1)心跳健康摘要、上次結束原因、hello 憑證到期日;0.6.0(P5-2)本機管道、看守 Watchdog、服務 ACL。0.4.2:2026-10-19 停用改每 1 分鐘重試; 前景執行(`run`)與 **Windows 服務**(`service`;開發用 `install` / `uninstall`,P1 第一批);HTTPS 回報、WebSocket hello / 心跳、退避重連、裝置憑證(PEM 檔或 Windows `LocalMachine\My`,P1 PoC 實測通過)、服務模式檔案日誌、監控 MSI(未簽章,P1 VM 驗證通過)。**P2**:本機加密暫存 `state\store.db`(資產 / 事件 outbox、連線紀錄)、離線照常蒐集與 `/sync` 補傳、`offline_period`、USB 插拔與 `agent_started` 事件、429 依 Retry-After、主機下發設定(2026-10-15 VM 驗證通過,見下方 P2-3)。**P4-1(0.3.0,已合併 develop)**:指令執行器 `inventory.collect` / `agent.restart` / `message.show`、本機 `command_log` 去重與待回報狀態。**P4-2(0.4.0,已合併 develop,2026-10-15 測試區 VM 驗證通過)**:`agent.diagnose`、`logs.collect`(日誌 zip 上傳)、`agent.log_level` |
+| `RustAgent/crates/watchdog`(`rustit-watchdog`) | ✅ **0.3.5**(2026-10-22 測試區發佈;P7 軟體派送中延後升級。0.3.3 / 0.3.4 已被反向測試檔佔用,不可重用;Windows Installer 忙碌判斷問題下次 0.3.6 修,見 §2 第 0 項)。0.3.2(2026-10-21 已發佈,測試區 pilot VM 驗收):0.2.0(P6-2)升級 Agent、還原、冷卻;0.3.0(P6-3)交給 Agent 替換自己;0.3.2 rustls 弱點修補。0.1.0(P5-2):`GigaNexusWatchdog` 服務看守 Agent、自己經 `:9443` 上報 |
+| `RustAgent/crates/agent`(`rustit-agent`) | ✅ **0.9.3**(2026-10-27 測試區上架,pilot 環目標,VM 重驗待做;見 §2 第 0 項)。0.9.2(2026-10-27 VM 驗收)、0.9.1(P7 收尾)、0.9.0(P7-2 / P7-3 軟體派送、`system.reboot`)。0.8.2(2026-10-21 已發佈,測試區 pilot VM 驗收):0.7.0(P6-2)`prepare_shutdown`、`agent.upgrade`;0.8.0(P6-3)替換 Watchdog;0.8.2 rustls 弱點修補。0.6.0(2026-10-19 測試區 VM 由 0.4.2 升級驗收通過):0.5.0(P5-1)心跳健康摘要、上次結束原因、hello 憑證到期日;0.6.0(P5-2)本機管道、看守 Watchdog、服務 ACL。0.4.2:2026-10-19 停用改每 1 分鐘重試; 前景執行(`run`)與 **Windows 服務**(`service`;開發用 `install` / `uninstall`,P1 第一批);HTTPS 回報、WebSocket hello / 心跳、退避重連、裝置憑證(PEM 檔或 Windows `LocalMachine\My`,P1 PoC 實測通過)、服務模式檔案日誌、監控 MSI(未簽章,P1 VM 驗證通過)。**P2**:本機加密暫存 `state\store.db`(資產 / 事件 outbox、連線紀錄)、離線照常蒐集與 `/sync` 補傳、`offline_period`、USB 插拔與 `agent_started` 事件、429 依 Retry-After、主機下發設定(2026-10-15 VM 驗證通過,見下方 P2-3)。**P4-1(0.3.0,已合併 develop)**:指令執行器 `inventory.collect` / `agent.restart` / `message.show`、本機 `command_log` 去重與待回報狀態。**P4-2(0.4.0,已合併 develop,2026-10-15 測試區 VM 驗證通過)**:`agent.diagnose`、`logs.collect`(日誌 zip 上傳)、`agent.log_level` |
 | `RustAgent/crates/demo` | 示範介面;**將改造為使用者端程式 `desktop`**(P8),`src/deploy.rs` 是軟體派送的參考實作(P7 移植到 Agent) |
 | `RustAgent/crates/native` | ✅ 已移除(P1;最後版本 `3ba3827`) |
 | `ItAgentBack` | ✅ 測試區(主機 2,`endpoint-server` + `ita-mongo` / `ita-redis`,CI `develop` 部署);管理 API `GET /v1/devices[/{deviceId}]`;**P4-2(已合併 develop,路由 Gateway v51 已發佈)**:指令附檔上傳 `POST /agent/v1/commands/{id}/files`、下載 `GET /v1/commands/{id}/files/{fileId}`、volume `ita_command_files`(保存 14 天);不需新 migration。**P4-1(已合併 develop)**:指令派送器與 basic 指令 API(`/v1/devices/{id}/basic-commands`、`/v1/batches/basic-commands`、`/v1/commands[/{id}[/cancel]]`、`/v1/batches/{id}`),migration 0003 已套用 `giganexus_It_Agent_test`(2026-10-15,經需求方同意);giga-observe 監控已接。**P2 主機端已上測試區**(2026-10-14,MR !10):`/sync`、`/events`、429、時鐘偏差、硬體指紋、主機下發設定;migration 0002 已套用 `giganexus_It_Agent_test` |
@@ -19,7 +19,40 @@
 
 ## 2. 下一步
 
-0. **目前階段:P7 軟體派送(P6 已於 2026-10-21 完成)**:[P7-SOFTWARE-DESIGN.md](P7-SOFTWARE-DESIGN.md) §9 全部已確認。**新討論串從這裡接手。**
+0. **目前階段:P7 軟體派送,收尾前的 0.9.3 重驗(2026-10-27 收工)。新討論串從這裡接手。**
+   - **已完成(2026-10-27)**
+     - 程式全部合併 develop:P7-1~P7-6、P7 收尾(!56、!57)、VM 驗收後修正 0.9.2(RustIt !58、GigaItApp !11、文件 !59 / !60)、0.9.3(RustIt !65、GigaItApp !12)。驗收報告 !61~!64 已合併。
+     - migration **0009**(套件 `timeout_sec`)與 **0010**(撤回的套件釋放安裝檔路徑,篩選唯一索引 `ux_software_package_file_active`)已套用 `giganexus_It_Agent_test`;**正式區要在部署前先套**。只改請求 / 回應欄位,Gateway OpenAPI 不需重新發佈(RUNBOOK §1.1)。
+     - **NAS 測試 / 正式分開**:測試區已切到 `RustIT\test\{releases,software}`(主機 2 `ita.env` 已改,備份 `ita.env.bak-20261027`;14 個檔案雜湊一致);正式區用 `RustIT\prod\{releases,software}`(目前是空的)。舊的 `RustIT\releases`、`RustIT\software` 還保留,何時刪由需求方決定。上架腳本只接受與 `-Environment` 一致的路徑,上架前會查目標區版本表(含已撤回)。
+     - VM 驗收(報告 [test-reports/2026-10-27-p7-vm-acceptance.md](test-reports/2026-10-27-p7-vm-acceptance.md)):§8.3 #1、2、4~10 通過,#3(只有 2 台)、#11 部分通過;0.9.2 新行為通過;**L3 未通過**,已在 0.9.3 修正。
+     - **0.9.3 發版**:pipeline 484 / job 1386(`ae68acc`)→ 測試憑證簽章(簽章後 SHA-256 `a4b46b76378933589c526a7cefbe31acb58b90fa93e7dbacda4c044e0fc23697`)→ 上架 NAS `RustIT\test\releases\agent\0.9.3\` → GigaItApp 登錄為**草稿** → **pilot 環目標設為 0.9.3**(16:42)。`all` 環 0.9.2、`it` 環 0.9.1,沒用 force。
+   - **下一步(依序)**
+     1. 確認 VM `RUSTIT-P34` 已升到 0.9.3(VM Agent 日誌「Agent 0.9.3 啟動」、事件 `upgrade_succeeded`)。
+     2. **0.9.3 重驗**(設計 §8.1.5):
+        - L3:SlowMSI(`timeout_sec` 300)逾時後,結果應為「Windows Installer 仍在執行」;緊接著派 Notepad++ MSI,應等待到空閒,或 15 分鐘後回 `INSTALL_BUSY`,不可撞 1618。
+        - #9:TestInst-C 逾時訊息不變。
+        - #11:延後時畫面顯示「延後中(原因)」,Agent 日誌每 5 分鐘一行。
+        - 撤回後重新登錄同一安裝檔:成功,從 draft 開始。
+        - 事件詳情的 `detect` 以 JSON 顯示。
+        - 回歸:Notepad++ 單台派送、相同版本重派回 `already_installed`。
+        - 結果補進驗收報告(新增「0.9.3 重驗」一節、更新開頭狀態),開 MR 只開不合併。
+     3. 重驗通過後,0.9.3 在 GigaItApp 由草稿改為發佈;`all` 環要不要推由需求方決定。
+     4. **P7 收尾**:本檔、Gateway `ENDPOINT-AGENT-GUIDE.md`(`GET /batches`、`timeout_sec`、`deferred`、`installed_version`)、根目錄 `workspace.json` / `PROJECT-MAP.md`、甘特圖 W6-20 改 done(Gateway / 根目錄 repo 動手前先確認)。
+   - **重驗前注意**
+     - 測試套件 RustIt-TestInst 1.0.1~1.0.3、A/B/C/D、RustIt-SlowMSI 1.0.0 **都已撤回**,要重新登錄(寫入測試區前先取得需求方同意)。NAS `RustIT\test\software\` 下的檔案還在,可直接拿來驗「撤回後重新登錄」。
+     - TestInst 的 `/reg` 固定寫版本 1.0.0,所以套件版本必須是 1.0.0(名稱可以不同),否則會 `DETECT_FAILED`。參數:A=`/reg /exit=3010`、B=`/reg /sleep=120`、C=`/reg /sleep=400` 加 `timeout_sec` 300、D=`/reg`;判斷值 `RustIt Test Installer`。
+     - VM 上 `RustIt Test Slow MSI` 還裝著。名稱含 rustit,GigaItApp 移除會回 `UNINSTALL_NOT_SUPPORTED`:L3 重驗前先在 VM 手動移除,而且要等 msiserver 空閒。
+     - 電池 / 計量測試:VM 系統環境變數設 `RUSTIT_TEST_POWER=battery|metered`,改完要重啟 `GigaNexusAgent`(會中斷延後中的指令);測完要清掉。
+     - 主機 2 SSH 預設是 PowerShell:每個指令各下一次 `wsl -u root -e`,不要用分號;docker format 字串用單引號。給需求方的腳本用 `pwsh` 執行,或存成帶 BOM 的 UTF-8。
+     - 子任務沒有權限寫入共用資料庫、NAS 與主機設定:migration、NAS 放檔、改 `ita.env` 由需求方執行;GitLab token 只有 Pipeline Read,`build:release` / `deploy-test` 由需求方按。**需要先套 migration 的 MR,要先套用再合併。**
+   - **上線前待辦 / 待驗**
+     - Watchdog 的 Windows Installer 忙碌判斷有和 L3 同樣的擁有者問題(設計 §8.2-16):這次不修,下次發 Watchdog **0.3.6** 時一起修。
+     - 驗收未涵蓋:#12 批次 > 20 台第二人核可、下載 429、Watchdog 在軟體派送中延後升級 Agent、#3 第 3 台電腦、#11「恢復後繼續」(需要實機電池或計量網路)。
+     - 上架腳本查重用的 SQL 帳號可以寫入,而且要以 root 執行 docker:正式區前改成唯讀 API 或只能 SELECT 的帳號。NAS `RustIT\test`、`RustIT\prod` 的寫入群組要分開(NAS 管理員);NAS 掛載帳號改成唯讀帳號。
+     - 正式程式碼簽章憑證(IT AD CS)與 `-Environment prod` 演練;主機 3 掛 `RustIT\prod\...`。
+     - 已知限制(設計 §8):`REMOVE=` 逐一列出全部功能,效果等於 `REMOVE=ALL` 卻擋不到;複驗沒有排隊中的安裝時不發告警;`listPackages` 最多 500 筆;版本字串無法解析時當成已安裝;逾時前的半成品不回復;撤回後重新登錄等於重新認可目前內容;修改已發佈套件的逾時不需要第二人確認。
+   - **驗收後清理(需求方)**:VM 與開發機上的測試軟體、開發機匯入的測試根憑證、開發機 `agent.toml` 還原(備份 `.bak-20261027`)、NAS 測試檔(套件撤回後再刪)、告警 `d28ac339-8cc2-44a6-8ae3-f4fe1c87e1cb`、VM 兩張測試根憑證(等正式憑證到位)。
+0. **P7 前期紀錄(2026-10-22,已完成;以下保留為紀錄)**:[P7-SOFTWARE-DESIGN.md](P7-SOFTWARE-DESIGN.md) §9 全部已確認。
    - **現況(2026-10-22 收工)**:
      - **P7-1 已合併(MR !50)並上測試區**:migration 0008 已套用 `giganexus_It_Agent_test`、Gateway OpenAPI v56 已發佈(含 `approve-command`、`reject-command`)、主機 2 `ita-software` 已唯讀掛載(`SOFTWARE_DIR=/srv/software`)。P7-1 資安稽核剩餘項目見下方「P7-1 待辦」。
      - **P7-2 Agent `software` 模組程式完成**(Agent 0.9.0):分支 `feature/p7-2-agent-software`(worktree `D:\檔案分享\程式碼\GigaNexusAI\RustIt-p7-2`)已推 gitlab / origin,最新 commit `f3af32d`(`git log` 為準),**MR 尚未開**。`software.install` / `software.uninstall`、A6 電池 / 計量網路延後;已通過 code-reviewer 與 security-auditor 並修正;`cargo test -p rustit-agent` 116/116。**VM 驗收尚未做**。與設計的差異、需求方決定(C2、H1、H2、M3)、稽核已修與未修(L2、L3)、code-reviewer 未處理建議、Watchdog 升級中斷安裝的風險,全部記在設計 §8.1.2;Agent 修改紀錄 `DevelopmentProcess/AgentCorrection.md`。
