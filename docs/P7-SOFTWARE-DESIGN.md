@@ -441,7 +441,7 @@ VM 驗收(§8.3)#1、#2 通過時發現的問題(報告 `test-reports/2026-10-22
 - **軟體庫也拆開**(需求方 2026-10-27 補充):test = `RustIT\test\software`、prod = `RustIT\prod\software`。軟體庫的安裝檔由 IT 直接放置(不經上架腳本);compose 預設值改為 `/srv/giganexus/nas-rustit/test/releases`、`/test/software`,`host2-set-nas-credentials.sh` 與 `test.env.example` 一併更新。
 - **切換步驟**(測試區目前讀舊的 `RustIT\releases`、`RustIT\software`;建目錄、複製並比對雜湊、改 `ita.env`、重跑 deploy-test、確認後再處理舊目錄,屬部署步驟,**本分支沒有執行**):RUNBOOK §1.1。
 
-**相容**:新主機 + 0.9.1 Agent:快照的 `timeout_sec` 在 300–7200 內,0.9.1 接受(其範圍 60–14,400);0.9.1 不比對版本、不帶新結果欄位,畫面照舊顯示。0.9.2 Agent + 舊主機:快照固定 1800,照常;主機只存 `result`,新欄位不影響。**部署順序**:先套用 0009,再部署新版 endpoint-server(新版讀寫 `timeout_sec`);0009 未套用時套件查詢失敗。GigaItApp 新欄位在舊主機上不顯示(逾時顯示 1800)。Gateway OpenAPI(請求 `timeoutSec`、回應 `timeoutSec` / `viewerScopeAll` / 測試結果版本欄位)部署後要再發佈草稿批次。
+**相容**:新主機 + 0.9.1 Agent:快照的 `timeout_sec` 在 300–7200 內,0.9.1 接受(其範圍 60–14,400);0.9.1 不比對版本、不帶新結果欄位,畫面照舊顯示。0.9.2 Agent + 舊主機:快照固定 1800,照常;主機只存 `result`,新欄位不影響。**部署順序**:先套用 0009,再部署新版 endpoint-server(新版讀寫 `timeout_sec`);0009 未套用時套件查詢失敗。GigaItApp 新欄位在舊主機上不顯示(逾時顯示 1800)。Gateway OpenAPI:**不需要再發佈**(2026-10-27 部署後確認:Gateway 路由表只記路徑、方法與權限,不存請求 / 回應 schema;endpoint-server 啟動註冊結果 42 個路由不變、`pendingPublish: false`)。
 
 **驗收需重測**:§8.3 全部 12 項以 Agent 0.9.2 重做;另加:#5 以舊版(例如 Notepad++ 8.8.9)派送新版 → 升級成功、`previous_version` 正確;相同版本 → `already_installed` 帶 `installed_version`;#9 以套件 `timeout_sec = 300`(最小值,原寫 30 已不可設)驗 `INSTALL_TIMEOUT`,並在等 Windows Installer 期間停止服務 / 關機,確認立即結束且重啟後補送結果;登錄 `REMOVE=ALL` 被拒;無 `it-admin` 帳號(V112001)看到「發佈」停用與原因。
 
