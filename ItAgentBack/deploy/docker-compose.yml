@@ -74,8 +74,9 @@ services:
       BATCH_APPROVAL_THRESHOLD: ${BATCH_APPROVAL_THRESHOLD:-20}
     volumes:
       - ita_command_files:/data/command-files
-      - ${ITA_RELEASES_HOST_DIR:-/srv/giganexus/ita-releases}:/srv/releases:ro
-      - ${ITA_SOFTWARE_HOST_DIR:-/srv/giganexus/ita-software}:/srv/software:ro
+      # 預設:主機 2 的 NAS 唯讀掛載(RustIT\test\releases、RustIT\test\software;B-3 兩區分開,RUNBOOK §1.1);ita.env 有設定時以 ita.env 為準
+      - ${ITA_RELEASES_HOST_DIR:-/srv/giganexus/nas-rustit/test/releases}:/srv/releases:ro
+      - ${ITA_SOFTWARE_HOST_DIR:-/srv/giganexus/nas-rustit/test/software}:/srv/software:ro
     secrets: [gw_api_key, ita_db_password, mongo_url, redis_url, endpoint_server_crt, endpoint_server_key, monitor_api_key, agent_monitor_api_key]
     depends_on: [ita-mongo, ita-redis]
     networks:

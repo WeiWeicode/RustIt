@@ -578,6 +578,7 @@ describe('SQL Server + Mongo + Redis', () => {
       detectType: 'display_name' as const,
       detectValue: '7-Zip%',
       rebootPolicy: 'never' as const,
+      timeoutSec: 1800,
       licenseLimit: 10,
       notes: '整合測試',
       actor: creator,
@@ -585,7 +586,7 @@ describe('SQL Server + Mongo + Redis', () => {
       requestId: 'int-p7',
     };
     const p = await sw.addPackage(base);
-    assert.deepEqual([p.status, p.signerThumbprints, p.licenseLimit, p.createdByEmp], ['draft', [], 10, 'S000001']);
+    assert.deepEqual([p.status, p.signerThumbprints, p.licenseLimit, p.createdByEmp, p.timeoutSec], ['draft', [], 10, 'S000001', 1800]);
     await assert.rejects(sw.addPackage({ ...base, fileName: '7-Zip/24.09/other.msi' }), { code: 'ITA_PACKAGE_EXISTS' });
     await assert.rejects(sw.addPackage({ ...base, version: '24.10' }), { code: 'ITA_PACKAGE_EXISTS' }, '同一檔案');
     assert.equal((await sw.listPackages({ q: 'zip', status: 'draft' })).length, 1);
@@ -594,6 +595,11 @@ describe('SQL Server + Mongo + Redis', () => {
     // 狀態條件更新
     assert.equal(await sw.updatePackage(p.packageId, 'tested', { notes: 'x', argsChanged: false, revertToDraft: false }, creator, at, 'int-p7'), false);
     assert.equal(await sw.updatePackage(p.packageId, 'draft', { installArgs: 'ALLUSERS=1 /norestart', licenseLimit: null, argsChanged: true, revertToDraft: false }, creator, at, 'int-p7'), true);
+    // 0009:安裝逾時可改;超出 300–7200 由 CHECK 擋下(程式先驗,這是第二道防線)
+    assert.equal(await sw.updatePackage(p.packageId, 'draft', { timeoutSec: 3600, argsChanged: false, revertToDraft: false }, creator, at, 'int-p7'), true);
+    assert.equal((await sw.getPackage(p.packageId))?.timeoutSec, 3600);
+    await assert.rejects(sw.updatePackage(p.packageId, 'draft', { timeoutSec: 60, argsChanged: false, revertToDraft: false }, creator, at, 'int-p7'));
+    await assert.rejects(sw.updatePackage(p.packageId, 'draft', { timeoutSec: 7201, argsChanged: false, revertToDraft: false }, creator, at, 'int-p7'));
     assert.equal(await sw.publish(p.packageId, reviewer, at, 'int-p7'), false, 'draft 不能發佈');
     assert.equal(await sw.markTested(p.packageId, ['b'.repeat(40)], ['b'.repeat(40), 'c'.repeat(40)], creator, at, 'int-p7'), true);
     assert.equal(await sw.publish(p.packageId, creator, at, 'int-p7'), false, '登錄人不能發佈');
@@ -768,6 +774,7 @@ describe('SQL Server + Mongo + Redis', () => {
       detectType: 'display_name' as const,
       detectValue: `${name}%`,
       rebootPolicy: 'never' as const,
+      timeoutSec: 1800,
       licenseLimit: null,
       notes: null,
       actor: creator,

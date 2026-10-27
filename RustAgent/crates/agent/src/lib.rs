@@ -150,6 +150,11 @@ impl Shared {
         self.set_disabled(false);
     }
 
+    /// 停止訊號(外部停止 / 關機 / agent.restart)的接收端:長時間等待時用來提早結束(軟體派送安裝後等待,P7 VM 驗收)
+    pub fn stop_signal(&self) -> watch::Receiver<bool> {
+        self.stop.subscribe()
+    }
+
     /// 指令 agent.restart:結束所有工作,服務以專屬結束代碼停止
     pub fn request_restart(&self) {
         RESTART_REQUESTED.store(true, Ordering::Relaxed);

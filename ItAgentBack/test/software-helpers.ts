@@ -70,6 +70,7 @@ export class MemorySoftwareStore implements SoftwareStore {
       detectType: n.detectType,
       detectValue: n.detectValue,
       rebootPolicy: n.rebootPolicy,
+      timeoutSec: n.timeoutSec,
       signerThumbprints: [],
       observedSigners: [],
       licenseLimit: n.licenseLimit,

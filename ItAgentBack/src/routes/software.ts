@@ -13,10 +13,13 @@ import { AppError } from '../errors.js';
 import { BATCH_MAX_DEVICES } from '../services/command-dispatcher.js';
 import {
   ARGS_MAX,
+  DEFAULT_TIMEOUT_SEC,
   DETECT_TYPES,
   INSTALLER_TYPES,
   PACKAGE_STATUSES,
   REBOOT_POLICIES,
+  TIMEOUT_MAX_SEC,
+  TIMEOUT_MIN_SEC,
   type DeployInput,
   type RegisterPackageInput,
   type SoftwareService,
@@ -35,6 +38,12 @@ const ARGS = {
   maxLength: ARGS_MAX,
   description: '靜默參數的額外屬性;只允許英數字、空白與 / - _ = . : , " { } %,不可指到其他檔案、不可含序號 / 密碼',
 } as const;
+const TIMEOUT = {
+  type: 'integer',
+  minimum: TIMEOUT_MIN_SEC,
+  maximum: TIMEOUT_MAX_SEC,
+  description: `Agent 執行安裝 / 移除程式的逾時(秒,${TIMEOUT_MIN_SEC}–${TIMEOUT_MAX_SEC};登錄時省略為 ${DEFAULT_TIMEOUT_SEC})`,
+} as const;
 const SIGNERS = { type: 'array', minItems: 1, maxItems: 8, items: { type: 'string', pattern: '^[0-9A-Fa-f]{40}$' } } as const;
 
 const packageProps = {
@@ -50,6 +59,7 @@ const packageProps = {
   detectType: { type: 'string', enum: DETECT_TYPES },
   detectValue: { type: 'string' },
   rebootPolicy: { type: 'string', enum: REBOOT_POLICIES },
+  timeoutSec: { type: 'integer', description: 'Agent 執行安裝 / 移除程式的逾時(秒)' },
   signerThumbprints: { type: 'array', items: { type: 'string' }, description: '預期簽章者憑證 SHA-1 指紋(tested 起才有)' },
   observedSigners: { type: 'array', items: { type: 'string' }, description: '測試機回報的實際簽章者' },
   licenseLimit: { type: ['integer', 'null'] },
@@ -73,6 +83,7 @@ const detailSchema = {
   type: 'object',
   properties: {
     ...packageProps,
+    viewerScopeAll: { type: 'boolean', description: '查詢者有可管理所有公司的角色(才能登錄 / 修改 / 標記測試完成 / 發佈 / 撤回)' },
     testResults: {
       type: 'array',
       description: 'pilot 測試機的 software.install(新到舊);qualifies = 可作為 mark-tested 依據',
@@ -88,6 +99,9 @@ const detailSchema = {
           signer: strOrNull,
           signerSubject: strOrNull,
           detected: { type: ['boolean', 'null'] },
+          installedVersion: { ...strOrNull, description: 'Agent 偵測到的已安裝版本(0.9.2 起;已安裝時或安裝後)' },
+          previousVersion: { ...strOrNull, description: '安裝前偵測到的較舊版本(升級時;0.9.2 起)' },
+          alreadyInstalled: { type: ['boolean', 'null'] },
           qualifies: { type: 'boolean' },
           createdByEmp: { type: 'string' },
           finishedAt: dateOrNull,
@@ -217,6 +231,7 @@ export function softwareRoutes(software: SoftwareService): FastifyPluginAsync {
               detectType: { type: 'string', enum: DETECT_TYPES },
               detectValue: { type: 'string', minLength: 1, maxLength: 400, description: 'MSI 產品代碼 {GUID},或登錄檔 DisplayName 樣式(% 為萬用字元)' },
               rebootPolicy: { type: 'string', enum: REBOOT_POLICIES, default: 'never' },
+              timeoutSec: TIMEOUT,
               licenseLimit: { type: ['integer', 'null'], minimum: 0, maximum: 1000000 },
               notes: { type: 'string', maxLength: 1000 },
             },
@@ -256,7 +271,7 @@ export function softwareRoutes(software: SoftwareService): FastifyPluginAsync {
           operationId: 'endpoint.software.update',
           summary: '修改軟體套件',
           description:
-            '修改安裝 / 移除參數、偵測規則、重開機政策、授權數、說明。tested / published 的套件改到安裝參數或偵測規則會退回 draft(清除簽章者與覆核紀錄,需重新測試與覆核);已撤回的不能修改。只有可管理所有公司的角色可用。',
+            '修改安裝 / 移除參數、偵測規則、重開機政策、安裝逾時、授權數、說明(逾時、授權數、說明不需重新覆核)。tested / published 的套件改到安裝參數或偵測規則會退回 draft(清除簽章者與覆核紀錄,需重新測試與覆核);已撤回的不能修改。只有可管理所有公司的角色可用。',
           tags: TAGS,
           'x-permission': 'endpoint.software.manage',
           'x-audit-level': 'meta',
@@ -278,6 +293,7 @@ export function softwareRoutes(software: SoftwareService): FastifyPluginAsync {
               detectType: { type: 'string', enum: DETECT_TYPES },
               detectValue: { type: 'string', minLength: 1, maxLength: 400 },
               rebootPolicy: { type: 'string', enum: REBOOT_POLICIES },
+              timeoutSec: TIMEOUT,
               licenseLimit: { type: ['integer', 'null'], minimum: 0, maximum: 1000000 },
               notes: { type: 'string', maxLength: 1000 },
             },

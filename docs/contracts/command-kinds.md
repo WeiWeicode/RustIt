@@ -153,16 +153,18 @@
 | `url` | string | 固定 `/agent/v1/packages/{package_id}`;以同一組 mTLS 連線下載,不跟隨重新導向 |
 | `sha256`、`size_bytes` | string(64 碼小寫)、integer | 驗整個檔案;不符 `HASH_MISMATCH`,不啟動安裝程式 |
 | `installer_type` | `msi` / `inno` / `nsis` / `burn` / `exe` | 決定 Agent 寫死的命令列(P7-SOFTWARE-DESIGN §5.3) |
-| `install_args` | string ≤ 500 | 額外參數(可為空字串);字元白名單 `[A-Za-z0-9 /\-_=.:,"{}%()+]`(路徑用 `/`),**再依 `installer_type` 逐一檢查每個參數**(D3):MSI 只接受 `屬性=值`、禁用讀外部檔案或改變安裝方式的屬性與開關(`TRANSFORMS`、`PATCH`、`REBOOT`、`/LOG`、`/LOADINF`、`/SILENT` 等)、路徑只限 `C:/Program Files/` 與 `C:/Program Files (x86)/` 底下、不可含 UNC / `..`。規則細節以測試向量 [`install-args.vectors.json`](install-args.vectors.json) 為準(ItAgentBack 與 Agent P7-2 吃同一份);Agent 執行前再驗,不符 `INVALID_PARAMS`。**不經 cmd.exe / PowerShell** |
+| `install_args` | string ≤ 500 | 額外參數(可為空字串);字元白名單 `[A-Za-z0-9 /\-_=.:,"{}%()+]`(路徑用 `/`),**再依 `installer_type` 逐一檢查每個參數**(D3):MSI 只接受 `屬性=值`、禁用讀外部檔案或改變安裝方式的屬性與開關(`TRANSFORMS`、`PATCH`、`REBOOT`、`ACTION`、`REMOVE=ALL`、`/LOG`、`/LOADINF`、`/SILENT` 等;`REMOVE={產品代碼}` / 功能名稱可用)、路徑只限 `C:/Program Files/` 與 `C:/Program Files (x86)/` 底下、不可含 UNC / `..`。規則細節以測試向量 [`install-args.vectors.json`](install-args.vectors.json) 為準(ItAgentBack 與 Agent P7-2 吃同一份);Agent 執行前再驗,不符 `INVALID_PARAMS`。**不經 cmd.exe / PowerShell** |
 | `signer_thumbprints` | string[](40 碼小寫 SHA-1) | 預期簽章者;**`draft` 套件(只會派到 pilot 測試機)為空陣列**:Agent 仍須簽章有效(`Valid`)並回報實際簽章者,且**簽章者仍須在本機 `[software] trusted_signers` 內**(本機清單空白不接受任何套件),不採信空清單放行;非空時實際簽章者須同時在此清單與本機 `[software] trusted_signers`(與升級用的 `[upgrade]` 分開) |
 | `detect` | `{ type: "msi_product_code" \| "display_name", value }` | 「已安裝」判斷;`display_name` 為登錄檔 DisplayName 的 `LIKE` 樣式(`%` 萬用字元) |
-| `timeout_sec` | integer | 安裝本身的逾時,預設 1800 |
+| `timeout_sec` | integer | 安裝本身的逾時(秒):套件設定,300–7200,預設 1800(0009;P7 VM 驗收 B-1)。Agent 照下發值執行,沒帶時 1800(0.9.1 以前的主機);0.9.2 起只接受 300–7200,其他 `INVALID_PARAMS`。主機的指令逾時 = 類型的 4 小時 + 超過 1800 的部分 |
 | `reboot_policy` | `never` / `required` | |
 | `ignore_power` | boolean(選填) | 略過電池延後(不略過計量網路) |
 
 - 單台派送也累計(D2-1):同一人 24 小時內 `software.install` / `software.uninstall`(一組)累計涉及的電腦台數 + 這次 > `BATCH_APPROVAL_THRESHOLD`(20)時,該單台指令放進一個**待核可的單台批次**(`CommandView.batchState = pending_approval`,回應仍是 `CommandView`),需第二人核可後才送出;`system.reboot` 另算一組。已由第二人核可的批次不計入累計,已取消的單台照計。
 - 主機檢查(不符就不建立指令):套件存在(`404 ITA_PACKAGE_NOT_FOUND`)、未撤回(`409 ITA_PACKAGE_REVOKED`)、`draft` / `tested` 只能派到 **pilot 環**(`409 ITA_PACKAGE_NOT_PUBLISHED`)、已發佈套件的授權數(`409 ITA_LICENSE_EXCEEDED`)。
-- `result`(序列化後 4,000 字元內;範例 `ws-command-update-software-install.sample.json`):`exit_code`、`reboot_required`、`signer`(實際簽章者 SHA-1 指紋)、`signer_subject`、`duration_ms`、`detected`、`already_installed`、`log_tail`(安裝記錄最後 20 行,經 `logs.collect` 同一套遮罩)。結束代碼 `0` 成功;`3010` / `1641` 成功且 `reboot_required = true`;`1638` 視為 `already_installed`;其餘 `INSTALL_FAILED`。`detect` 已通過時直接 `succeeded` + `already_installed = true`。
+- `result`(序列化後 4,000 字元內;範例 `ws-command-update-software-install.sample.json`):`exit_code`、`reboot_required`、`signer`(實際簽章者 SHA-1 指紋)、`signer_subject`、`duration_ms`、`detected`、`already_installed`、`log_tail`(安裝記錄最後 20 行,經 `logs.collect` 同一套遮罩)。結束代碼 `0` 成功;`3010` / `1641` 成功且 `reboot_required = true`;`1638` 視為 `already_installed`;其餘 `INSTALL_FAILED`。
+  - **版本比對(Agent 0.9.2 起,P7 VM 驗收 B-2)**:`detect` 找到項目時比對登錄檔 DisplayVersion 與快照的 `version`(數字分段比較,段數不同補 0:`24.09` = `24.09.00.0`、`26.05` < `26.05.2`)。較舊 → 繼續安裝(升級),結果帶 `previous_version`;相同或較新 → 直接 `succeeded` + `already_installed = true`;**無法解析(例如沒有 DisplayVersion、`1.2-beta`)→ 保守視為已安裝**(0.9.1 的行為,不重新安裝、不降版),帶 `version_unknown: true`。多個項目符合時任一個相同或較新即算已安裝。結果一律帶 `installed_version`(偵測到的版本,最多 50 字、已去控制字元)。安裝後的登錄檔確認(120 秒)要等到版本相同或較新;仍是舊版 → `DETECT_FAILED`。0.9.1 以前的 Agent 不比對版本、不帶這些欄位。
+  - 安裝後等登錄檔、或逾時後等 Windows Installer 時收到服務停止 / 關機:立即結束(不卡住關機)。前者回 `EXECUTION_FAILED` 且 `result.interrupted = true`(帶 `exit_code`),後者 `INSTALL_TIMEOUT` 訊息註明;結果先寫本機,重啟後補送。重新派送時已安裝會直接 `already_installed`。
 - 測試機(pilot)回報的 `signer` 是 IT 標記 `tested` 的依據:`mark-tested` 填的簽章者必須等於回報值。
 - 安裝檔下載:`GET /agent/v1/packages/{packageId}`(`:9443` mTLS)。只給有**尚未結束**(`sent` / `acked` / `running`)的此套件 `software.install` 的裝置,否則 `404 ITA_PACKAGE_NOT_FOUND`;支援 `Range` / `206`,起點超出檔案 `416`(`Content-Range: bytes */大小`);主機回應前複驗 SHA-256,檔案被換掉 `503 ITA_PACKAGE_CHANGED`、軟體庫讀不到 `503 ITA_PACKAGE_UNAVAILABLE`(稍後重試)。回應標頭 `x-file-sha256` 僅供除錯,**端點以快照的 `sha256` 驗證**。
 
@@ -170,7 +172,7 @@
 
 路徑同 `software.install`(批次 `action: "uninstall"`)。IT 送 `params: { "packageId": "<uuid>" }`,主機換成快照(範例 `ws-command-software-uninstall.sample.json`):`package_id`、`name`、`version`、`installer_type`、`uninstall_args`(同 `install_args` 規則)、`detect`、`timeout_sec`。已撤回的套件仍可移除;`draft` / `tested` 只能對 pilot 環。不檢查授權數。
 
-- `result`:同安裝(`exit_code`、`reboot_required`、`duration_ms`、`log_tail`),另有 `already_absent`(偵測不到項目時直接 `succeeded`)。找不到可用的移除指令 `UNINSTALL_NOT_SUPPORTED`;**監控本身(GigaNexus / RustIt)與防毒 / EDR 不可移除**(Agent 內建清單,符合同回 `UNINSTALL_NOT_SUPPORTED`);移除程式在 Program Files / Windows / `ProgramData\Package Cache` 以外時需通過 ACL 檢查,否則同回 `UNINSTALL_NOT_SUPPORTED`;移除後 120 秒內仍偵測得到 `DETECT_FAILED`。
+- `result`:同安裝(`exit_code`、`reboot_required`、`duration_ms`、`log_tail`),另有 `already_absent`(偵測不到項目時直接 `succeeded`)。移除不比對版本;移除後等項目消失時收到停止 / 關機同安裝(`EXECUTION_FAILED`、`interrupted`)。找不到可用的移除指令 `UNINSTALL_NOT_SUPPORTED`;**監控本身(GigaNexus / RustIt)與防毒 / EDR 不可移除**(Agent 內建清單,符合同回 `UNINSTALL_NOT_SUPPORTED`);移除程式在 Program Files / Windows / `ProgramData\Package Cache` 以外時需通過 ACL 檢查,否則同回 `UNINSTALL_NOT_SUPPORTED`;移除後 120 秒內仍偵測得到 `DETECT_FAILED`。
 
 ### `system.reboot` — 重新開機(P7-3)
 

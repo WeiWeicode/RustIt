@@ -4,6 +4,7 @@
 > **狀態**:2026-10-20 需求方確認 §9 全部:第 2 項依建議(未簽章套件由公司憑證加簽),第 11 項先用需求方自己的本機電腦(開發機)加 VM `RUSTIT-P34`,另一台 IT 同意的電腦之後再補;其餘照建議。可開工 P7-1。
 > **進度(2026-10-21,P7-1 後端完成、待 MR)**:P6 已於 2026-10-21 完成,P7 接續。分支 `feature/p7-1-software-catalog`(worktree `../RustIt-p7-1`)已推到 gitlab / origin,**MR 尚未開**。P7-1 後端實作完成:migration 0008(**只套用整合測試庫 `_poc_test`**)、軟體目錄與兩人覆核、`software.*` / `system.reboot` 指令與參數快照、套件下載、批次第二人核可與累計核可、全域並行上限、三個告警規則;需求方 2026-10-21 決定 D1~D6 全部照建議、資安稽核(重跑)已修大部分項目(§8.1.1)。測試:`npm test` 210/210、`test:int` 13/13、typecheck 通過(報告 `test-reports/2026-10-21-p7-1-backend.md`)。下一步:主工作階段處理 code-reviewer 結果後開 MR(HANDOFF §2 1-6)。
 > **進度(2026-10-22,P7-2 Agent 程式完成、VM 驗收待做)**:P7-1 已合併(MR !50)並上測試區(migration 0008 已套 `giganexus_It_Agent_test`、Gateway OpenAPI v56 已發佈、主機 2 `ita-software` 已唯讀掛載)。P7-2 Agent `software` 模組(0.9.0)完成於分支 `feature/p7-2-agent-software`(最新 `f3af32d`,**MR 尚未開**):`software.install` / `software.uninstall`、A6 電池 / 計量網路延後;已通過 code-reviewer 與 security-auditor 並修正;`cargo test -p rustit-agent` 116/116。需求方 2026-10-22 決定 C2(draft 套件也須在本機 `trusted_signers` 內)、H1、H2、M3(見 §8.1.2);**M3 已完成**(`b9242d6`,`agent.toml` `[software] trusted_signers`)。**P7-3 Agent 端完成**(`system.reboot`、`system.reboot.cancel`、`reboot_policy required`;`8c8a63f`、`b9032d8`、`1b383f7`,見 §8.1.3)。下一步:MSI 0.9.0 發版(建置帶 `-SoftwareSigners`)、開 P7-2 / P7-3 MR、VM 驗收(VM `agent.toml` 的 `[software] trusted_signers` 要加 7-Zip 測試簽章者與 Notepad++ 簽章者指紋)。
+> **進度(2026-10-27,VM 驗收修正、Agent 0.9.2)**:VM 驗收(§8.3)做到 #1、#2 時發現的問題,需求方 2026-10-27 決定先修程式再完整驗收:套件安裝逾時(migration 0009)、舊版升級(版本比對)、上架腳本防呆、禁止 `REMOVE=ALL`、安裝後等待理會關機、GigaItApp 判斷值不預填與發佈按鈕依角色停用。分支 `feature/p7-acceptance-fixes`(RustIt、GigaItApp),細節見 §8.1.4;**migration 0009 只寫未套用測試區**(需求方先看)。
 > 設計當時的現況:Agent 0.7.0、Watchdog 0.2.0(P6-2 已合併 develop);`rustit-common::authenticode`(WinVerifyTrust + 簽章者指紋)與 `agent.toml` `[upgrade] trusted_signers` 已有;`ita.command_batch` 已有 `requires_approval` / `approved_by_*` 欄位(P4 預留、無邏輯);`kindHooks`、批次 `max_concurrent` 補送(`refillBatch`)已有;`ita.device_software`(P3)有每台最新軟體清單;**NAS `RustIT\` 未掛載、軟體目錄與 `software.*` 指令都還沒有**。`RustAgent/crates/demo/src/deploy.rs`(536 行,Firefox / WinRAR 單機版)是移植來源。
 
 ## 0. 分批
@@ -45,6 +46,7 @@ P7-1 先做(後端可單獨用 API 與 curl 驗證);P7-2 依賴 P7-1 的下載�
 | `uninstall_args` | `NVARCHAR(500)` | 靜默移除額外參數(`QuietUninstallString` 不存在時補上,例如 NSIS `/S`、Inno `/VERYSILENT`) |
 | `detect_type` / `detect_value` | `VARCHAR(16)` / `NVARCHAR(400)` | 「已安裝」判斷:`msi_product_code`(`{GUID}`)或 `display_name`(登錄檔 Uninstall 的 DisplayName,`LIKE` 樣式,`%` 為萬用字元)。安裝後確認與移除輪詢都用它;MSI 產品代碼登錄時由 Server 嘗試讀出(失敗則由 IT 填) |
 | `reboot_policy` | `VARCHAR(16)` | `never`(預設,3010 也只標記)/ `required`(已知必須重開機,顯示提示) |
+| `timeout_sec` | `INT` | 安裝 / 移除程式的逾時(秒),300–7200,預設 1800(**0009**,2026-10-27 VM 驗收 B-1;CHECK `ck_software_package_timeout`)。修改不退回 `draft`(不改變執行內容,與授權數、說明相同) |
 | `signer_thumbprints` | `VARCHAR(400)` | 預期簽章者憑證 SHA-1 指紋(逗號分隔,可同時列新舊);`tested` 之前可為 NULL |
 | `observed_signers` | `VARCHAR(400)` | 測試機 Agent 回報的實際簽章者(`software.install` 的 `result.signer`),供 IT 確認後寫入 `signer_thumbprints`(§3.3) |
 | `license_limit` | `INT NULL` | 授權數;NULL = 不限。已安裝數由 `ita.device_software` 比對(§3.4) |
@@ -86,7 +88,7 @@ IT 只送 `{ packageId }`;Server 建立指令時查目錄(必須 `published`,測
 | `installer_type`、`install_args` | 見 §2.3 |
 | `signer_thumbprints` | 預期簽章者;`draft` 套件在測試機上為空 → Agent 仍須簽章有效(`Valid`)、回報實際簽章者,且**簽章者仍須在本機 `[software] trusted_signers` 內**(C2,需求方 2026-10-22 決定,見 §5.2、§8.1.2);**不採信空清單放行**(見 §3.3) |
 | `detect` | `{ type, value }` |
-| `timeout_sec` | 安裝逾時,預設 1800 |
+| `timeout_sec` | 安裝 / 移除逾時:套件的 `timeout_sec`(300–7200,預設 1800;0009)。Agent 照下發值執行,沒帶時 1800(舊主機);主機的指令逾時 = 類型逾時 + 超過 1800 的部分(`commandTimeoutSec`) |
 | `reboot_policy` | |
 
 ### 2.3 安裝參數的限制(防止把「靜默參數」變成任意程式執行)
@@ -197,7 +199,7 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
 ## 4. 軟體庫目錄
 
 - 結構:`software\{軟體}\{版本}\{安裝檔}`,例如 `7-Zip\24.09\7z2409-x64.msi`、`Notepad++\8.7.1\npp.8.7.1.Installer.x64.exe`。IT 直接把測過的安裝檔放進去(不經網頁上傳,避開 Nginx 單檔上限);**每個版本一個資料夾**,登錄後不得覆寫該檔案(覆寫會使雜湊不符 → 下載被拒,需重新登錄新版本)。
-- 正式:NAS `\\10.10.130.31\docker-folder\RustIT\software\`;`endpoint-server` 以 CIFS **唯讀**掛載 `RustIT\`,與 P6 `releases\` 共用同一個掛載(容器內 `/srv/rustit/releases`、`/srv/rustit/software`)。NAS 權限:IT 可寫、`endpoint-server` 帳號唯讀(ADR 0002)。
+- 正式:NAS `\\10.10.130.31\docker-folder\RustIT\software\`;`endpoint-server` 以 CIFS **唯讀**掛載 `RustIT\`,與 P6 `releases\` 共用同一個掛載(容器內 `/srv/rustit/releases`、`/srv/rustit/software`)。**2026-10-27 起兩區分開**(需求方決定,§8.1.4 B-3):測試區 `RustIT\test\software`、`RustIT\test\releases`,正式區 `RustIT\prod\software`、`RustIT\prod\releases`;切換步驟 RUNBOOK §1.1。NAS 權限:IT 可寫、`endpoint-server` 帳號唯讀(ADR 0002)。
 - 測試區在 NAS 帳密到位前:主機 2 `/srv/giganexus/ita-software/`(root 擁有、唯讀 bind mount 到 `SOFTWARE_DIR`),由需求方或 Claude 經 `ssh host2` 複製(§9-3)。**NAS 帳密只給後端**:由需求方執行的機密腳本寫入主機 2 `/srv/giganexus/ita-secrets/`,AI 不經手;Agent 不拿 NAS 帳密、不直接連 NAS。
 - 容量與備份:軟體庫是 IT 工作區,不是唯一副本;安裝檔的原始來源(廠商網址、取得日期)記在 `notes`。
 
@@ -217,11 +219,11 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
 ### 5.2 `software.install` 流程
 
 1. 驗參數(§2.3 字元白名單、`url` 必須是 `/agent/v1/packages/{package_id}`、`size_bytes` ≤ 4 GB)。
-2. **`detect` 已通過 → 直接 `succeeded` + `already_installed = true`**(派送是冪等的;版本差異由 IT 先移除舊版,不做自動升級取代)。
+2. **`detect` 已通過 → 比對版本**(0.9.2 起,2026-10-27 VM 驗收 B-2):登錄檔 DisplayVersion 與快照 `version` 數字分段比較;**較舊 → 繼續安裝(升級)**,相同或較新 → 直接 `succeeded` + `already_installed = true`;無法解析 → 保守視為已安裝(`version_unknown`,0.9.1 的行為)。結果一律帶 `installed_version`,升級時帶 `previous_version`(§8.1.4)。原設計「版本差異由 IT 先移除舊版」只在版本無法比較時仍適用。
 3. **A6 延後**(§5.4)→ 進度 `deferred`。
 4. 下載(進度 `downloading` + 百分比,每 5% 或 5 秒 `command_update`)→ 驗大小與 SHA-256(`HASH_MISMATCH`)→ 驗 Authenticode(`SIGNATURE_INVALID`)→ 簽章者:**主機 `signer_thumbprints` ∩ 本機 `agent.toml` `[software] trusted_signers`**(M3,與升級用的 `[upgrade]` 分開)必須非空且包含實際簽章者(`SIGNER_NOT_TRUSTED`);沿用 P6 的 `signer_allowed`。
 5. 安裝(進度 `installing`):§5.3 命令列,逾時 `timeout_sec`(`INSTALL_TIMEOUT`,Job Object 結束行程樹);1618 重試 3 次(`INSTALL_BUSY`)。
-6. 偵測(進度 `detecting`):輪詢 `detect` 最多 120 秒(`DETECT_FAILED`)。
+6. 偵測(進度 `detecting`):輪詢 `detect` 最多 120 秒,版本要相同或較新(`DETECT_FAILED`);期間收到服務停止 / 關機立即結束(`EXECUTION_FAILED` + `interrupted`,§8.1.4)。
 7. 立即重新蒐集並 `POST /agent/v1/inventory`(不等 24 小時),讓主機的 `device_software` 與 `software_installed` 事件即時反映;失敗只記警告,不影響指令結果。
 8. `succeeded`,`result` 如 §2.4。
 
@@ -407,6 +409,42 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
 - **部署注意**:含 `[software]` 區段的 `agent.toml` 不可給 0.9.0 以前的 Agent 讀(設定結構 `deny_unknown_fields`,舊版會啟動失敗),Agent 版本與設定要一起換。
 - **待辦**:ItAgentBack 新類型(`system.reboot.cancel`)要在 P7-2 MR 合併、部署後才能在 GigaItApp 使用;GigaItApp P7-5 要加「取消重新開機」按鈕。
 
+### 8.1.4 VM 驗收修正(2026-10-27,Agent 0.9.2)
+
+VM 驗收(§8.3)#1、#2 通過時發現的問題(報告 `test-reports/2026-10-22-p7-vm-acceptance.md` §5)。需求方 2026-10-27 決定先修程式、出 Agent 0.9.2,再完整驗收(避免驗兩次)。分支 `feature/p7-acceptance-fixes`(RustIt 從 develop `c1f6d10`;GigaItApp 從 develop `10e5717`)。Watchdog 不改(仍 0.3.5)。
+
+| 編號 | 問題 | 修法 |
+| --- | --- | --- |
+| B-1 | 安裝逾時固定 1800(`INSTALL_TIMEOUT_SEC`),文件寫可調 | 套件加 `timeout_sec`(migration **0009**:`INT NOT NULL DEFAULT 1800`、CHECK 300–7200,既有資料以預設值補 1800);登錄 / 修改 API schema 與服務層都驗範圍(400 `VALIDATION_FAILED`);`software.install` / `software.uninstall` 快照帶套件值;主機指令逾時 `commandTimeoutSec` = 類型逾時(安裝 4 小時、移除 1 小時,以 1800 估算)+ 超過 1800 的部分,較短不縮減;修改逾時不退回 `draft`。Agent 只接受 300–7200(原 60–14,400),沒帶 1800。GigaItApp 登錄 / 修改加欄位 |
+| B-2 | `display_name` 偵測不看版本,舊版不升級 | Agent `install()`:`detect` 找到項目時比對 DisplayVersion(`detect.rs` 純函式 `parse_version` / `compare_versions` / `installed_state`,單元測試含 8.8.9 < 8.9.8、26.05 < 26.05.2、24.09 = 24.09.00.0)。較舊 → 安裝;相同 / 較新 → `already_installed`;多個項目符合時任一個相同或較新即算已安裝。**無法解析(沒有 DisplayVersion、帶後綴如 `1.2-beta`、段數 > 8 或單段 > 9 位)採保守做法:視為已安裝**(不重新安裝、不降版,`version_unknown: true`);理由:版本格式不明時重裝可能反覆安裝或降版,而 0.9.1 本來就是這個行為。安裝後的登錄檔確認(settle)要等到版本相同或較新,仍是舊版 → `DETECT_FAILED`。結果一律帶 `installed_version`(去控制字元、≤ 50 字),升級時帶 `previous_version`;主機套件詳情的測試機結果、GigaItApp 指令結果顯示。移除流程不比對版本(取第一個符合的項目,同 0.9.1) |
+| B-3 | 上架腳本沒擋已登錄過的版本號 | `installer/publish-release.ps1`:見下方「B-3」 |
+| B-4 | 登錄畫面「判斷值」預填套件名稱 | GigaItApp 不預填,加提示(對照測試機登錄檔的 DisplayName、名稱不含版本的建議用 MSI 產品代碼) |
+| B-5 | 沒有全部公司角色的人可按「發佈」 | 套件詳情 API 回 `viewerScopeAll`(查詢者是否有 `ENDPOINT_SCOPE_ALL_ROLES` 角色);GigaItApp 為 `false` 時停用「發佈」並說明原因(code-reviewer 建議:「修改」「撤回」一併停用;舊主機沒有此欄位時不擋,由主機回 403)。實際權限仍由主機檢查 |
+| L2(續) | `REMOVE=ALL` 可把安裝變成移除整個產品 | 併入禁止參數:屬性 `REMOVE` 的值(逗號清單、引號、不分大小寫)含 `ALL` 一律拒絕;`REMOVE={產品代碼}` / 功能名稱仍可用。Agent `args.rs`、ItAgentBack `argsErrors`、契約向量 `install-args.vectors.json` 三處同步 |
+| — | 安裝後等待期間不理會關機 | 新增 `Env::pause`(收到服務停止 / 關機 / `agent.restart` 立即回傳):逾時後等 Windows Installer(最多 10 分鐘)與安裝 / 移除後的登錄檔輪詢(120 秒)都改用它。中斷時:等登錄檔 → `EXECUTION_FAILED` 且 `result.interrupted = true`(帶 `exit_code`);等 Windows Installer → `INSTALL_TIMEOUT`,訊息註明 Agent 停止。結果先寫本機持久化,重啟後補送;重新派送時已安裝會直接 `already_installed` |
+
+**審查(2026-10-27)**:code-reviewer 無必修,建議已處理(修改 / 撤回也依角色停用、逾時沒改就不送、讀登錄檔背景工作異常記警告)。security-auditor:
+
+| 編號 | 內容 | 處理 |
+| --- | --- | --- |
+| M1 | `/v` 黏著寫(`/vREMOVE=ALL`、`/s /v/qn`)以開關形式把參數轉交 msiexec(InstallShield 類),繞過 `REMOVE=ALL` 與整份 MSI 屬性禁止清單(修改前就存在) | **已修**:Inno 以外的類型一律拒絕 `v` 開頭的開關(Agent `args.rs`、ItAgentBack `argsGrammarError`),契約向量補 6 組 |
+| L3 | 主機只信 Agent 的版本字串淨化 | **已修**:套件詳情輸出前 `reportedVersion` 去控制 / 雙向字元、限 50 字 |
+| L1 | 修改逾時不需第二人覆核:單一管理者可把已發佈套件調到 300 秒(大量電腦半安裝)或 7200 秒(佔住串行與並行名額) | **未改,待需求方決定**:需求的決定是「範圍 300–7200」,未提覆核;可選:逾時變更也記入 `editors`(發佈需他人),或調短低於 pilot 實際耗時時退回 draft |
+| L2 | `REMOVE=` 列出全部功能名稱效果等同 `REMOVE=ALL` | **未改,待需求方決定**:需求只禁 `REMOVE=ALL`(契約向量有 `REMOVE={GUID}` 合法案例);可選整個禁止 `REMOVE` 屬性(移除走 `msiexec /x`,不需要它),或維持由覆核者人工判斷 |
+
+**B-3 上架腳本防呆**(`RustAgent/installer/publish-release.ps1`;需求方 2026-10-27 決定):
+
+- **兩區路徑分開**:同一台 NAS,test = `\\10.10.130.31\docker-folder\RustIT\test\releases`、prod = `\\10.10.130.31\docker-folder\RustIT\prod\releases`;不給 `-NasReleasesDir` 時依 `-Environment` 選,給了但與環境不一致(例如 test 指到 `prod\`、或舊的 `RustIT\releases`)就停止(比對不分大小寫、忽略結尾 `\`)。掛載確認預設 `/srv/giganexus/nas-rustit/{環境}/releases`(`-MountCheckDir` 可改,空字串不檢查)。
+- **版本號查重(只查目標區)**:經 ssh 到 `-HostAlias`,在目標區 endpoint-server 容器(test 預設 `giganexus-ita-test-endpoint-server-1`;prod 必須給 `-ServerContainer`)內以應用程式的 SQL 帳號唯讀查 `ita.agent_release`(component + version,**含已撤回**);有就停止。查詢程式碼固定,以 base64 經 ssh / PowerShell / wsl / docker exec 傳遞;密碼只在容器內讀取。查不到(連不上、容器不在、正式區未部署)也停止,除非加 `-SkipRegistryCheck`(印警告)。`-DryRun` 不查。主機的 docker 不在 WSL 時加 `-DockerCmd docker`。
+- **資安稽核(2026-10-27)**:無 Critical / High;遠端指令、JS、SQL 注入都找不到路徑,失敗時停止。已修:查到的資料庫名稱必須屬於目標區(test = `giganexus_It_Agent_test`、prod 不得含 `test`),避免 `-HostAlias` / `-ServerContainer` 指錯區仍通過(M1);錯誤只印代碼,不帶 SQL 帳號 / 主機(L2);版本參數長度 40(L3)。**未修、待需求方決定**:M2 查詢用 endpoint-server 的 SQL 帳號(有寫入權,唯讀只靠程式碼)且簽章人員要能 ssh 進主機以 root 執行 docker——上正式區前建議改走 `GET /api/endpoint/releases`(唯讀 IT 帳號)或只有 SELECT 權的帳號 + 映像內建檢查腳本;L4 NAS `RustIT\test` / `RustIT\prod` 建議設不同寫入群組(路徑分區目前只靠腳本)。
+- **實測(2026-10-27,測試區唯讀)**:watchdog 0.3.3 / 0.3.4 查到 `revoked`(驗收報告 §5-3 的情況會被擋)、agent 0.9.1 `published`、agent 0.9.2 未登錄;容器名稱錯誤時停止。路徑防呆:test→`prod\`、test→舊 `RustIT\releases`、prod→`test\` 都停止。
+- **軟體庫也拆開**(需求方 2026-10-27 補充):test = `RustIT\test\software`、prod = `RustIT\prod\software`。軟體庫的安裝檔由 IT 直接放置(不經上架腳本);compose 預設值改為 `/srv/giganexus/nas-rustit/test/releases`、`/test/software`,`host2-set-nas-credentials.sh` 與 `test.env.example` 一併更新。
+- **切換步驟**(測試區目前讀舊的 `RustIT\releases`、`RustIT\software`;建目錄、複製並比對雜湊、改 `ita.env`、重跑 deploy-test、確認後再處理舊目錄,屬部署步驟,**本分支沒有執行**):RUNBOOK §1.1。
+
+**相容**:新主機 + 0.9.1 Agent:快照的 `timeout_sec` 在 300–7200 內,0.9.1 接受(其範圍 60–14,400);0.9.1 不比對版本、不帶新結果欄位,畫面照舊顯示。0.9.2 Agent + 舊主機:快照固定 1800,照常;主機只存 `result`,新欄位不影響。**部署順序**:先套用 0009,再部署新版 endpoint-server(新版讀寫 `timeout_sec`);0009 未套用時套件查詢失敗。GigaItApp 新欄位在舊主機上不顯示(逾時顯示 1800)。Gateway OpenAPI(請求 `timeoutSec`、回應 `timeoutSec` / `viewerScopeAll` / 測試結果版本欄位)部署後要再發佈草稿批次。
+
+**驗收需重測**:§8.3 全部 12 項以 Agent 0.9.2 重做;另加:#5 以舊版(例如 Notepad++ 8.8.9)派送新版 → 升級成功、`previous_version` 正確;相同版本 → `already_installed` 帶 `installed_version`;#9 以套件 `timeout_sec = 300`(最小值,原寫 30 已不可設)驗 `INSTALL_TIMEOUT`,並在等 Windows Installer 期間停止服務 / 關機,確認立即結束且重啟後補送結果;登錄 `REMOVE=ALL` 被拒;無 `it-admin` 帳號(V112001)看到「發佈」停用與原因。
+
 ### 8.2 風險與已知限制(實作前先看)
 
 1. **全公司任意程式執行**:最高風險功能。防線:目錄第二人覆核、`published` 才能派送、參數字元白名單且不經 shell、簽章者需同時符合主機與本機清單(GPO)、SHA-256、> 20 台第二人核可、全部稽核。
@@ -415,6 +453,10 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
 4. **頻寬**:`SOFTWARE_MAX_CONCURRENT`(20)是軟上限;ADR 0002 估 2,000 台 × 90 MB ≈ 180 GB,NAS 1 GbE 約 30 分鐘,仍需分批與非尖峰時段派送(§9-8)。
 5. **沒有使用者互動**:服務在 session 0,安裝程式若跳視窗會卡住;靠靜默參數與逾時,逾時後 Job Object 結束行程樹。已知不靜默的軟體在 `draft` 測試機階段就會失敗,不會進 `tested`。
 6. **7-Zip 官方 MSI 未簽章**(實作時再確認當時版本):依 §9-2 由 IT 以公司憑證簽章後登錄;測試期用 P6 的測試簽章憑證(`new-test-signing-cert.ps1`)簽章。
+7. **定期複驗在沒有排隊中安裝時不發告警**(需求方 2026-10-27 決定不改):`verifyFiles`(M1)發現軟體庫安裝檔被換掉或不見時,告警 `software_file_tampered` 開在「被取消安裝的裝置」上;該套件當下沒有排隊中的安裝時,只記日誌並拒絕之後的新安裝指令,畫面不會出現告警。
+8. **`listPackages` 最多 500 筆**(需求方 2026-10-27 決定不改):軟體目錄清單與「尚未登錄的安裝檔」比對都只取前 500 筆(依名稱);超過時清單不完整,且第 501 筆以後已登錄的檔案會被當成未登錄列出(登錄時仍會因重複回 409)。
+9. **版本無法解析的軟體不會自動升級**(§8.1.4 B-2 的保守做法):DisplayVersion 空白或帶非數字後綴時視為已安裝,IT 需先移除再安裝,或改用可比較的偵測規則。
+10. **套件的「版本」要與安裝程式寫入的 DisplayVersion 同格式**(§8.1.4 B-2):例如套件填 `2024.1`、登錄檔寫 `24.1`,安裝後確認會判為「仍是舊版」回 `DETECT_FAILED`,之後每次派送都會重裝。登錄前先在測試機確認 DisplayVersion(登錄畫面已提示);pilot 測試會發現。
 
 ### 8.3 測試區 VM 驗收步驟(草案,`RUSTIT-P34` + 另 2 台 IT 同意的電腦;VM 內指令由需求方執行)
 
