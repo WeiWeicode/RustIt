@@ -39,7 +39,7 @@
 | 8 | 安裝中斷線 | **通過** | `RustIt-TestInst-B`(`/reg /sleep=120`),約 60 秒中斷 VM 網路(需求方操作,起訖時間未精確記錄):成功、結束代碼 0、耗 121 秒,指令紀錄只有一筆(requestId `2f4207429fe2`) |
 | 9 | 逾時 | **通過** | `RustIt-TestInst-C`(`/reg /sleep=400`、`timeout_sec` 300):14:17 → 14:22 `INSTALL_TIMEOUT`「300 秒仍未結束,已結束安裝程式的行程樹;Windows Installer 已沒有進行中的安裝」(requestId `f69afb8fe145`);VM 無 `rustit-testinst` 殘留進程;登錄檔項目已被寫入(程式先 `/reg` 再 sleep),見 §6 |
 | 10 | 3010 | **通過** | `RustIt-TestInst-A`(`/reg /exit=3010`):成功、「安裝完成,結束代碼 3010」+「需要重新開機」+「偵測到已安裝」(requestId `0827622360f1`);VM 未自動重開(`reboot_policy=never`) |
-| 11 | A6 電池 / 計量網路 | **部分通過** | `RUSTIT_TEST_POWER=battery` 下派 A:事件停在「執行中」、無 staging 下載;移除旗標後對照派送 2 秒成功(requestId `f518a6c8bddf`)。**恢復後繼續**無法驗證(見 §5-3);`DEFERRED_TIMEOUT`(4 小時)、計量網路未實測 |
+| 11 | A6 電池 / 計量網路 | **部分通過** | `battery`:派 A 後事件停在「執行中」、無 staging 下載;移除旗標後對照派送 2 秒成功(requestId `f518a6c8bddf`)。`metered`(15:37~15:39):派 A 不略過(15:37:09)與勾「略過電池延後」(`ignore_power = true`,15:38:06)兩筆都停在「執行中」,**略過開關不略過計量網路**,符合設計;旗標清除並重啟 Agent 後兩筆皆 `EXECUTION_FAILED`「Agent 在執行期間停止,未完成」(第二筆 requestId `ad221acf2f1e`、commandId `8b63916f-564e-45e4-94e1-a62f0aa89d0c`)。**恢復後繼續**無法驗證(見 §5-3);`DEFERRED_TIMEOUT`(4 小時)未實測 |
 | 12 | 批次 21 台核可 | **未驗證** | 測試區電腦清單只有 2 台,門檻 > 20 台無法達成;補驗需 21 台測試資料(動資料庫)或更多機器 |
 
 ## 4. 0.9.2 新行為
