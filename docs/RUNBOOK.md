@@ -11,7 +11,7 @@
 | 0. 版本號 | 開發者 | 改 `RustAgent/crates/agent/Cargo.toml` / `watchdog/Cargo.toml` 的 `version`(Agent 與 Watchdog 各自的版本,semver),合併 `develop` 後在 `main` 建 tag `rustit-v<Agent 版本>`(Maintainer) |
 | 1. 建置 | CI(Windows Runner) | tag 觸發 `build:release`(或在 pipeline 手動執行):產出 `release-out/`,**未簽章**:`agent\<版本>\rustit-agent.exe`、`watchdog\<版本>\rustit-watchdog.exe`、`SHA256SUMS.txt`、`RELEASE-INFO.txt`。MSI 因為設定隨部署區寫入,在開發機以 `installer\build-agent-msi.ps1` 另外建置(或 `build-release.ps1 -Env …`) |
 | 2. 核對與簽章 | 簽章人員(**自己的電腦**) | 下載 artifact 解壓成 `C:\release-out`,執行 `powershell -ExecutionPolicy Bypass -File RustAgent\installer\sign-release.ps1 -Dir C:\release-out -Thumbprint <正式憑證指紋>`。腳本先核對每個檔案的雜湊與 `SHA256SUMS.txt`(對不上就整批中止),再 `signtool sign /fd SHA256 /tr <時間戳記> /td SHA256`、`signtool verify /pa`,輸出 `SHA256SUMS.signed.txt` 與 `SIGNED-INFO.txt` |
-| 3. 上架 | 簽章人員 | `powershell -ExecutionPolicy Bypass -File RustAgent\installer\publish-release.ps1 -Dir C:\release-out -Environment <test|prod>`(必填;先加 `-DryRun` 看會做什麼。`prod` 拒絕測試憑證、要求時間戳記,且要指定 `-NasReleasesDir` 與正式區主機 `-HostAlias`)。執行前先以有 NAS `RustIT` 寫入權的帳號連上 NAS(`net use`)。腳本從本機以 SMB 寫入 NAS 版本檔目錄 `RustIT\releases\{元件}\{版本}\{檔名}`(test 預設測試區 NAS),重算 SHA-256 比對;**不覆蓋既有版本檔**。放好後經 ssh 以主機的唯讀掛載再算一次雜湊,確認 endpoint-server 讀得到(主機只唯讀掛載,不能經主機寫入;NAS 之前的主機本機目錄改用 `-HostDir`)。**只放有新版本號的元件**:同一版本號重新建置的檔案內容不同,會被拒絕(`REFUSE`,結束碼非 0,中止前已放好的不回滾);例如只改 Agent 時 CI 也會建一份未改版本的 Watchdog,上架前把它從 `SHA256SUMS.signed.txt` 拿掉,或確認被拒的只有它 |
+| 3. 上架 | 簽章人員 | `powershell -ExecutionPolicy Bypass -File RustAgent\installer\publish-release.ps1 -Dir C:\release-out -Environment <test|prod>`(必填;先加 `-DryRun` 看會做什麼。`prod` 拒絕測試憑證、要求時間戳記,且要指定正式區主機 `-HostAlias` 與 endpoint-server 容器 `-ServerContainer`)。執行前先以有 NAS `RustIT` 寫入權的帳號連上 NAS(`net use`)。**上架前先查目標區版本表**:經 ssh 在 endpoint-server 容器內唯讀查 `ita.agent_release`,同一元件同一版本號登錄過(**含已撤回**)就停止,要換新版本號重建;查不到(連不上、正式區未部署)也停止,確定沒登錄過才加 `-SkipRegistryCheck`。腳本從本機以 SMB 寫入 NAS 版本檔目錄 `RustIT\{test|prod}\releases\{元件}\{版本}\{檔名}`(同一台 NAS 兩區分開,依 `-Environment` 選;給的 `-NasReleasesDir` 與環境不一致、或是舊的 `RustIT\releases` 就停止),重算 SHA-256 比對;**不覆蓋既有版本檔**。放好後經 ssh 以主機的唯讀掛載再算一次雜湊,確認 endpoint-server 讀得到(主機只唯讀掛載,不能經主機寫入;NAS 之前的主機本機目錄改用 `-HostDir`)。**只放有新版本號的元件**:同一版本號重新建置的檔案內容不同,會被拒絕(`REFUSE`,結束碼非 0,中止前已放好的不回滾);例如只改 Agent 時 CI 也會建一份未改版本的 Watchdog,上架前把它從 `SHA256SUMS.signed.txt` 拿掉,或確認被拒的只有它 |
 | 4. 登錄 | IT 管理員 | GigaItApp「端點管理 › 電腦清單 › Agent 版本」→「登錄版本」:挑檔案、填預期簽章者指紋(`SIGNED-INFO.txt` 的 `signer_thumbprint`)。登錄後是**草稿**,SHA-256 與大小由主機計算 |
 | 5. pilot | IT 管理員 | 發佈環表把 `pilot` 環的目標設為新版(草稿可以);確認 pilot 的測試機(所屬環 `pilot`)升級成功、運作正常,至少觀察 24 小時 |
 | 6. 發佈與推進 | IT 管理員 | 版本清單「發佈」→ 依序把 `it`、`all` 環設為新版。`pilot` 未滿 24 小時就推進會被擋,確認後才能 `force`(寫入稽核)。同時升級台數有上限(`RELEASE_MAX_CONCURRENT`),其餘電腦下次上報再排 |
@@ -25,6 +25,20 @@
 - 簽章在簽章人員的電腦執行,**CI 與 Runner 沒有私鑰**;不要把憑證或私鑰放進 CI 變數、repo 或 Runner。
 - 一旦簽過的版本檔就不要重建同版本號:要修東西就升版本號(版本檔目錄不允許覆蓋既有版本)。
 - 簽章者換憑證時,新版本登錄時把新舊指紋並列在「預期簽章者」,並確認端點本機信任清單(`agent.toml [upgrade] trusted_signers`,由 MSI 或 GPO 寫入)也有新指紋,否則端點會以 `SIGNER_NOT_TRUSTED` 拒絕。軟體派送的套件另用 `[software] trusted_signers`(§4)。
+
+### 1.1 版本檔目錄切換為 test / prod 分開(B-3,需求方 2026-10-27;**部署步驟,由主討論串安排執行**)
+
+上架腳本(`feature/p7-acceptance-fixes` 起)只接受 `RustIT\test\releases`(測試區)與 `RustIT\prod\releases`(正式區);測試區目前讀的是舊的 `RustIT\releases`(主機 2 fstab 把 `//10.10.130.31/docker-folder/RustIT` 掛在 `/srv/giganexus/nas-rustit`,`ita.env` 的 `ITA_RELEASES_HOST_DIR=/srv/giganexus/nas-rustit/releases`)。切換前不要用新腳本上架測試區。`software\` 是否也拆 test / prod **尚未決定,先不動**(`ITA_SOFTWARE_HOST_DIR` 照舊)。
+
+1. **建立目錄並複製**(有 NAS `RustIT` 寫入權的帳號,在自己的電腦):`New-Item -ItemType Directory \\10.10.130.31\docker-folder\RustIT\test\releases, \\10.10.130.31\docker-folder\RustIT\prod\releases`;`robocopy \\10.10.130.31\docker-folder\RustIT\releases \\10.10.130.31\docker-folder\RustIT\test\releases /E /COPY:DT /XO /R:2 /W:5`(只複製到 test;prod 從空的開始,正式版本以正式憑證另行上架)。
+2. **比對雜湊**:兩邊逐檔比對相對路徑與 SHA-256,完全一致才繼續:`function H($r) { Get-ChildItem -Recurse -File -LiteralPath $r | % { '{0} {1}' -f $_.FullName.Substring($r.Length), (Get-FileHash -LiteralPath $_.FullName).Hash } }`;`Compare-Object (H '\10.10.130.31\docker-folder\RustIT\releases') (H '\10.10.130.31\docker-folder\RustIT\test\releases')` 沒有輸出。另抽查與 `ita.agent_release.sha256`(GigaItApp「Agent 版本」清單)一致。
+3. **主機 2 確認唯讀掛載讀得到**:`ssh host2 "wsl -u root -e sh -c 'ls /srv/giganexus/nas-rustit/test/releases && sha256sum /srv/giganexus/nas-rustit/test/releases/agent/*/rustit-agent.exe'"`,雜湊與步驟 2 相同(掛載的是 `RustIT` 整個目錄,不用改 fstab)。
+4. **改 `ita.env`**(主機 2 `/srv/giganexus/deploy/ita.env`,非機密):`ITA_RELEASES_HOST_DIR=/srv/giganexus/nas-rustit/test/releases`;`ITA_SOFTWARE_HOST_DIR` 不改。改前先備份(`cp ita.env ita.env.bak-<日期>`)。
+5. **重新部署 endpoint-server**:重跑測試區 CI 的 `deploy-test`(或依 RUNBOOK 部署指令 `docker compose ... up -d endpoint-server`,讀新的 `ita.env`);確認 `docker exec <容器> ls /srv/releases/agent` 看得到版本目錄。
+6. **驗證**:GigaItApp「Agent 版本」既有版本的下載不受影響(pilot 測試機 `agent.upgrade` 或 Watchdog 定期上報取得目標,下載 200、雜湊相符);新腳本 `-Environment test -DryRun` 不再報路徑不一致。
+7. **舊目錄**:確認一段時間沒問題後,由需求方決定是否刪除 `RustIT\releases`(需 NAS 寫入帳號;刪除前先備份)。回滾:`ita.env` 改回 `.../nas-rustit/releases` 並重新部署。
+
+正式區(主機 3)部署時直接使用 `RustIT\prod\releases`(掛載方式與主機 2 相同時為 `/srv/giganexus/nas-rustit/prod/releases`;不同時上架加 `-MountCheckDir`)。
 
 ## 2. 版本回滾
 

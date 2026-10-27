@@ -432,7 +432,13 @@ VM 驗收(§8.3)#1、#2 通過時發現的問題(報告 `test-reports/2026-10-22
 | L1 | 修改逾時不需第二人覆核:單一管理者可把已發佈套件調到 300 秒(大量電腦半安裝)或 7200 秒(佔住串行與並行名額) | **未改,待需求方決定**:需求的決定是「範圍 300–7200」,未提覆核;可選:逾時變更也記入 `editors`(發佈需他人),或調短低於 pilot 實際耗時時退回 draft |
 | L2 | `REMOVE=` 列出全部功能名稱效果等同 `REMOVE=ALL` | **未改,待需求方決定**:需求只禁 `REMOVE=ALL`(契約向量有 `REMOVE={GUID}` 合法案例);可選整個禁止 `REMOVE` 屬性(移除走 `msiexec /x`,不需要它),或維持由覆核者人工判斷 |
 
-**B-3 上架腳本防呆**:(待主討論串確認 UNC 對照與版本表查詢方式後補)
+**B-3 上架腳本防呆**(`RustAgent/installer/publish-release.ps1`;需求方 2026-10-27 決定):
+
+- **兩區路徑分開**:同一台 NAS,test = `\\10.10.130.31\docker-folder\RustIT\test\releases`、prod = `\\10.10.130.31\docker-folder\RustIT\prod\releases`;不給 `-NasReleasesDir` 時依 `-Environment` 選,給了但與環境不一致(例如 test 指到 `prod\`、或舊的 `RustIT\releases`)就停止(比對不分大小寫、忽略結尾 `\`)。掛載確認預設 `/srv/giganexus/nas-rustit/{環境}/releases`(`-MountCheckDir` 可改,空字串不檢查)。
+- **版本號查重(只查目標區)**:經 ssh 到 `-HostAlias`,在目標區 endpoint-server 容器(test 預設 `giganexus-ita-test-endpoint-server-1`;prod 必須給 `-ServerContainer`)內以應用程式的 SQL 帳號唯讀查 `ita.agent_release`(component + version,**含已撤回**);有就停止。查詢程式碼固定,以 base64 經 ssh / PowerShell / wsl / docker exec 傳遞;密碼只在容器內讀取。查不到(連不上、容器不在、正式區未部署)也停止,除非加 `-SkipRegistryCheck`(印警告)。`-DryRun` 不查。主機的 docker 不在 WSL 時加 `-DockerCmd docker`。
+- **實測(2026-10-27,測試區唯讀)**:watchdog 0.3.3 / 0.3.4 查到 `revoked`(驗收報告 §5-3 的情況會被擋)、agent 0.9.1 `published`、agent 0.9.2 未登錄;容器名稱錯誤時停止。路徑防呆:test→`prod\`、test→舊 `RustIT\releases`、prod→`test\` 都停止。
+- **切換步驟**(測試區目前讀舊的 `RustIT\releases`,搬檔案與改主機 2 設定屬部署步驟,本分支沒有執行):RUNBOOK §1.1。
+- **待決定**:`software\` 是否也拆成 `test\software` / `prod\software`(目前不動,`ITA_SOFTWARE_HOST_DIR` 照舊)。
 
 **相容**:新主機 + 0.9.1 Agent:快照的 `timeout_sec` 在 300–7200 內,0.9.1 接受(其範圍 60–14,400);0.9.1 不比對版本、不帶新結果欄位,畫面照舊顯示。0.9.2 Agent + 舊主機:快照固定 1800,照常;主機只存 `result`,新欄位不影響。**部署順序**:先套用 0009,再部署新版 endpoint-server(新版讀寫 `timeout_sec`);0009 未套用時套件查詢失敗。GigaItApp 新欄位在舊主機上不顯示(逾時顯示 1800)。Gateway OpenAPI(請求 `timeoutSec`、回應 `timeoutSec` / `viewerScopeAll` / 測試結果版本欄位)部署後要再發佈草稿批次。
 

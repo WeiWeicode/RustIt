@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。本檔自 P7-2 起記錄 `RustAgent/` 的修改,先前的 Agent 變更記在 `NewFeatures.md` / `BugFix.md`。
 
+## 2026-10-27 P7 VM 驗收 B-3:上架腳本查版本表、test / prod 版本檔目錄分開
+- 內容:需求方 2026-10-27 決定(設計 §8.1.4 B-3)。`installer/publish-release.ps1`:(1)同一台 NAS 兩區路徑分開,test = `RustIT	esteleases`、prod = `RustIT\prodeleases`,依 `-Environment` 選預設,給的 `-NasReleasesDir` 不一致(含舊的 `RustITeleases`)就停止;掛載確認預設 `/srv/giganexus/nas-rustit/{環境}/releases`。(2)上架前經 ssh 在目標區 endpoint-server 容器內唯讀查 `ita.agent_release`(含已撤回),同版本號已登錄就停止;查不到也停止,除非 `-SkipRegistryCheck`;新參數 `-ServerContainer`(prod 必填)、`-DockerCmd`。RUNBOOK §1 步驟 3 更新、新增 §1.1 測試區切換步驟(複製、雜湊比對、改 `ita.env`、重新部署;**本分支未執行**,交主討論串)。`software\` 是否拆 test / prod 待決定,未動。
+- 檔案:`RustAgent/installer/publish-release.ps1`、`docs/RUNBOOK.md`、`docs/P7-SOFTWARE-DESIGN.md` §8.1.4。
+- 驗證:PowerShell 剖析無錯誤;路徑防呆以假目錄 `-DryRun` 實測(test→prod\、test→舊 releases、prod→test\ 都停止,結尾 `\` 可接受);版本表查詢以 AST 取出函式對測試區唯讀實測(watchdog 0.3.4 → revoked、agent 0.9.2 未登錄、容器名稱錯誤 → 停止)。未實際上架(測試區尚未切換到 `testeleases`)。
+
 ## 2026-10-27 P7 VM 驗收修正:版本比對升級、套件逾時、安裝後等待理會關機、禁止 REMOVE=ALL 與 /v 轉交(0.9.2)
 - 內容:VM 驗收(設計 §8.3)#1、#2 時發現的問題,需求方 2026-10-27 決定先修再完整驗收;細節見設計 §8.1.4。分支 `feature/p7-acceptance-fixes`(從 develop `c1f6d10`)。
   - B-2:`software/detect.rs` 新增純函式 `parse_version` / `compare_versions` / `installed_state`(數字分段比較,段數不同補 0;多個項目任一個相同或較新即已安裝);`install()` 找到項目時較舊就安裝(升級)、相同或較新回 `already_installed`、**無法解析保守視為已安裝**(`version_unknown`,0.9.1 行為);安裝後輪詢要等版本到位,否則 `DETECT_FAILED`;結果帶 `installed_version`、升級時 `previous_version`(`clean_version` 去控制字元、≤ 50 字)。`Env::find` 改回傳全部符合的項目,移除流程取第一個、不比對版本。
