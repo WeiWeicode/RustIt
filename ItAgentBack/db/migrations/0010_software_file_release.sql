@@ -9,5 +9,6 @@
 ALTER TABLE ita.software_package DROP CONSTRAINT uq_software_package_file;
 GO
 -- 篩選索引(與 0006 ux_device_alert_open 相同做法;寫入的連線需 ANSI_NULLS / QUOTED_IDENTIFIER ON,mssql 驅動預設即是)
+-- 條件明確列出受限的狀態:ck_software_package_status 新增狀態時要檢查這個條件(新狀態預設不受唯一限制)
 CREATE UNIQUE INDEX ux_software_package_file_active ON ita.software_package (file_name) WHERE status IN ('draft', 'tested', 'published');
 GO
