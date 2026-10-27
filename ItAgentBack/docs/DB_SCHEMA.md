@@ -1,6 +1,6 @@
 # ItAgentBack 資料結構
 
-> 對應 `db/migrations/0001_init.sql`、`0002_sync_event.sql`(PLATFORM-PLAN P2)、`0003_command.sql`(P4)、`0004`(P3 軟體)、`0005`(E6 公司)、`0006_monitor.sql`(P5 監測)、`0007_release.sql`(P6 升級)、`0008_software.sql`(P7 軟體派送)。原則(INTEGRATION-PLAN §3.1):**SQL Server 是唯一真相**;MongoDB 與 Redis 只放可重建的資料。
+> 對應 `db/migrations/0001_init.sql`、`0002_sync_event.sql`(PLATFORM-PLAN P2)、`0003_command.sql`(P4)、`0004`(P3 軟體)、`0005`(E6 公司)、`0006_monitor.sql`(P5 監測)、`0007_release.sql`(P6 升級)、`0008_software.sql`(P7 軟體派送)、`0009_software_timeout.sql`(P7 套件安裝逾時)。原則(INTEGRATION-PLAN §3.1):**SQL Server 是唯一真相**;MongoDB 與 Redis 只放可重建的資料。
 > SQL Server 2012(`DATABASE.md` §0):無 JSON 函式、無 `CREATE OR ALTER`;JSON 由 ItAgentBack 組 / 解,需要查詢的值拆成獨立欄位。時間一律 UTC。
 
 ## 1. SQL Server(schema `ita`)
@@ -102,6 +102,7 @@ Agent 回報(0002,`POST /agent/v1/events`;`event.schema.json`):`offline_period`�
 - `signer_thumbprints`(預期簽章者 SHA-1 指紋,逗號分隔;`tested` 之前為 NULL)、`observed_signers`(標記 `tested` 時從 pilot 測試機回報的 `result.signer` 寫入;IT 填的預期簽章者必須在其中)、`license_limit`(NULL = 不限;只做派送時的上限檢查,以 `device_software.name LIKE detect_value` 計數,必須是 `display_name` 偵測)。
 - `status`:`draft` → `tested` → `published` → `revoked`,一律條件更新;tested / published 改到安裝參數或偵測規則時退回 `draft`(清除 `signer_thumbprints`、`tested_*`、`published_*`)。撤回時同一交易把此套件 `queued` 的 `software.install` 改 `canceled`(`error_code = PACKAGE_REVOKED`);退回 `draft` 時同一交易把尚未送出(`queued`,含待核可批次)的 `software.install` / `software.uninstall` 舊快照改 `canceled`(`PACKAGE_CHANGED`);安裝檔被換掉時 `cancelQueuedInstalls` 取消排隊中的安裝(`PACKAGE_FILE_CHANGED`)。
 - 稽核欄位:`created_by_*` / `created_at`、`updated_by_emp` / `updated_at`、`tested_by_emp` / `tested_at`、`published_by_emp` / `published_by_name` / `published_at`、`revoked_by_emp` / `revoked_at`、`request_id`。`editors`(NVARCHAR(1000),逗號分隔工號):上次發佈以來改過安裝參數 / 偵測規則 / 重開機政策的人;已發佈後再修改會重設為此人(D2-2)。`revoked_from`(VARCHAR(16)):撤回前的狀態,只有從 `published` 撤回的套件可對所有電腦派送移除,未曾發佈就撤回的只限 pilot(資安稽核 C1)。**兩人覆核**:發佈人不可是 `created_by_emp`、也不可在 `editors` 內;發佈的 UPDATE 條件同此,另有 CHECK `ck_software_package_reviewer`(`published_by_emp IS NULL OR (published_by_emp <> created_by_emp AND CHARINDEX(',' + published_by_emp + ',', ',' + ISNULL(editors, '') + ',') = 0)`)。
+- `timeout_sec`(INT,0009,P7 VM 驗收 B-1):Agent 執行安裝 / 移除程式的逾時(秒),`NOT NULL DEFAULT 1800`、CHECK `ck_software_package_timeout`(300–7200);既有套件以預設值補 1800。快照 `software.install` / `software.uninstall` 的 `timeout_sec` 取此值,主機的指令逾時依此加寬(`commandTimeoutSec`)。修改不退回 `draft`。**部署順序:先套用 0009,再部署新版 endpoint-server**。
 - 指令與套件的關聯:`ita.command.params` 的目錄快照含 `"package_id":"<uuid>"`(SQL 2012 無 JSON 函式,以 `LIKE` 比對;快照由主機產生,格式固定)。下載授權查這台 `software.install` 且 `state IN ('sent','acked','running')` 的 `params`。
 - **部署順序:先套用 0008,再部署新版 endpoint-server**:新版的指令查詢都會讀 `command_batch.state`(未套用時所有指令 API 失敗);`SOFTWARE_DIR` 未設定時軟體 API 與套件下載不註冊。
 

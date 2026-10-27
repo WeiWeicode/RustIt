@@ -284,6 +284,13 @@ fn grammar_error(v: &str, kind: Option<Installer>) -> Option<String> {
                 .or_else(|| name.strip_prefix(['/', '-']))
                 .unwrap_or(name);
             let sw_name = sw.split(':').next().unwrap_or(sw);
+            // InstallShield 等會把 /v 後面緊接的內容原樣交給 msiexec(/vREMOVE=ALL、/v/qn):
+            // Inno 以外一律不接受 v 開頭的開關(Inno 的 /VERYSILENT 是正常開關;2026-10-27 資安 M1)
+            if kind != Some(Installer::Inno) && sw_name.starts_with(['v', 'V']) {
+                return Some(format!(
+                    "不可使用 {name}(v 開頭的開關可能把參數轉交 msiexec)"
+                ));
+            }
             if banned_switch(sw_name) {
                 return Some(format!(
                     "不可使用 {name}(會讀寫外部檔案、轉交其他安裝程式或改變安裝方式)"
@@ -310,6 +317,14 @@ fn grammar_error(v: &str, kind: Option<Installer>) -> Option<String> {
                 return Some(format!(
                     "不可設定 {name}(讀外部檔案、改變安裝方式或隱藏安裝)"
                 ));
+            }
+            // REMOVE=ALL 會把安裝變成移除整個產品(L2;REMOVE={產品代碼} / 功能名稱仍可用)
+            if name.eq_ignore_ascii_case("REMOVE")
+                && value
+                    .split(',')
+                    .any(|x| x.trim().eq_ignore_ascii_case("ALL"))
+            {
+                return Some(format!("不可設定 {name}=ALL(會移除整個產品)"));
             }
             if let Some(e) = value_error(value) {
                 return Some(e.into());

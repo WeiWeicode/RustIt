@@ -114,6 +114,9 @@ function argsGrammarError(v: string, installerType: InstallerType | undefined): 
       if (installerType === 'msi') return 'MSI 只接受「屬性=值」;/qn /norestart 與記錄檔由 Agent 加上';
       const sw = name.replace(/^(--|[/-])/, '');
       const swName = sw.split(':')[0]!;
+      // InstallShield 等會把 /v 後面緊接的內容原樣交給 msiexec(/vREMOVE=ALL、/v/qn):
+      // Inno 以外一律不接受 v 開頭的開關(Inno 的 /VERYSILENT 是正常開關;2026-10-27 資安 M1)
+      if (installerType !== 'inno' && /^v/i.test(swName)) return `不可使用 ${name}(v 開頭的開關可能把參數轉交 msiexec)`;
       if (BANNED_SWITCH.test(swName)) return `不可使用 ${name}(會讀寫外部檔案、轉交其他安裝程式或改變安裝方式)`;
       if (RESTART_SWITCH.test(swName)) return `不可使用 ${name}(重開機由 Agent 依重開機政策處理,只允許 /norestart 這類)`;
       if (installerType !== 'inno' && installerType !== 'nsis' && WRITE_SWITCH.test(swName)) return `不可使用 ${name}(可能以 SYSTEM 寫檔)`;
@@ -123,6 +126,8 @@ function argsGrammarError(v: string, installerType: InstallerType | undefined): 
     } else if (m[2] !== undefined) {
       if (!PROP_NAME.test(name)) return `屬性名稱 ${name} 不正確`;
       if (BANNED_PROPS.test(name)) return `不可設定 ${name}(讀外部檔案、改變安裝方式或隱藏安裝)`;
+      // REMOVE=ALL 會把安裝變成移除整個產品(L2;REMOVE={產品代碼} / 功能名稱仍可用)
+      if (/^REMOVE$/i.test(name) && value.split(',').some((x) => x.trim().toUpperCase() === 'ALL')) return `不可設定 ${name}=ALL(會移除整個產品)`;
       const err = argsValueError(value);
       if (err) return err;
     } else {
@@ -140,8 +145,10 @@ export const MSI_PRODUCT_CODE_RE = /^\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]
 const DISPLAY_NAME_RE = /^[^\u0000-\u001F\u007F-\u009F‎‏‪-‮⁦-⁩]{1,400}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const SIGNER_RE = /^[0-9a-f]{40}$/;
-/** 安裝逾時(Agent 端;指令整體逾時 4 小時含下載,§2.1) */
-export const INSTALL_TIMEOUT_SEC = 1800;
+/** 套件的安裝逾時(秒;Agent 執行安裝 / 移除程式,0009;P7 VM 驗收 B-1):範圍與預設。主機的指令逾時依此加寬(commands/kinds.ts commandTimeoutSec) */
+export const TIMEOUT_MIN_SEC = 300;
+export const TIMEOUT_MAX_SEC = 7200;
+export const DEFAULT_TIMEOUT_SEC = 1800;
 /** 下載稽核事件:同一台同一套件多久記一次 */
 const DOWNLOAD_EVENT_MS = 3_600_000;
 /** 同一台同時下載上限(資安稽核 L5;Agent 依序執行,1 條 + 斷線後重試時上一條尚未關閉) */
@@ -172,6 +179,12 @@ export function detectErrors(type: DetectType, value: string): Field[] {
   if (!DISPLAY_NAME_RE.test(value)) return [{ field: 'detectValue', message: 'DisplayName 樣式需 1–400 字、單行、不含控制字元' }];
   if (value.replace(/%/g, '').trim().length < 3) return [{ field: 'detectValue', message: 'DisplayName 樣式至少要有 3 個 % 以外的字元' }];
   return [];
+}
+
+/** Agent 回報的版本字串(畫面顯示):去掉控制字元與雙向文字控制字元、最多 50 字;非字串回 null(Agent 已淨化,主機再做一次;資安 L3) */
+export function reportedVersion(v: unknown): string | null {
+  if (typeof v !== 'string') return null;
+  return v.replace(/[\u0000-\u001F\u007F-\u009F\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '').slice(0, 50);
 }
 
 /** 純函式:DisplayName 樣式轉 SQL LIKE(% 保留為萬用字元,其餘萬用字元跳脫,搭配 ESCAPE '\\') */
@@ -205,7 +218,7 @@ export function installSnapshot(pkg: PackageRecord, opts: { ignorePower?: boolea
     // draft 在測試機上為空:Agent 仍須簽章有效並回報實際簽章者,不採信空清單放行(§2.2、§5.2)
     signer_thumbprints: pkg.signerThumbprints,
     detect: { type: pkg.detectType, value: pkg.detectValue },
-    timeout_sec: INSTALL_TIMEOUT_SEC,
+    timeout_sec: pkg.timeoutSec,
     reboot_policy: pkg.rebootPolicy,
     ...(opts.ignorePower ? { ignore_power: true } : {}),
   };
@@ -232,7 +245,7 @@ export function uninstallSnapshot(pkg: PackageRecord): Record<string, unknown> {
     installer_type: pkg.installerType,
     uninstall_args: pkg.uninstallArgs ?? '',
     detect: { type: pkg.detectType, value: pkg.detectValue },
-    timeout_sec: INSTALL_TIMEOUT_SEC,
+    timeout_sec: pkg.timeoutSec,
   };
 }
 
@@ -275,6 +288,7 @@ export interface PackageView {
   detectType: DetectType;
   detectValue: string;
   rebootPolicy: RebootPolicy;
+  timeoutSec: number;
   signerThumbprints: string[];
   observedSigners: string[];
   licenseLimit: number | null;
@@ -309,6 +323,7 @@ export function packageView(p: PackageRecord, installedCount: number | null): Pa
     detectType: p.detectType,
     detectValue: p.detectValue,
     rebootPolicy: p.rebootPolicy,
+    timeoutSec: p.timeoutSec,
     signerThumbprints: p.signerThumbprints,
     observedSigners: p.observedSigners,
     licenseLimit: p.licenseLimit,
@@ -339,12 +354,14 @@ export interface RegisterPackageInput {
   detectType: DetectType;
   detectValue: string;
   rebootPolicy?: RebootPolicy;
+  /** 安裝逾時(秒,300–7200;省略 = 1800) */
+  timeoutSec?: number;
   licenseLimit?: number | null;
   notes?: string;
 }
 
 export type UpdatePackageInput = Partial<
-  Pick<RegisterPackageInput, 'installArgs' | 'uninstallArgs' | 'detectType' | 'detectValue' | 'rebootPolicy' | 'notes'>
+  Pick<RegisterPackageInput, 'installArgs' | 'uninstallArgs' | 'detectType' | 'detectValue' | 'rebootPolicy' | 'timeoutSec' | 'notes'>
 > & {
   licenseLimit?: number | null;
 };
@@ -431,6 +448,7 @@ export class SoftwareService {
     detectType: DetectType;
     detectValue: string;
     licenseLimit: number | null;
+    timeoutSec: number;
   }): void {
     const errors = [
       ...argsErrors('installArgs', f.installArgs, f.installerType),
@@ -438,6 +456,9 @@ export class SoftwareService {
     // 授權數以 device_software 的 DisplayName 計數;P3 的軟體清單沒有 MSI 產品代碼(§3.4、§9-10)
     if (f.licenseLimit !== null && f.detectType !== 'display_name')
       errors.push({ field: 'licenseLimit', message: '設定授權數時偵測規則需為 display_name(MSI 產品代碼無法計算已安裝台數)' });
+    // 路由 schema 已驗範圍;服務層再驗一次(B-1)
+    if (!Number.isInteger(f.timeoutSec) || f.timeoutSec < TIMEOUT_MIN_SEC || f.timeoutSec > TIMEOUT_MAX_SEC)
+      errors.push({ field: 'timeoutSec', message: `安裝逾時需為 ${TIMEOUT_MIN_SEC}–${TIMEOUT_MAX_SEC} 秒的整數` });
     if (errors.length) throw new AppError(400, 'VALIDATION_FAILED', '軟體套件欄位不正確', errors);
   }
 
@@ -490,6 +511,7 @@ export class SoftwareService {
       detectType: input.detectType,
       detectValue: input.detectValue.trim(),
       licenseLimit: input.licenseLimit ?? null,
+      timeoutSec: input.timeoutSec ?? DEFAULT_TIMEOUT_SEC,
     };
     this.validateFields(fields);
     const f = await this.files.resolve(fileName);
@@ -526,6 +548,7 @@ export class SoftwareService {
       detectType: input.detectType ?? pkg.detectType,
       detectValue: input.detectValue !== undefined ? input.detectValue.trim() : pkg.detectValue,
       licenseLimit: input.licenseLimit !== undefined ? input.licenseLimit : pkg.licenseLimit,
+      timeoutSec: input.timeoutSec ?? pkg.timeoutSec,
     };
     this.validateFields(next);
     const reviewed =
@@ -541,6 +564,8 @@ export class SoftwareService {
       detectType: next.detectType,
       detectValue: next.detectValue,
       licenseLimit: next.licenseLimit,
+      // 逾時不改變執行的內容,不需重新覆核(與授權數、說明相同)
+      timeoutSec: next.timeoutSec,
       ...(input.rebootPolicy !== undefined ? { rebootPolicy: input.rebootPolicy } : {}),
       ...(input.notes !== undefined ? { notes: trimOrNull(input.notes) } : {}),
       argsChanged: reviewed,
@@ -549,7 +574,7 @@ export class SoftwareService {
     const ok = await this.sqlDo(ctx, 'package.update', () => this.store.updatePackage(packageId, pkg.status, patch, actorOf(who), this.now(), ctx.requestId));
     if (!ok) throw new AppError(409, 'ITA_PACKAGE_STATUS', '套件狀態已被變更,請重新整理');
     // 稽核:受覆核欄位的新舊值(目錄規定不得含機密,§5.6;資安稽核 M4)
-    const changed = (['installArgs', 'uninstallArgs', 'detectType', 'detectValue', 'rebootPolicy', 'licenseLimit'] as const).filter(
+    const changed = (['installArgs', 'uninstallArgs', 'detectType', 'detectValue', 'rebootPolicy', 'licenseLimit', 'timeoutSec'] as const).filter(
       (k) => patch[k] !== undefined && patch[k] !== pkg[k],
     );
     ctx.log.info(
@@ -592,6 +617,8 @@ export class SoftwareService {
     };
     return {
       ...packageView(pkg, counts[0] ?? null),
+      // 查詢者可否變更軟體目錄(全部公司角色,§9-5):畫面據此停用發佈等按鈕並說明原因(P7 VM 驗收 B-5);實際檢查仍在各動作
+      viewerScopeAll: ctx.scope.all,
       testResults: rows
         .filter((r) => r.ring === 'pilot' && inScope(ctx.scope, r.deviceCompany))
         .map((r) => {
@@ -606,6 +633,10 @@ export class SoftwareService {
             signer: typeof res?.signer === 'string' ? res.signer : null,
             signerSubject: typeof res?.signer_subject === 'string' ? res.signer_subject : null,
             detected: typeof res?.detected === 'boolean' ? res.detected : null,
+            // Agent 0.9.2 起:偵測到的版本(安裝後 / 已安裝時)與安裝前偵測到的舊版(B-2)
+            installedVersion: reportedVersion(res?.installed_version),
+            previousVersion: reportedVersion(res?.previous_version),
+            alreadyInstalled: typeof res?.already_installed === 'boolean' ? res.already_installed : null,
             /** 可作為 mark-tested 依據(快照與目前目錄一致) */
             qualifies: qualifying.has(r.commandId),
             createdByEmp: r.createdByEmp,

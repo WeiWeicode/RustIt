@@ -5,11 +5,11 @@
 //! | `software.install` 步驟 | 進度 | 失敗代碼 |
 //! | --- | --- | --- |
 //! | 驗參數(白名單、`url` 固定、大小上限) | — | `INVALID_PARAMS` |
-//! | `detect` 已通過 → 直接成功 `already_installed`(派送是冪等的) | — | — |
+//! | `detect` 已通過且 DisplayVersion 相同或較新 → 直接成功 `already_installed`(派送是冪等的);較舊 → 繼續安裝(升級,0.9.2) | — | — |
 //! | 下載(續傳、本機快取)→ 驗大小與 SHA-256([`download`]) | 0–80% | `DISK_FULL` / `DOWNLOAD_FAILED` / `HASH_MISMATCH` |
 //! | 複製到 `staging\{commandId}\`,**在目的地**再驗 SHA-256 → Authenticode → 簽章者(主機清單 ∩ 本機 `trusted_signers`) | 82% | `HASH_MISMATCH` / `SIGNATURE_INVALID` / `SIGNER_NOT_TRUSTED` |
 //! | 寫死的命令列、Job Object、逾時結束行程樹;1618 每 60 秒重試 3 次([`install`]) | 85% | `INSTALL_TIMEOUT` / `INSTALL_BUSY` / `INSTALL_FAILED` |
-//! | 登錄檔輪詢 120 秒([`detect`]) | 95% | `DETECT_FAILED` |
+//! | 登錄檔輪詢 120 秒,版本需到位([`detect::installed_state`]);期間收到停止 / 關機立即結束 | 95% | `DETECT_FAILED` / `EXECUTION_FAILED`(`interrupted`) |
 //! | 立即重新蒐集資產(失敗只記警告)、刪除安裝檔與 staging | 100% | — |
 //!
 //! `draft` 套件(只派到 pilot 測試機)的 `signer_thumbprints` 為空:簽章仍須有效,回報實際簽章者供 IT 標記 `tested`,不比對清單(§5.2)。
@@ -27,6 +27,7 @@ pub mod power;
 pub mod uninstall;
 
 use crate::Shared;
+use detect::Installed;
 use download::{DlError, Fetched};
 use install::{CmdLine, Exit};
 use log::{info, warn};
@@ -38,9 +39,11 @@ use std::time::{Duration, Instant};
 
 /// 安裝檔大小上限(與主機 SOFTWARE_MAX_BYTES 預設相同,不信任主機宣告)
 pub const MAX_SIZE: u64 = 4 * 1024 * 1024 * 1024;
-/// 安裝逾時預設與上限(指令整體逾時 4 小時含下載)
+/// 安裝逾時:快照的 `timeout_sec`(套件設定,主機 0009 範圍 300–7200);沒帶時 1800(0.9.1 以前的主機)
 pub const DEFAULT_TIMEOUT_SEC: u64 = 1800;
-const TIMEOUT_RANGE: std::ops::RangeInclusive<u64> = 60..=14_400;
+const TIMEOUT_RANGE: std::ops::RangeInclusive<u64> = 300..=7200;
+/// 結果中版本字串的長度上限(DisplayVersion 由安裝程式寫入,不信任)
+const VERSION_MAX: usize = 50;
 /// 1618(另一個安裝進行中)重試
 pub const BUSY_RETRIES: u32 = 3;
 pub const BUSY_WAIT: Duration = Duration::from_secs(60);
@@ -235,7 +238,7 @@ fn parse_common(
         v => v
             .as_u64()
             .filter(|s| TIMEOUT_RANGE.contains(s))
-            .ok_or_else(|| invalid("timeout_sec 需 60–14400"))?,
+            .ok_or_else(|| invalid("timeout_sec 需 300–7200"))?,
     };
     Ok((
         package_id,
@@ -332,8 +335,8 @@ pub fn parse_uninstall(p: &Value) -> Result<Uninstall, Failure> {
 /// 流程需要的外部操作(正式為登錄檔 / mTLS 下載 / WinVerifyTrust / Job Object,測試用假實作)
 #[allow(async_fn_in_trait)]
 pub trait Env {
-    /// 整台電腦的登錄檔中第一個符合 `detect` 的項目
-    async fn find(&self, d: &Detect) -> Option<UninstallEntry>;
+    /// 整台電腦的登錄檔中所有符合 `detect` 的項目(登錄檔順序)
+    async fn find(&self, d: &Detect) -> Vec<UninstallEntry>;
     /// 建立目錄並確認安全:SYSTEM / Administrators 專用 ACL、不是連結(junction / 符號連結)
     fn prepare_dir(&self, dir: &Path) -> Result<(), String>;
     fn free_bytes(&self, dir: &Path) -> Result<u64, String>;
@@ -352,6 +355,8 @@ pub trait Env {
     fn check_uninstaller(&self, path: &Path) -> Result<(), String>;
     fn msiexec(&self) -> PathBuf;
     async fn sleep(&self, d: Duration);
+    /// 等待 `d`;期間收到停止 / 關機訊號立即回 true(安裝後等待用,不卡住關機)
+    async fn pause(&self, d: Duration) -> bool;
     /// 回報 `running` 與進度百分比
     fn progress(&self, pct: u8);
     /// 立即重新蒐集並回報資產(失敗只記警告)
@@ -553,10 +558,14 @@ async fn run_installer(
                     format!(
                         "超過 {} 秒仍未結束,已結束安裝程式的行程樹;{}",
                         timeout.as_secs(),
-                        if settled {
-                            "Windows Installer 已沒有進行中的安裝"
-                        } else {
-                            "Windows Installer 在 10 分鐘內仍有安裝進行中,下一筆安裝可能遇到 1618"
+                        match settled {
+                            Settle::Done => "Windows Installer 已沒有進行中的安裝",
+                            Settle::Busy => {
+                                "Windows Installer 在 10 分鐘內仍有安裝進行中,下一筆安裝可能遇到 1618"
+                            }
+                            Settle::Stopped => {
+                                "等待 Windows Installer 結束時 Agent 停止(服務停止或關機),未確認安裝是否仍在進行"
+                            }
                         }
                     ),
                 ));
@@ -578,31 +587,107 @@ pub fn download_permanent(status: Option<u16>, code: Option<&str>, rejected: boo
     }
 }
 
-/// 等 Windows Installer 沒有進行中的安裝(最多 [`SETTLE_MAX`]);回傳是否已結束
-async fn settle(env: &impl Env) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Settle {
+    /// Windows Installer 已沒有進行中的安裝
+    Done,
+    /// 等到上限仍在執行
+    Busy,
+    /// 等待期間收到停止 / 關機
+    Stopped,
+}
+
+/// 等 Windows Installer 沒有進行中的安裝(最多 [`SETTLE_MAX`]);收到停止 / 關機立即結束(不卡住關機)
+async fn settle(env: &impl Env) -> Settle {
     let mut waited = Duration::ZERO;
     while env.installer_busy() {
         if waited >= SETTLE_MAX {
             warn!("安裝逾時後 Windows Installer 仍在執行,不再等待");
-            return false;
+            return Settle::Busy;
         }
-        env.sleep(SETTLE_POLL).await;
+        if env.pause(SETTLE_POLL).await {
+            warn!("等待 Windows Installer 結束時收到停止訊號,不再等待");
+            return Settle::Stopped;
+        }
         waited += SETTLE_POLL;
     }
-    true
+    Settle::Done
 }
 
-/// 輪詢到「有 / 沒有」該項目為止;回傳是否達成
-async fn poll_detect(env: &impl Env, d: &Detect, present: bool) -> bool {
+/// 輪詢期間收到停止 / 關機
+struct Stopped;
+
+/// 移除後輪詢到項目消失為止;回傳是否達成。收到停止 / 關機回 `Err(Stopped)`
+async fn poll_absent(env: &impl Env, d: &Detect) -> Result<bool, Stopped> {
     for i in 0..DETECT_POLLS {
-        if env.find(d).await.is_some() == present {
-            return true;
+        if env.find(d).await.is_empty() {
+            return Ok(true);
         }
-        if i + 1 < DETECT_POLLS {
-            env.sleep(DETECT_INTERVAL).await;
+        if i + 1 < DETECT_POLLS && env.pause(DETECT_INTERVAL).await {
+            return Err(Stopped);
         }
     }
-    false
+    Ok(false)
+}
+
+/// 安裝後輪詢到「版本已到位」(相同或較新;版本無法比較時找得到即可)為止,回傳最後一次的狀態。
+/// 收到停止 / 關機回 `Err(Stopped)`
+async fn poll_installed(env: &impl Env, p: &Install) -> Result<Installed, Stopped> {
+    let mut state = Installed::Absent;
+    for i in 0..DETECT_POLLS {
+        state = detect::installed_state(&env.find(&p.detect).await, &p.version);
+        if matches!(state, Installed::Current(_) | Installed::Unknown(_)) {
+            return Ok(state);
+        }
+        if i + 1 < DETECT_POLLS && env.pause(DETECT_INTERVAL).await {
+            return Err(Stopped);
+        }
+    }
+    Ok(state)
+}
+
+/// DisplayVersion 放進結果前:去掉控制字元與雙向文字控制字元、限長(安裝程式寫入的值,GigaItApp 會顯示)
+fn clean_version(v: &str) -> String {
+    v.chars()
+        .filter(|c| !unsafe_text(&c.to_string()))
+        .take(VERSION_MAX)
+        .collect()
+}
+
+/// 已安裝相同 / 較新(或無法比較)版本:不安裝,直接成功
+fn already_installed(p: &Install, version: &str, unknown: bool, started: Instant) -> Value {
+    info!(
+        "{} {} 已安裝(偵測到版本 {version}{}),不重新安裝",
+        p.name,
+        p.version,
+        if unknown { ",無法比較版本" } else { "" }
+    );
+    let mut r = json!({
+        "already_installed": true,
+        "detected": true,
+        "installed_version": clean_version(version),
+        "reboot_required": false,
+        "duration_ms": elapsed_ms(started),
+    });
+    if unknown {
+        r["version_unknown"] = json!(true);
+    }
+    r
+}
+
+/// 停止 / 關機中斷了安裝 / 移除後的確認:回 EXECUTION_FAILED 並保留結果(先寫本機,重啟後補送);
+/// 重新派送時,已安裝會直接回 already_installed
+fn interrupted(what: &str, code: u32, mut result: Value) -> Failure {
+    result["interrupted"] = json!(true);
+    with_result(
+        fail(
+            "EXECUTION_FAILED",
+            format!(
+                "{what}程式已結束(結束代碼 {code}),確認登錄檔期間 Agent 停止(服務停止或關機),未確認結果;請重新派送確認"
+            ),
+        ),
+        result,
+    )
 }
 
 fn with_result(mut f: Failure, result: Value) -> Failure {
@@ -720,15 +805,16 @@ pub async fn install(
     if !is_uuid(command_id) {
         return Err(invalid("command_id 需 UUID"));
     }
-    if env.find(&p.detect).await.is_some() {
-        info!("{} {} 已安裝,不重新安裝", p.name, p.version);
-        return Ok(json!({
-            "already_installed": true,
-            "detected": true,
-            "reboot_required": false,
-            "duration_ms": elapsed_ms(started),
-        }));
-    }
+    // B-2(0.9.2):找到項目時比對版本;較舊就安裝(升級),相同、較新或無法比較(保守,見 detect)才不安裝
+    let previous = match detect::installed_state(&env.find(&p.detect).await, &p.version) {
+        Installed::Absent => None,
+        Installed::Older(v) => {
+            info!("{} 已安裝較舊的版本 {v},安裝 {} 升級", p.name, p.version);
+            Some(clean_version(&v))
+        }
+        Installed::Current(v) => return Ok(already_installed(p, &v, false, started)),
+        Installed::Unknown(v) => return Ok(already_installed(p, &v, true, started)),
+    };
     let unsafe_dir = |e: String| {
         fail(
             "EXECUTION_FAILED",
@@ -782,6 +868,9 @@ pub async fn install(
     if let Some(t) = &tail {
         result["log_tail"] = json!(t);
     }
+    if let Some(v) = &previous {
+        result["previous_version"] = json!(v);
+    }
     if !matches!(code, 0 | 3010 | 1641 | 1638) {
         result["duration_ms"] = json!(elapsed_ms(started));
         return Err(with_result(
@@ -790,15 +879,33 @@ pub async fn install(
         ));
     }
     env.progress(95);
-    let detected = poll_detect(env, &p.detect, true).await;
+    let Ok(state) = poll_installed(env, p).await else {
+        result["detected"] = json!(false);
+        result["duration_ms"] = json!(elapsed_ms(started));
+        return Err(interrupted("安裝", code, result));
+    };
+    let (detected, version) = match &state {
+        Installed::Current(v) | Installed::Unknown(v) => (true, v.as_str()),
+        Installed::Older(v) => (false, v.as_str()),
+        Installed::Absent => (false, ""),
+    };
     result["detected"] = json!(detected);
+    result["installed_version"] = json!(clean_version(version));
+    if matches!(state, Installed::Unknown(_)) {
+        result["version_unknown"] = json!(true);
+    }
     result["duration_ms"] = json!(elapsed_ms(started));
     if !detected {
-        return Err(with_result(
-            fail(
-                "DETECT_FAILED",
-                format!("安裝程式結束代碼 {code},但 120 秒內登錄檔找不到符合 detect 的項目"),
+        let why = match &state {
+            Installed::Older(v) => format!(
+                "120 秒內登錄檔的版本仍是 {},未達 {}",
+                clean_version(v),
+                p.version
             ),
+            _ => "120 秒內登錄檔找不到符合 detect 的項目".to_string(),
+        };
+        return Err(with_result(
+            fail("DETECT_FAILED", format!("安裝程式結束代碼 {code},但{why}")),
             result,
         ));
     }
@@ -822,7 +929,8 @@ pub async fn uninstall(
     if !is_uuid(command_id) {
         return Err(invalid("command_id 需 UUID"));
     }
-    let Some(entry) = env.find(&p.detect).await else {
+    // 移除不比對版本(B-2 只改安裝):第一個符合的項目
+    let Some(entry) = env.find(&p.detect).await.into_iter().next() else {
         info!("{} {} 未安裝,不需移除", p.name, p.version);
         return Ok(json!({
             "already_absent": true,
@@ -867,7 +975,10 @@ pub async fn uninstall(
         ));
     }
     env.progress(90);
-    let gone = poll_detect(env, &p.detect, false).await;
+    let Ok(gone) = poll_absent(env, &p.detect).await else {
+        result["duration_ms"] = json!(elapsed_ms(started));
+        return Err(interrupted("移除", code, result));
+    };
     result["duration_ms"] = json!(elapsed_ms(started));
     if !gone {
         return Err(with_result(
@@ -890,14 +1001,17 @@ pub(crate) struct RealEnv {
 }
 
 impl Env for RealEnv {
-    async fn find(&self, d: &Detect) -> Option<UninstallEntry> {
+    async fn find(&self, d: &Detect) -> Vec<UninstallEntry> {
         let d = d.clone();
+        // 背景工作異常時視為找不到(會安裝);記警告,避免無聲誤判(B-2 之後找不到 = 安裝)
         tokio::task::spawn_blocking(move || {
-            detect::find(rustit_collector::machine_uninstall_entries(), &d)
+            detect::find_all(rustit_collector::machine_uninstall_entries(), &d)
         })
         .await
-        .ok()
-        .flatten()
+        .unwrap_or_else(|e| {
+            warn!("讀取登錄檔 Uninstall 項目的背景工作異常,視為找不到:{e}");
+            Vec::new()
+        })
     }
 
     fn prepare_dir(&self, dir: &Path) -> Result<(), String> {
@@ -998,6 +1112,10 @@ impl Env for RealEnv {
 
     async fn sleep(&self, d: Duration) {
         tokio::time::sleep(d).await
+    }
+
+    async fn pause(&self, d: Duration) -> bool {
+        rustit_common::stop::wait(d, &mut self.shared.stop_signal()).await
     }
 
     fn progress(&self, pct: u8) {

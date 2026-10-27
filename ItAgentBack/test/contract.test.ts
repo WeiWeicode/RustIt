@@ -223,6 +223,7 @@ describe('資料契約範例', () => {
       detectType: (install.detect as { type: string }).type,
       detectValue: (install.detect as { value: string }).value,
       rebootPolicy: install.reboot_policy,
+      timeoutSec: Number(install.timeout_sec),
       signerThumbprints: install.signer_thumbprints,
     } as unknown as PackageRecord;
     assert.deepEqual(installSnapshot(pkg), install);

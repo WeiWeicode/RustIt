@@ -16,7 +16,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { GatewayIdentity } from '@giganexus/backend-sdk';
-import { EXPIRES_MAX_SEC, EXPIRES_MIN_SEC, kindOf, paramErrors, SOFTWARE_KINDS, type CommandKind } from '../commands/kinds.js';
+import { commandTimeoutSec, EXPIRES_MAX_SEC, EXPIRES_MIN_SEC, kindOf, paramErrors, SOFTWARE_KINDS, type CommandKind } from '../commands/kinds.js';
 import { AppError, storageUnavailable } from '../errors.js';
 import type {
   BatchRecord,
@@ -900,8 +900,7 @@ export class CommandDispatcher {
     const patch: CommandPatch = { state: target, at };
     if (body.progress !== undefined) patch.progress = body.progress;
     if (target === 'acked' || target === 'running') {
-      const def = kindOf(cmd.kind);
-      patch.timeoutAt = new Date(at.getTime() + (def?.timeoutSec ?? 600) * 1000);
+      patch.timeoutAt = new Date(at.getTime() + commandTimeoutSec(cmd.kind, cmd.params) * 1000);
     }
     if (isFinal(target)) {
       if (body.result !== undefined) {

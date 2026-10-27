@@ -41,7 +41,7 @@ const isDuplicateKey = (err: unknown) => [2627, 2601].includes((err as { number?
 export const packageParamLike = (packageId: string) => `%"package\\_id":"${packageId.toLowerCase()}"%`;
 
 const COLS = `id, package_id, name, version, file_name, sha256, size_bytes, installer_type, install_args, uninstall_args, detect_type, detect_value,
-  reboot_policy, signer_thumbprints, observed_signers, license_limit, status, notes, created_by_emp, created_by_name, created_at, updated_by_emp, updated_at,
+  reboot_policy, timeout_sec, signer_thumbprints, observed_signers, license_limit, status, notes, created_by_emp, created_by_name, created_at, updated_by_emp, updated_at,
   editors, tested_by_emp, tested_at, published_by_emp, published_by_name, published_at, revoked_by_emp, revoked_at, revoked_from`;
 
 function toPackage(r: Row): PackageRecord {
@@ -59,6 +59,7 @@ function toPackage(r: Row): PackageRecord {
     detectType: String(r.detect_type) as DetectType,
     detectValue: String(r.detect_value),
     rebootPolicy: String(r.reboot_policy) as RebootPolicy,
+    timeoutSec: Number(r.timeout_sec),
     signerThumbprints: list(r.signer_thumbprints),
     observedSigners: list(r.observed_signers),
     licenseLimit: r.license_limit == null ? null : Number(r.license_limit),
@@ -127,6 +128,7 @@ export class SqlSoftwareStore implements SoftwareStore {
         .input('dtype', sql.VarChar(16), n.detectType)
         .input('dval', sql.NVarChar(400), n.detectValue)
         .input('reboot', sql.VarChar(16), n.rebootPolicy)
+        .input('tmo', sql.Int, n.timeoutSec)
         .input('lic', sql.Int, n.licenseLimit)
         .input('notes', sql.NVarChar(1000), cut(n.notes, 1000))
         .input('emp', sql.NVarChar(64), cut(n.actor.emp, 64))
@@ -134,8 +136,8 @@ export class SqlSoftwareStore implements SoftwareStore {
         .input('at', sql.DateTime2(3), n.at)
         .input('req', sql.VarChar(64), cut(n.requestId, 64)).query(`
           INSERT INTO ita.software_package (package_id, name, version, file_name, sha256, size_bytes, installer_type, install_args, uninstall_args,
-            detect_type, detect_value, reboot_policy, license_limit, status, notes, created_by_emp, created_by_name, created_at, request_id)
-          VALUES (@pid, @name, @ver, @file, @sha, @size, @itype, @iargs, @uargs, @dtype, @dval, @reboot, @lic, 'draft', @notes, @emp, @ename, @at, @req)`);
+            detect_type, detect_value, reboot_policy, timeout_sec, license_limit, status, notes, created_by_emp, created_by_name, created_at, request_id)
+          VALUES (@pid, @name, @ver, @file, @sha, @size, @itype, @iargs, @uargs, @dtype, @dval, @reboot, @tmo, @lic, 'draft', @notes, @emp, @ename, @at, @req)`);
     } catch (err) {
       if (isDuplicateKey(err)) throw new AppError(409, 'ITA_PACKAGE_EXISTS', `${n.name} ${n.version} 或檔案 ${n.fileName} 已登錄`);
       throw err;
@@ -163,6 +165,7 @@ export class SqlSoftwareStore implements SoftwareStore {
     if (p.detectType !== undefined) set('detect_type', 'dtype', sql.VarChar(16), p.detectType);
     if (p.detectValue !== undefined) set('detect_value', 'dval', sql.NVarChar(400), p.detectValue);
     if (p.rebootPolicy !== undefined) set('reboot_policy', 'reboot', sql.VarChar(16), p.rebootPolicy);
+    if (p.timeoutSec !== undefined) set('timeout_sec', 'tmo', sql.Int, p.timeoutSec);
     if (p.licenseLimit !== undefined) set('license_limit', 'lic', sql.Int, p.licenseLimit);
     if (p.notes !== undefined) set('notes', 'notes', sql.NVarChar(1000), cut(p.notes, 1000));
     // 上次發佈以來的修改人:已發佈的套件被修改(退回 draft)時重設;否則加入(右側欄位為更新前的值)

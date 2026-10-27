@@ -12,11 +12,13 @@ import { afterEach, beforeEach, describe, it } from 'node:test';
 import { loadGatewayEnv, loadMonitorEnv, type GatewayIdentity } from '@giganexus/backend-sdk';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { buildAgentApp } from '../src/agent-app.js';
+import { commandTimeoutSec } from '../src/commands/kinds.js';
 import { buildMgmtApp } from '../src/mgmt-app.js';
 import { APPROVAL_WINDOW_MS } from '../src/services/command-dispatcher.js';
 import { SoftwareFiles, splitSoftwarePath } from '../src/services/software-files.js';
 import {
   argsErrors,
+  reportedVersion,
   deployDenied,
   detectErrors,
   displayNameLike,
@@ -53,6 +55,7 @@ const pkg = (p: Partial<PackageRecord> = {}): PackageRecord => ({
   detectType: 'display_name',
   detectValue: '7-Zip%',
   rebootPolicy: 'never',
+  timeoutSec: 1800,
   signerThumbprints: [],
   observedSigners: [],
   licenseLimit: null,
@@ -76,6 +79,40 @@ const pkg = (p: Partial<PackageRecord> = {}): PackageRecord => ({
 });
 
 describe('參數白名單、偵測規則、軟體庫路徑(純函式)', () => {
+  it('B-1:主機的指令逾時(commandTimeoutSec):software.* 依快照 timeout_sec 加寬,其他類型不變', () => {
+    assert.equal(commandTimeoutSec('software.install', { timeout_sec: 1800 }), 4 * 3600);
+    assert.equal(commandTimeoutSec('software.install', JSON.stringify({ timeout_sec: 7200 })), 4 * 3600 + 5400);
+    assert.equal(commandTimeoutSec('software.install', { timeout_sec: 300 }), 4 * 3600, '較短不縮減');
+    assert.equal(commandTimeoutSec('software.install', { timeout_sec: 999999 }), 4 * 3600 + 5400, '超過上限以 7200 計');
+    assert.equal(commandTimeoutSec('software.install', '{not json'), 4 * 3600);
+    assert.equal(commandTimeoutSec('software.install', {}), 4 * 3600, '舊快照沒有 timeout_sec');
+    assert.equal(commandTimeoutSec('software.uninstall', { timeout_sec: 3600 }), 3600 + 1800);
+    assert.equal(commandTimeoutSec('system.reboot', { timeout_sec: 7200 }), 1800, '非軟體派送不看 timeout_sec');
+    assert.equal(commandTimeoutSec('unknown.kind', {}), 600);
+  });
+
+  it('L2:REMOVE=ALL(安裝變成移除整個產品)一律拒絕;REMOVE={產品代碼} / 功能名稱可用', () => {
+    for (const [t, bad] of [
+      ['msi', 'REMOVE=ALL'],
+      ['msi', 'remove=all'],
+      ['msi', 'REMOVE="ALL"'],
+      ['msi', 'ALLUSERS=1 REMOVE=Feature1,ALL'],
+      ['burn', 'REMOVE=ALL'],
+      [undefined, 'REMOVE=All'],
+    ] as const)
+      assert.equal(argsErrors('installArgs', bad, t).length, 1, `應拒絕:${bad}`);
+    assert.deepEqual(argsErrors('uninstallArgs', 'REMOVE=ALL', 'msi').length, 1, '移除參數也拒絕');
+    assert.deepEqual(argsErrors('installArgs', 'REMOVE=Feature1', 'msi'), []);
+    assert.deepEqual(argsErrors('installArgs', 'REMOVE=ALLFEATURES', 'msi'), [], '只擋 ALL 本身');
+    // 資安 M1:/v 黏著把參數轉交 msiexec;Inno 的 /VERYSILENT 不受影響
+    for (const bad of ['/s /vREMOVE=ALL', '-vREMOVE=ALL', '/s /v/qn']) assert.equal(argsErrors('installArgs', bad, 'exe').length, 1, `應拒絕:${bad}`);
+    assert.deepEqual(argsErrors('installArgs', '/VERYSILENT /NORESTART', 'inno'), []);
+    // 資安 L3:Agent 回報的版本字串去控制 / 雙向字元並限長
+    assert.equal(reportedVersion('8.9‮8'), '8.98');
+    assert.equal(reportedVersion('1'.repeat(80))?.length, 50);
+    assert.equal(reportedVersion(5), null);
+  });
+
   it('安裝參數:白名單字元、長度、不可指到其他檔案、不可含機密', () => {
     assert.deepEqual(argsErrors('installArgs', 'ALLUSERS=1 INSTALLDIR="C:/Program Files/7-Zip" /norestart'), []);
     assert.deepEqual(argsErrors('installArgs', ''), []);
@@ -231,7 +268,7 @@ describe('軟體目錄、覆核與派送(SoftwareService + CommandDispatcher)', 
     return env.commands.onUpdate(ctx, d.id, {
       command_id: commandId,
       state: 'succeeded',
-      result: { exit_code: 0, reboot_required: false, signer, signer_subject: 'CN=Example', detected: true, already_installed: false },
+      result: { exit_code: 0, reboot_required: false, signer, signer_subject: 'CN=Example', detected: true, already_installed: false, installed_version: '24.09.00.0', previous_version: '21.07' },
     });
   };
   const addDevice = async (cn: string, n: number) => env.service.identify(ctx, `O=GigaNexus Dev,CN=${cn}`, n.toString(16).padStart(40, '0'));
@@ -265,7 +302,39 @@ describe('軟體目錄、覆核與派送(SoftwareService + CommandDispatcher)', 
       code: 'VALIDATION_FAILED',
     });
     await assert.rejects(register({ version: '4', fileName: '../x/7z.msi' }), { code: 'VALIDATION_FAILED' });
+    // B-1:安裝逾時 300–7200 秒(登錄省略 = 1800)
+    assert.equal(r.timeoutSec, 1800);
+    for (const timeoutSec of [299, 7201, 1800.5]) await assert.rejects(register({ version: '5', timeoutSec }), { code: 'VALIDATION_FAILED' }, `逾時 ${timeoutSec}`);
     assert.deepEqual((await env.software.unregisteredFiles(ctx)).items, []);
+  });
+
+  it('B-1:安裝逾時寫入快照(安裝與移除);修改逾時不退回 draft;主機的指令逾時依套件逾時加寬', async () => {
+    const r = await register({ timeoutSec: 300 });
+    await online(pilot);
+    const a = await install(pilot, r.packageId);
+    assert.equal((a.params as { timeout_sec: number }).timeout_sec, 300);
+    // 300 不縮減類型的 4 小時(含下載)
+    await env.commands.onUpdate(ctx, pilot.id, { command_id: a.commandId, state: 'acked' });
+    const acked = env.commandStore.commands.find((c) => c.commandId === a.commandId)!;
+    assert.equal(acked.timeoutAt!.getTime() - acked.ackedAt!.getTime(), 4 * 3600 * 1000);
+    await succeed(pilot, a.commandId);
+    // B-2:詳情的測試機結果顯示 Agent 偵測到的版本
+    const tr = (await env.software.get(ctx, r.packageId)).testResults[0]!;
+    assert.deepEqual([tr.installedVersion, tr.previousVersion, tr.alreadyInstalled], ['24.09.00.0', '21.07', false]);
+    // B-5:畫面依此停用發佈
+    assert.equal((await env.software.get(ctx, r.packageId)).viewerScopeAll, true);
+    assert.equal((await env.software.get({ ...ctx, scope: only('甲公司') }, r.packageId)).viewerScopeAll, false);
+    await env.software.markTested(ctx, IT, r.packageId, [PKG_SIGNER]);
+    const u = await env.software.update(ctx, IT, r.packageId, { timeoutSec: 7200 });
+    assert.deepEqual([u.status, u.timeoutSec], ['tested', 7200], '逾時不需重新覆核');
+    await assert.rejects(env.software.update(ctx, IT, r.packageId, { timeoutSec: 100 }), { code: 'VALIDATION_FAILED' });
+    const b = await install(pilot, r.packageId);
+    assert.equal((b.params as { timeout_sec: number }).timeout_sec, 7200);
+    await env.commands.onUpdate(ctx, pilot.id, { command_id: b.commandId, state: 'running', progress: 0 });
+    const running = env.commandStore.commands.find((c) => c.commandId === b.commandId)!;
+    assert.equal(running.timeoutAt!.getTime() - running.startedAt!.getTime(), (4 * 3600 + 7200 - 1800) * 1000, '超過 1800 的部分加上');
+    const c = await env.commands.create(ctx, IT, 'admin', pilot.deviceId, { kind: 'software.uninstall', params: { packageId: r.packageId } });
+    assert.equal((c.params as { timeout_sec: number }).timeout_sec, 7200);
   });
 
   it('draft 只能派到 pilot;參數換成目錄快照(Agent 只信任快照)', async () => {

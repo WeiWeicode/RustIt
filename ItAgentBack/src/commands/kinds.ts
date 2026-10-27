@@ -153,6 +153,31 @@ export function kindOf(kind: string): CommandKind | undefined {
   return COMMAND_KINDS.find((k) => k.kind === kind);
 }
 
+/** software.* 快照 timeout_sec 的基準(類型的 timeoutSec 以此安裝逾時估算)與上限(0009:300–7200) */
+const SOFTWARE_BASE_TIMEOUT_SEC = 1800;
+const SOFTWARE_MAX_TIMEOUT_SEC = 7200;
+
+/**
+ * 指令執行逾時(秒;acked 後超過仍未到終態即 failed TIMEOUT)。software.* 依快照的 timeout_sec(套件設定,P7 VM 驗收 B-1)加寬:
+ * 類型的 timeoutSec 是以安裝逾時 1800 秒估算(含下載、A6 延後、等 Windows Installer、登錄檔確認),套件逾時超過 1800 的部分再加上;
+ * 較短的不縮減(下載時間與安裝逾時無關)。params 為 JSON 字串或物件,讀不到或超出範圍時用類型預設
+ */
+export function commandTimeoutSec(kind: string, params: unknown): number {
+  const base = kindOf(kind)?.timeoutSec ?? 600;
+  if (!SOFTWARE_KINDS.includes(kind)) return base;
+  let p: unknown = params;
+  if (typeof p === 'string') {
+    try {
+      p = JSON.parse(p);
+    } catch {
+      return base;
+    }
+  }
+  const t = (p as { timeout_sec?: unknown } | null)?.timeout_sec;
+  if (typeof t !== 'number' || !Number.isInteger(t) || t <= 0) return base;
+  return base + Math.max(0, Math.min(t, SOFTWARE_MAX_TIMEOUT_SEC) - SOFTWARE_BASE_TIMEOUT_SEC);
+}
+
 /** 參數驗證錯誤(欄位、訊息);通過回 null */
 export function paramErrors(kind: string, params: unknown): { field: string; message: string }[] | null {
   const validate = validators.get(kind);
