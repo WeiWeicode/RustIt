@@ -129,11 +129,12 @@ const fs=require('fs');const sql=require('mssql');const e=process.env;
 (async()=>{const pool=await new sql.ConnectionPool({server:e.ITA_DB_HOST,port:Number(e.ITA_DB_PORT||1433),database:e.ITA_DB_NAME,user:e.ITA_DB_USER,
 password:e.ITA_DB_PASSWORD_FILE?fs.readFileSync(e.ITA_DB_PASSWORD_FILE,'utf8').trim():e.ITA_DB_PASSWORD,
 options:{encrypt:false,trustServerCertificate:true,appName:'publish-release-check'},connectionTimeout:10000,requestTimeout:15000}).connect();
-const out=[];for(const [c,v] of [$pairs]){const r=await pool.request().input('c',sql.VarChar(16),c).input('v',sql.VarChar(32),v)
+const out=[];for(const [c,v] of [$pairs]){const r=await pool.request().input('c',sql.VarChar(16),c).input('v',sql.VarChar(40),v)
 .query('SELECT component, version, status FROM ita.agent_release WHERE component = @c AND version = @v');for(const x of r.recordset)out.push('REGISTERED '+x.component+' '+x.version+' '+x.status);}
-await pool.close();console.log('REGISTRY-OK '+e.ITA_DB_NAME);for(const l of out)console.log(l);})().catch((err)=>{console.log('REGISTRY-ERROR '+(err&&err.message));process.exit(2);});
+await pool.close();console.log('REGISTRY-OK '+e.ITA_DB_NAME);for(const l of out)console.log(l);})().catch((err)=>{console.log('REGISTRY-ERROR '+((err&&(err.code||err.name))||'ERROR'));process.exit(2);});
 "@
-    # 以 base64 經 ssh / PowerShell / wsl / docker exec 傳遞,避免各層引號規則不同;程式碼只含上面固定的查詢
+    # 以 base64 經 ssh / PowerShell / wsl / docker exec 傳遞,避免各層引號規則不同;程式碼只含上面固定的查詢。
+    # 注意:$js 只可放已驗證的元件 / 版本(上面的路徑規則),且只能是 ASCII(atob 不是 UTF-8 解碼)
     $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($js))
     $out = @()
     try {
@@ -154,6 +155,10 @@ if ($DryRun) {
     if (-not $ServerContainer) { throw '正式區要指定 -ServerContainer(endpoint-server 容器名稱)才能查版本表;或確定版本沒登錄過時加 -SkipRegistryCheck' }
     $reg = Get-RegisteredReleases
     if (-not $reg.Ok) { throw "查不到 $Environment 區的版本表(${HostAlias} / $ServerContainer):$($reg.Why)。確定版本沒登錄過時才加 -SkipRegistryCheck" }
+    # 查到的資料庫必須屬於目標區(避免 -HostAlias / -ServerContainer 指到另一區而照樣通過;資安稽核 M1)
+    $db = ($reg.Why -replace '^REGISTRY-OK\s+', '').Trim()
+    $dbOk = if ($Environment -eq 'test') { $db -eq 'giganexus_It_Agent_test' } else { $db -like 'giganexus_It_Agent*' -and $db -notmatch 'test' }
+    if (-not $dbOk) { throw "查到的資料庫 $db 不是 $Environment 區的(${HostAlias} / $ServerContainer):檢查 -HostAlias 與 -ServerContainer" }
     if ($reg.Rows.Count) {
         $reg.Rows | ForEach-Object { Write-Host $_ }
         throw "$Environment 區已登錄過上面的版本(含已撤回的也不能重用):改用新的版本號重新建置,不上架"
