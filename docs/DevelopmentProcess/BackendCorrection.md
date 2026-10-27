@@ -7,7 +7,7 @@
   - B-1:migration `0009_software_timeout.sql`(`software_package.timeout_sec INT NOT NULL DEFAULT 1800`、CHECK 300–7200;既有資料以預設值補 1800)。**只寫未套用測試區**,需求方看過後再經同意套用 `giganexus_It_Agent_test`;部署順序:先 0009、再新版 endpoint-server。登錄 / 修改 API(schema + 服務層)驗範圍;取代固定的 `INSTALL_TIMEOUT_SEC`,`software.install` / `software.uninstall` 快照帶套件值;主機指令逾時 `commandTimeoutSec`(`commands/kinds.ts`)= 類型逾時 + 超過 1800 的部分(`command-dispatcher.ts` acked / running 時使用);修改逾時不退回 draft。
   - L2:`argsErrors` 拒絕 `REMOVE=ALL`;資安稽核 M1:Inno 以外拒絕 `v` 開頭的開關;契約向量同步。
   - B-2 / B-5:套件詳情的測試機結果加 `installedVersion`、`previousVersion`、`alreadyInstalled`(Agent 0.9.2 回報,`reportedVersion` 再淨化,資安 L3);詳情加 `viewerScopeAll`(GigaItApp 依此停用發佈)。
-  - 部署後 Gateway OpenAPI 草稿要再發佈(請求 / 回應新增 `timeoutSec`、`viewerScopeAll` 與測試結果版本欄位)。
+  - Gateway OpenAPI 不需要再發佈(2026-10-27 部署後確認:路由表不存請求 / 回應 schema,註冊結果不變、`pendingPublish: false`)。
 - 檔案:`ItAgentBack/db/migrations/0009_software_timeout.sql`、`src/{commands/kinds.ts,routes/software.ts,services/software-service.ts,services/command-dispatcher.ts,stores/types.ts,stores/sql-software-store.ts}`、`test/{software.test.ts,software-helpers.ts,contract.test.ts,int/stores.int.test.ts}`、`docs/DB_SCHEMA.md`、`docs/PROJECT-MAP.md`。
 - 驗證:`npm run typecheck` 通過;`npm test` 221/221;`test:int` 14/14(本機 Docker Desktop 的 Mongo / Redis + `giganexus_It_Agent_poc_test`,整合測試重建 schema 時已含 0009;測試區資料庫未動)。
 

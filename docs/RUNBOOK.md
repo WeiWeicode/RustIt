@@ -37,6 +37,8 @@
 
 上架腳本(`feature/p7-acceptance-fixes` 起)只接受 `RustIT\{test|prod}\releases`。測試區目前讀的是舊路徑:主機 2 fstab 把 `//10.10.130.31/docker-folder/RustIT` 唯讀掛在 `/srv/giganexus/nas-rustit`,`ita.env` 的 `ITA_RELEASES_HOST_DIR=/srv/giganexus/nas-rustit/releases`、`ITA_SOFTWARE_HOST_DIR=/srv/giganexus/nas-rustit/software`。**切換前不要用新腳本上架測試區,也不要把新套件放進 `test\software`**(切換時會一併複製)。掛載的是整個 `RustIT`,不用改 fstab。已登錄的版本與套件存的是相對路徑(`{元件}/{版本}/{檔名}`、`{軟體}/{版本}/{檔名}`)與 SHA-256,搬目錄後不用重新登錄。
 
+步驟 1–3 可用一支腳本執行(建目錄、`robocopy`、逐檔比對,不一致就停止;2026-10-27 主討論串的共用筆記 `nas-switch-test.ps1`,內容即下列指令)。寫入 NAS 與改主機設定由需求方執行(AI 的工作階段權限不允許修改共用資源;NAS 帳密不經手)。2026-10-27 盤點:`releases` 6 個檔案(46.7 MB)、`software` 8 個檔案(13.2 MB)。
+
 1. **建立目錄**(有 NAS `RustIT` 寫入權的帳號,在自己的電腦,先 `net use`):
    `New-Item -ItemType Directory -Force \\10.10.130.31\docker-folder\RustIT\test\releases, \\10.10.130.31\docker-folder\RustIT\test\software, \\10.10.130.31\docker-folder\RustIT\prod\releases, \\10.10.130.31\docker-folder\RustIT\prod\software`
 2. **複製到 test**(prod 從空的開始:正式版本以正式憑證另行上架,正式套件另行放置):
@@ -44,16 +46,20 @@
 3. **比對雜湊**(兩個目錄都做,完全一致才繼續):
    `function H($r) { Get-ChildItem -Recurse -File -LiteralPath $r | % { '{0} {1}' -f $_.FullName.Substring($r.Length), (Get-FileHash -LiteralPath $_.FullName).Hash } }`
    `Compare-Object (H '\\10.10.130.31\docker-folder\RustIT\releases') (H '\\10.10.130.31\docker-folder\RustIT\test\releases')` 沒有輸出;`software` 同法。另抽查與登錄的雜湊一致(GigaItApp「Agent 版本」、「軟體派送 › 軟體目錄」詳情的 SHA-256)。
-4. **主機 2 確認唯讀掛載讀得到**(非機密,可由 Claude 經 `ssh host2` 執行):
-   `ssh host2 "wsl -u root -e sh -c 'ls /srv/giganexus/nas-rustit/test/releases /srv/giganexus/nas-rustit/test/software && sha256sum /srv/giganexus/nas-rustit/test/releases/agent/*/rustit-agent.exe'"`,雜湊與步驟 3 相同。
-5. **改 `ita.env`**(主機 2 `/srv/giganexus/deploy/ita.env`,非機密;改前備份 `cp ita.env ita.env.bak-<日期>`):
-   `ITA_RELEASES_HOST_DIR=/srv/giganexus/nas-rustit/test/releases`、`ITA_SOFTWARE_HOST_DIR=/srv/giganexus/nas-rustit/test/software`(compose 的預設值自本分支起也是這兩個路徑)。
-6. **重新部署 endpoint-server**:在 GitLab 重跑 develop 最新 pipeline 的 `deploy-test` job(Retry;它讀 `ita.env`、帶 `IMAGE_TAG` 與 compose 專案名稱,不要在主機上手打 `docker compose`,避免建出另一組容器)。確認 `docker exec giganexus-ita-test-endpoint-server-1 ls /srv/releases/agent /srv/software` 看得到內容。
+4. **主機 2 確認唯讀掛載讀得到**(非機密,可由 Claude 經 `ssh host2` 執行)。主機 2 的 SSH 預設是 PowerShell,`wsl -e sh -c '...'` 內含括號或引號會被拆壞(2026-10-27 實測),**每個指令各下一次 `wsl -u root -e`**:
+   `ssh host2 "wsl -u root -e ls -R /srv/giganexus/nas-rustit/test"`、`ssh host2 "wsl -u root -e sha256sum /srv/giganexus/nas-rustit/test/releases/agent/0.9.1/rustit-agent.exe"`(其他檔案同法),雜湊與步驟 3 相同。
+5. **改 `ita.env`**(主機 2 `/srv/giganexus/deploy/ita.env`,非機密;先備份)。同樣每個指令各下一次、不用分號(遠端 PowerShell 會把 `;` 當成指令分隔):
+   `ssh host2 "wsl -u root -e cp -p /srv/giganexus/deploy/ita.env /srv/giganexus/deploy/ita.env.bak-<日期>"`
+   `ssh host2 "wsl -u root -e sed -i -e s#nas-rustit/releases#nas-rustit/test/releases# -e s#nas-rustit/software#nas-rustit/test/software# /srv/giganexus/deploy/ita.env"`
+   `ssh host2 "wsl -u root -e grep HOST_DIR /srv/giganexus/deploy/ita.env"` → `ITA_RELEASES_HOST_DIR=/srv/giganexus/nas-rustit/test/releases`、`ITA_SOFTWARE_HOST_DIR=/srv/giganexus/nas-rustit/test/software`(compose 的預設值自 develop `d48eefe` 起也是這兩個路徑)。切換前(2026-10-27)的值是 `.../nas-rustit/releases`、`.../nas-rustit/software`。
+6. **重新部署 endpoint-server**:由需求方在 GitLab 重跑 develop 最新 pipeline 的 `deploy-test` job(AI 的 GitLab Token 只有 Pipeline Read,不能重跑)(Retry;它讀 `ita.env`、帶 `IMAGE_TAG` 與 compose 專案名稱,不要在主機上手打 `docker compose`,避免建出另一組容器)。確認 `docker exec giganexus-ita-test-endpoint-server-1 ls /srv/releases/agent /srv/software` 看得到內容。
 7. **驗證**:
    - 版本:pilot 測試機 `agent.upgrade`(或 Watchdog 定期上報)下載 200、雜湊相符;新腳本 `-Environment test -DryRun` 不再報路徑不一致。
    - 軟體:GigaItApp「軟體派送 › 軟體目錄」已登錄套件的詳情正常;「登錄套件」的未登錄檔案清單正確;對 pilot 測試機派送一個已登錄套件,下載成功(沒有 `503 ITA_PACKAGE_CHANGED` / `ITA_PACKAGE_UNAVAILABLE`);定期複驗(`verifyFiles`)沒有開 `software_file_tampered` 告警。
 8. **舊目錄**:確認一段時間沒問題後,由需求方決定是否刪除 `RustIT\releases`、`RustIT\software`(需 NAS 寫入帳號;刪除前先備份)。
    **回滾**:`ita.env` 兩行改回 `.../nas-rustit/releases`、`.../nas-rustit/software`,重新部署 endpoint-server(舊目錄在步驟 8 之前都還在)。
+
+**OpenAPI**:只改請求 / 回應欄位(例如 P7 VM 驗收修正的 `timeoutSec`、`viewerScopeAll`)時不需要發佈 Gateway 草稿——Gateway 路由表只記路徑、方法與權限,不存請求 / 回應 schema;endpoint-server 啟動日誌 `API 已註冊,與 Gateway 現有設定相同`(`pendingPublish: false`)即表示沒有草稿。此時不要執行 `gw -- publish`(會一併發佈其他服務的草稿)。
 
 正式區(主機 3)部署時直接使用 `RustIT\prod\releases`、`RustIT\prod\software`(掛載方式與主機 2 相同時為 `/srv/giganexus/nas-rustit/prod/...`;不同時上架加 `-MountCheckDir`、`ita.env` 指到實際掛載點)。
 
