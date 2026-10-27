@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。本檔自 P7-2 起記錄 `RustAgent/` 的修改,先前的 Agent 變更記在 `NewFeatures.md` / `BugFix.md`。
 
+## 2026-10-27 P7 VM 驗收:資安稽核新發現的決定(文件)
+- 內容:需求方 2026-10-27 決定(「4 項新發現照你的建議」),寫入設計 §8.1.4 與 §8.2 已知限制 / 上線前待辦:(1)修改已發佈套件的逾時不需第二人確認——接受(只影響等待時間,不影響安裝內容);(2)`REMOVE=` 逐一列出所有功能等於 `REMOVE=ALL`——已知限制 §8.2-11;(3)上架腳本查重用 endpoint-server 可寫入的 SQL 帳號且需主機 root 執行 docker——上線前待辦 §8.2-13(改唯讀 API 或只能 SELECT 的帳號);(4)NAS `RustIT\test` / `RustIT\prod` 寫入群組分開——上線前待辦 §8.2-14(NAS 管理員)。另確認「版本字串無法解析時當成已安裝」列為已知限制(§8.2-9)。程式不變。
+- 檔案:`docs/P7-SOFTWARE-DESIGN.md` §8.1.4、§8.2。
+- 驗證:文件修改,無程式變更。migration 0009 套用 `giganexus_It_Agent_test` 需求方已同意,但本工作階段的權限設定擋下寫入共用資料庫的指令,改由需求方在開發機執行 `npm run db:migrate`(讀原檢出的 `.env`);套用前唯讀檢查:0007 / 0008 已套用、尚無 `timeout_sec` 欄位與約束、既有套件 8 筆。
+
 ## 2026-10-27 P7 VM 驗收 B-3:上架腳本查版本表、test / prod 版本檔目錄分開
 - 內容:需求方 2026-10-27 決定(設計 §8.1.4 B-3)。`installer/publish-release.ps1`:(1)同一台 NAS 兩區路徑分開,test = `RustIT	esteleases`、prod = `RustIT\prodeleases`,依 `-Environment` 選預設,給的 `-NasReleasesDir` 不一致(含舊的 `RustITeleases`)就停止;掛載確認預設 `/srv/giganexus/nas-rustit/{環境}/releases`。(2)上架前經 ssh 在目標區 endpoint-server 容器內唯讀查 `ita.agent_release`(含已撤回),同版本號已登錄就停止;查不到也停止,除非 `-SkipRegistryCheck`;新參數 `-ServerContainer`(prod 必填)、`-DockerCmd`。RUNBOOK §1 步驟 3 更新、新增 §1.1 測試區切換步驟(複製、雜湊比對、改 `ita.env`、重新部署;**本分支未執行**,交主討論串)。需求方補充:軟體庫也拆成 `RustIT	est\software` / `RustIT\prod\software`,`ItAgentBack/deploy/docker-compose.yml` 預設值改為 `/srv/giganexus/nas-rustit/test/{releases,software}`(`ita.env` 有設定時以它為準;測試區 `ita.env` 目前明確設為舊路徑,合併本分支不會自動切換),`host2-set-nas-credentials.sh`、`test.env.example` 同步。
 - 檔案:`RustAgent/installer/publish-release.ps1`、`ItAgentBack/deploy/{docker-compose.yml,host2-set-nas-credentials.sh,test.env.example}`、`docs/RUNBOOK.md` §1、§1.1、`docs/P7-SOFTWARE-DESIGN.md` §4、§8.1.4。
