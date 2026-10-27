@@ -3,8 +3,8 @@
 新紀錄加在最上方;格式見 `AGENT.md` §10。本檔自 P7-2 起記錄 `RustAgent/` 的修改,先前的 Agent 變更記在 `NewFeatures.md` / `BugFix.md`。
 
 ## 2026-10-27 P7 VM 驗收 B-3:上架腳本查版本表、test / prod 版本檔目錄分開
-- 內容:需求方 2026-10-27 決定(設計 §8.1.4 B-3)。`installer/publish-release.ps1`:(1)同一台 NAS 兩區路徑分開,test = `RustIT	esteleases`、prod = `RustIT\prodeleases`,依 `-Environment` 選預設,給的 `-NasReleasesDir` 不一致(含舊的 `RustITeleases`)就停止;掛載確認預設 `/srv/giganexus/nas-rustit/{環境}/releases`。(2)上架前經 ssh 在目標區 endpoint-server 容器內唯讀查 `ita.agent_release`(含已撤回),同版本號已登錄就停止;查不到也停止,除非 `-SkipRegistryCheck`;新參數 `-ServerContainer`(prod 必填)、`-DockerCmd`。RUNBOOK §1 步驟 3 更新、新增 §1.1 測試區切換步驟(複製、雜湊比對、改 `ita.env`、重新部署;**本分支未執行**,交主討論串)。`software\` 是否拆 test / prod 待決定,未動。
-- 檔案:`RustAgent/installer/publish-release.ps1`、`docs/RUNBOOK.md`、`docs/P7-SOFTWARE-DESIGN.md` §8.1.4。
+- 內容:需求方 2026-10-27 決定(設計 §8.1.4 B-3)。`installer/publish-release.ps1`:(1)同一台 NAS 兩區路徑分開,test = `RustIT	esteleases`、prod = `RustIT\prodeleases`,依 `-Environment` 選預設,給的 `-NasReleasesDir` 不一致(含舊的 `RustITeleases`)就停止;掛載確認預設 `/srv/giganexus/nas-rustit/{環境}/releases`。(2)上架前經 ssh 在目標區 endpoint-server 容器內唯讀查 `ita.agent_release`(含已撤回),同版本號已登錄就停止;查不到也停止,除非 `-SkipRegistryCheck`;新參數 `-ServerContainer`(prod 必填)、`-DockerCmd`。RUNBOOK §1 步驟 3 更新、新增 §1.1 測試區切換步驟(複製、雜湊比對、改 `ita.env`、重新部署;**本分支未執行**,交主討論串)。需求方補充:軟體庫也拆成 `RustIT	est\software` / `RustIT\prod\software`,`ItAgentBack/deploy/docker-compose.yml` 預設值改為 `/srv/giganexus/nas-rustit/test/{releases,software}`(`ita.env` 有設定時以它為準;測試區 `ita.env` 目前明確設為舊路徑,合併本分支不會自動切換),`host2-set-nas-credentials.sh`、`test.env.example` 同步。
+- 檔案:`RustAgent/installer/publish-release.ps1`、`ItAgentBack/deploy/{docker-compose.yml,host2-set-nas-credentials.sh,test.env.example}`、`docs/RUNBOOK.md` §1、§1.1、`docs/P7-SOFTWARE-DESIGN.md` §4、§8.1.4。
 - 驗證:PowerShell 剖析無錯誤;路徑防呆以假目錄 `-DryRun` 實測(test→prod\、test→舊 releases、prod→test\ 都停止,結尾 `\` 可接受);版本表查詢以 AST 取出函式對測試區唯讀實測(watchdog 0.3.4 → revoked、agent 0.9.2 未登錄、容器名稱錯誤 → 停止)。未實際上架(測試區尚未切換到 `testeleases`)。
 
 ## 2026-10-27 P7 VM 驗收修正:版本比對升級、套件逾時、安裝後等待理會關機、禁止 REMOVE=ALL 與 /v 轉交(0.9.2)
