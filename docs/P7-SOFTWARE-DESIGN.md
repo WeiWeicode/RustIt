@@ -482,7 +482,7 @@ VM 驗收(§8.3)#1、#2 通過時發現的問題(報告 `test-reports/2026-10-22
 13. **上線前待辦:上架腳本的版本表查詢改用唯讀權限**(需求方 2026-10-27):目前經 ssh 以 root 執行主機 docker、在 endpoint-server 容器內用其 SQL 帳號(有寫入權)查詢,唯讀只靠程式碼,且簽章人員要有主機管理權;正式區上線前改為唯讀 API 或只能 SELECT 的帳號。
 14. **上線前待辦:NAS `RustIT\test`、`RustIT\prod` 寫入群組分開**(需求方 2026-10-27,NAS 管理員):路徑分區目前只靠上架腳本檢查,直接用檔案總管或 robocopy 仍可寫入另一區;正式區只給正式簽章人員寫入權。
 15. **逾時後的半成品不回復**(需求方 2026-10-27 決定,已知行為):Agent 只結束安裝程式的行程樹,不回復廠商安裝程式已做的變更;MSI 的 deferred 自訂動作在 msiserver 內繼續,可能留下已登錄的產品(驗收 SlowMSI、TestInst-C),之後同套件派送會是 `already_installed`。由 IT 視需要手動移除;名稱含 `rustit` 等受保護字樣的軟體不能經 GigaItApp 移除(驗收 §5-7)。
-16. **Watchdog 的「Windows Installer 執行中」判斷有同樣的擁有者問題**(0.9.3 發現,Watchdog 不改):`scm::installer_running`(Watchdog `hands_off` 用)也只認 SYSTEM 擁有的 `_MSIExecute`,所以安裝 / 升級監控 MSI 期間 Watchdog 不會因 Windows Installer 執行中而暫停看守(實際由升級流程的維護中旗標處理,目前未見問題)。修正要出 Watchdog 0.3.6,由需求方決定是否處理。
+16. **上線前待辦:Watchdog 的「Windows Installer 執行中」判斷有同樣的擁有者問題**(0.9.3 發現;需求方 2026-10-27 決定這次不修,下次發 Watchdog 0.3.6 時一起修):`scm::installer_running`(Watchdog `hands_off` 用)也只認 SYSTEM 擁有的 `_MSIExecute`,所以安裝 / 升級監控 MSI 期間 Watchdog 不會因 Windows Installer 執行中而暫停看守(實際由升級流程的維護中旗標處理,目前未見問題)。修正方式同 Agent:改用 `scm::msi_mutex`(擁有者 SYSTEM 或 Administrators),隨 Watchdog 0.3.6 發版。
 17. **上線前待驗**(§8.1.5):#12 21 台核可、下載 429、Watchdog 派送中延後升級、批次第 3 台。
 18. **撤回後重新登錄同一檔案,等於重新認可該檔案目前的內容**(0.9.3 資安稽核 L2):套件若因檔案被換掉(`software_file_tampered`)而撤回,檔案會重新出現在可登錄清單;重新登錄以當下內容計算雜湊,仍從 draft 開始、需 pilot 測試與第二人發佈。登錄前確認撤回原因(驗收前可另放新資料夾的做法不變)。
 19. **延後中的執行逾時上限**(0.9.3 資安稽核 M1):主機在延後中重設執行逾時,但不超過「開始 + 4 小時 + 類型逾時」,且進度 > 0 後不再接受延後;被冒用的裝置不能讓指令永遠佔住並行名額。
