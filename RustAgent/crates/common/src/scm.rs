@@ -427,6 +427,59 @@ fn msi_mutex_owned_by_system() -> bool {
     }
 }
 
+/// `Global\_MSIExecute` 的狀態(Agent 軟體派送判斷 Windows Installer 是否忙碌,P7 L3)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MsiMutex {
+    /// 不存在(或打不開)
+    Absent,
+    /// 擁有者是 SYSTEM 或 Administrators:msiserver 以 SYSTEM 執行,SYSTEM 權杖的預設擁有者是 Administrators 群組
+    Privileged,
+    /// 其他擁有者(一般使用者自建的同名 mutex,不能採信)或讀不到擁有者
+    Other,
+}
+
+/// 讀 `Global\_MSIExecute`:Windows Installer 執行安裝指令碼(含 deferred 自訂動作)期間由 msiserver 持有
+pub fn msi_mutex() -> MsiMutex {
+    let name = wide(r"Global\_MSIExecute");
+    // SAFETY:開啟既有的具名 mutex 只讀擁有者;控制代碼與安全性描述元在本函式內釋放
+    unsafe {
+        let h = OpenMutexW(SYNCHRONIZE | READ_CONTROL, 0, name.as_ptr());
+        if h.is_null() {
+            return MsiMutex::Absent;
+        }
+        let mut owner: PSID = std::ptr::null_mut();
+        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let rc = GetSecurityInfo(
+            h,
+            SE_KERNEL_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut sd,
+        );
+        let privileged = rc == 0
+            && !owner.is_null()
+            && (IsWellKnownSid(owner, WinLocalSystemSid) != 0
+                || IsWellKnownSid(owner, WinBuiltinAdministratorsSid) != 0);
+        if !sd.is_null() {
+            LocalFree(sd as _);
+        }
+        CloseHandle(h);
+        if privileged {
+            MsiMutex::Privileged
+        } else {
+            MsiMutex::Other
+        }
+    }
+}
+
+/// `msiserver` 服務執行中
+pub fn msiserver_running() -> bool {
+    query("msiserver").is_ok_and(|i| i.state == SvcState::Running)
+}
+
 /// Windows Installer 正在執行(安裝 / 升級 / 解除安裝監控 MSI 時會依序停止兩個服務,這時不重啟對方,避免檔案被占用)。
 /// 必須同時:`Global\_MSIExecute` 的擁有者是 SYSTEM、`msiserver` 服務執行中;連續超過 30 分鐘視為異常,恢復看守
 pub fn installer_running() -> bool {

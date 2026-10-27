@@ -136,7 +136,7 @@
         "command_id": { "type": "string", "format": "uuid" },
         "state": { "type": "string", "enum": ["acked", "running", "succeeded", "failed"] },
         "progress": { "type": "integer", "minimum": 0, "maximum": 100 },
-        "result": { "type": "object", "description": "結果摘要(序列化後 4,000 字元內;超過主機只記大小);大量資料(日誌)以 HTTPS POST /agent/v1/commands/{commandId}/files 上傳,result 只放 file_id(command-file.schema.json)" },
+        "result": { "type": "object", "description": "結果摘要(序列化後 4,000 字元內;超過主機只記大小)。running 時只有 software.install 的 A6 延後中帶 {\"deferred\": {\"reason\": \"battery\"|\"metered\", \"next_check_at\": UTC}}(Agent 0.9.3,command-kinds.md),主機暫存並重設執行逾時;大量資料(日誌)以 HTTPS POST /agent/v1/commands/{commandId}/files 上傳,result 只放 file_id(command-file.schema.json)" },
         "error_code": {
           "type": "string",
           "maxLength": 64,

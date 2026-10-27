@@ -99,8 +99,8 @@
 | `SIGNER_NOT_TRUSTED` | 實際簽章者不在「主機 `signer_thumbprints` ∩ 本機 `[software] trusted_signers`」 | 比對 `result.signer` 與兩份清單;廠商換憑證見 §4;本機清單空白 = 不接受任何套件。`draft` 套件主機清單為空,但仍需在本機清單內 |
 | `DISK_FULL` | 磁碟不足(需求 = 安裝檔 × 2 + 1 GB) | 請使用者清理,或先對該機派 `logs.collect` 看磁碟;不要放寬門檻 |
 | `INSTALL_FAILED` | 安裝 / 移除程式結束代碼不是成功碼(`result.exit_code`) | 查 `log_tail` 與廠商的結束代碼表;3010 / 1641 屬成功(`reboot_required`),1638 屬已安裝。參數錯誤時修正安裝參數:套件會退回 `draft` 並重新覆核,舊快照的排隊指令被取消(`PACKAGE_CHANGED`) |
-| `INSTALL_TIMEOUT` | 超過 `timeout_sec`,已結束行程樹 | 軟體安裝時間長就調高 `timeout_sec`(同樣會退回 `draft`);MSI 逾時後 msiserver 可能仍在作業,下一筆可能遇到 `INSTALL_BUSY`,稍後重派。不靜默的安裝程式會卡在視窗 → 回到 `draft` 測試機找出靜默參數 |
-| `INSTALL_BUSY` | 結束代碼 1618(另一個安裝進行中),60 秒間隔重試 3 次仍失敗 | 等該機其他安裝 / Windows Update 完成後重派 |
+| `INSTALL_TIMEOUT` | 超過 `timeout_sec`,已結束行程樹 | 軟體安裝時間長就調高 `timeout_sec`(同樣會退回 `draft`);MSI 逾時後 msiserver 可能仍在作業(訊息「Windows Installer 仍在執行」,Agent 0.9.3),同一台的下一筆 MSI 會先等它結束(最多 15 分鐘);逾時前的變更不回復,視需要手動移除。不靜默的安裝程式會卡在視窗 → 回到 `draft` 測試機找出靜默參數 |
+| `INSTALL_BUSY` | 結束代碼 1618(另一個安裝進行中),60 秒間隔重試 3 次仍失敗;0.9.3 起也可能是執行前 Windows Installer 等 15 分鐘仍在執行(未啟動安裝) | 等該機其他安裝 / Windows Update 完成後重派 |
 | `DETECT_FAILED` | 結束代碼成功但登錄檔找不到(安裝)或 120 秒內仍存在(移除) | 檢查套件的「偵測規則」(MSI 產品代碼或 DisplayName 樣式)是否寫對;規則錯誤 → 修正後重新覆核;該機實際狀況以登錄檔為準 |
 | `UNINSTALL_NOT_SUPPORTED` | 沒有可用的移除指令,或項目在不可移除清單(GigaNexus / RustIt、防毒 / EDR),或移除程式位置不安全 | 不可移除清單是設計行為,不要繞過;其餘請到現場處理 |
 | `DEFERRED_TIMEOUT` | 電池 / 計量網路延後下載超過 4 小時 | 等插電後重派;確認要略過電池時派送帶 `ignorePower`(計量網路不可略過) |

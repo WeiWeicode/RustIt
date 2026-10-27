@@ -385,8 +385,10 @@ export interface CommandPatch {
   resultSummary?: string | null;
   errorCode?: string | null;
   errorMessage?: string | null;
-  /** acked / running 時設定(已有值不覆寫) */
+  /** acked / running 時設定(已有值不覆寫,resetTimeout 除外) */
   timeoutAt?: Date;
+  /** 以 timeoutAt 覆寫既有的執行逾時(A6 延後中的 running,Agent 0.9.3) */
+  resetTimeout?: boolean;
   /** 終態但沒收到 running(瞬間完成,Agent 只送最後狀態):started_at 以 acked_at(沒有則本次時間)補上 */
   markStarted?: boolean;
 }

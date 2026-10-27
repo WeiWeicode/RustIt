@@ -115,7 +115,7 @@ IT 只送 `{ packageId }`;Server 建立指令時查目錄(必須 `published`,測
 | `DOWNLOAD_FAILED`、`HASH_MISMATCH`、`SIGNATURE_INVALID`、`SIGNER_NOT_TRUSTED`、`DISK_FULL` | 與 P6 同義(寫入 `command-kinds.md`) |
 | `INSTALL_FAILED` | 安裝程式結束代碼不是成功碼;`result.exit_code` 帶值 |
 | `INSTALL_TIMEOUT` | 超過 `timeout_sec`,已結束安裝程式的行程樹 |
-| `INSTALL_BUSY` | 結束代碼 1618(另一個安裝進行中),重試 3 次(間隔 60 秒)仍失敗 |
+| `INSTALL_BUSY` | 結束代碼 1618(另一個安裝進行中),重試 3 次(間隔 60 秒)仍失敗;0.9.3 起另含執行 msiexec 前 Windows Installer 仍在執行、等 15 分鐘仍未空閒(未啟動,§8.1.5) |
 | `DETECT_FAILED` | 結束代碼成功,但登錄檔找不到(安裝)或仍存在(移除,輪詢 120 秒)該項目 |
 | `UNINSTALL_NOT_SUPPORTED` | 找得到項目,但沒有可用的移除指令(沒有 `UninstallString`,目錄也沒有 `uninstall_args`) |
 | `DEFERRED_TIMEOUT` | A6:電池 / 計量網路延後超過上限(§5.4) |
@@ -222,7 +222,7 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
 2. **`detect` 已通過 → 比對版本**(0.9.2 起,2026-10-27 VM 驗收 B-2):登錄檔 DisplayVersion 與快照 `version` 數字分段比較;**較舊 → 繼續安裝(升級)**,相同或較新 → 直接 `succeeded` + `already_installed = true`;無法解析 → 保守視為已安裝(`version_unknown`,0.9.1 的行為)。結果一律帶 `installed_version`,升級時帶 `previous_version`(§8.1.4)。原設計「版本差異由 IT 先移除舊版」只在版本無法比較時仍適用。
 3. **A6 延後**(§5.4)→ 進度 `deferred`。
 4. 下載(進度 `downloading` + 百分比,每 5% 或 5 秒 `command_update`)→ 驗大小與 SHA-256(`HASH_MISMATCH`)→ 驗 Authenticode(`SIGNATURE_INVALID`)→ 簽章者:**主機 `signer_thumbprints` ∩ 本機 `agent.toml` `[software] trusted_signers`**(M3,與升級用的 `[upgrade]` 分開)必須非空且包含實際簽章者(`SIGNER_NOT_TRUSTED`);沿用 P6 的 `signer_allowed`。
-5. 安裝(進度 `installing`):§5.3 命令列,逾時 `timeout_sec`(`INSTALL_TIMEOUT`,Job Object 結束行程樹);1618 重試 3 次(`INSTALL_BUSY`)。
+5. 安裝(進度 `installing`):§5.3 命令列,逾時 `timeout_sec`(`INSTALL_TIMEOUT`,Job Object 結束行程樹);1618 重試 3 次(`INSTALL_BUSY`)。0.9.3 起執行 msiexec 前先等 Windows Installer 空閒(最多 15 分鐘,§8.1.5)。
 6. 偵測(進度 `detecting`):輪詢 `detect` 最多 120 秒,版本要相同或較新(`DETECT_FAILED`);期間收到服務停止 / 關機立即結束(`EXECUTION_FAILED` + `interrupted`,§8.1.4)。
 7. 立即重新蒐集並 `POST /agent/v1/inventory`(不等 24 小時),讓主機的 `device_software` 與 `software_installed` 事件即時反映;失敗只記警告,不影響指令結果。
 8. `succeeded`,`result` 如 §2.4。
@@ -379,7 +379,7 @@ draft ──(測試機安裝成功,IT 確認簽章者)──► tested ──(�
   L4、L5 兩列依 commit 訊息(`a484b1e`)整理,逐項編號對應以稽核報告為準。
 - **資安稽核未修**:
   - **L2**:`ACTION=` 與重開機類開關尚未全面禁止;要 Agent、ItAgentBack、契約向量 `install-args.vectors.json` 三處同步修改,待排。
-  - **L3**:MSI 逾時後安裝仍在 msiserver 進行(結束行程樹殺不掉 msiserver 的工作),下一筆指令可能遇到 1618(`INSTALL_BUSY`);`INSTALL_TIMEOUT` 訊息已註明。
+  - **L3**:MSI 逾時後安裝仍在 msiserver 進行(結束行程樹殺不掉 msiserver 的工作),下一筆指令可能遇到 1618(`INSTALL_BUSY`);`INSTALL_TIMEOUT` 訊息已註明。**0.9.2 的判斷不正確,0.9.3 修正並改為下一筆先等空閒(§8.1.5)**。
 - **code-reviewer 未處理的建議**:
   1. `transport` 下載帶狀態碼取代字串比對(目前以錯誤字串判斷「主機拒絕(4xx)不重試」,宜改為回傳狀態碼)。
   2. `software::Failure` 與 `command::Failure` 重複,可合併。
@@ -445,6 +445,26 @@ VM 驗收(§8.3)#1、#2 通過時發現的問題(報告 `test-reports/2026-10-22
 
 **驗收需重測**:§8.3 全部 12 項以 Agent 0.9.2 重做;另加:#5 以舊版(例如 Notepad++ 8.8.9)派送新版 → 升級成功、`previous_version` 正確;相同版本 → `already_installed` 帶 `installed_version`;#9 以套件 `timeout_sec = 300`(最小值,原寫 30 已不可設)驗 `INSTALL_TIMEOUT`,並在等 Windows Installer 期間停止服務 / 關機,確認立即結束且重啟後補送結果;登錄 `REMOVE=ALL` 被拒;無 `it-admin` 帳號(V112001)看到「發佈」停用與原因。
 
+### 8.1.5 驗收後修正(2026-10-27,Agent 0.9.3)
+
+依驗收報告 `docs/test-reports/2026-10-27-p7-vm-acceptance.md` §4-7、§5、§6,需求方 2026-10-27 決定。Watchdog 不改(0.3.5)。
+
+| 項目 | 修改 |
+| --- | --- |
+| **L3 逾時後誤報「Windows Installer 已沒有進行中的安裝」**(§5-6) | **原因**:0.9.2 以 `Global\_MSIExecute` 判斷,但只認擁有者 = LocalSystem;msiserver 以 SYSTEM 執行,SYSTEM 權杖的預設擁有者是 **Administrators 群組**,所以 mutex 永遠不算、一律判為空閒。**做法**:仍用 `_MSIExecute`,擁有者改為 SYSTEM 或 Administrators(`scm::msi_mutex`),且 msiserver 執行中(純函式 `software::msi_busy`,單元測試涵蓋)。**理由**:msiserver 執行安裝指令碼(含 deferred 自訂動作、回復)整段期間持有它,與 msiexec 前端是否還在無關,Windows Installer 自己也是看它回 1618;「msiserver 底下的安裝工作階段」沒有公開 API,列舉 msiserver 子行程會把閒置的自訂動作伺服器誤判為忙碌;一般使用者自建的同名 mutex 擁有者是自己,不採信(不能用它擋住派送)。**行為**:逾時結束行程樹後最多再看 60 秒(原 10 分鐘),仍忙碌回 `INSTALL_TIMEOUT`「Windows Installer 仍在執行(…逾時前的變更不回復);同一台的下一筆 MSI 派送會先等它結束」+ `result.installer_busy`;**執行 msiexec 前**(MSI 安裝與 MSI 移除)仍忙碌就每 30 秒檢查、最多 15 分鐘,超過回 `INSTALL_BUSY` 且不啟動安裝程式,等待期間停止 / 關機回 `EXECUTION_FAILED` + `interrupted`。15 分鐘不計入套件逾時;移除的主機逾時(1 小時 + 超過 1800 的部分)仍足夠。逾時前的半成品不回復(§8.2-15) |
+| **延後回報**(§5-4) | A6 延後期間每次檢查(5 分鐘)寫一行日誌(原因、下次檢查時間),回報 `running` + `result.deferred`(`battery` / `metered`、`next_check_at`);主機驗證後暫存並重設執行逾時(0.9.2 以前延後 4 小時會先被主機判 `TIMEOUT`:`timeout_at` 只在第一次 acked 設定),解除時清除;GigaItApp 顯示「延後中(原因)」與下次檢查時間。不新增指令狀態(避免 migration 與狀態機變更),契約見 command-kinds.md |
+| **事件詳情 `[object Object]`**(§6) | GigaItApp 指令參數 / 結果 / 批次摘要 / 事件內容的物件與陣列改用 JSON 顯示 |
+| **登錄畫面版本欄提示**(§5-5) | 版本欄提示「要和電腦上的 DisplayVersion 一致,例:7-Zip 是 26.05,不是 26.05.2.0.0」 |
+| **撤回後釋放安裝檔路徑**(§5-2) | migration **0010**:`uq_software_package_file UNIQUE (file_name)` 改為篩選唯一索引 `ux_software_package_file_active`(只限 draft / tested / published);「尚未登錄的安裝檔」清單不算已撤回的套件。版本號規則不變(已撤回的版本號仍不可重用)。定期複驗與下載本來就略過已撤回的套件 |
+
+**審查**(code-reviewer、security-auditor,2026-10-27):資安 M1(被冒用的裝置每 5 分鐘送延後,指令永不逾時、佔住並行名額)→ 已修:重設上限「開始 + 4 小時 + 類型逾時」、進度 > 0 後不接受延後(§8.2-19);L1(以系統管理員權限建立同名 mutex 可讓 MSI 派送延 15 分鐘後 `INSTALL_BUSY`)→ 不改,管理員本來就能停 Agent;L2(撤回後重新登錄等於重新認可檔案內容)→ 列已知限制 §8.2-18。code-reviewer:契約 / RUNBOOK / 前端 `INSTALL_BUSY` 說明、`result.installer_busy` 顯示 → 已補;「執行前等 15 分鐘可能超過主機逾時」→ 已確認不會:安裝的主機逾時是 4 小時(+ 超過 1800 的部分,含下載與延後),移除 1 小時足夠 15 分鐘 + 套件逾時 + 確認。
+
+**相容**:0.9.3 Agent + 舊主機:`result.deferred` 只是 running 的 result,舊主機只在終態存 result,忽略;其餘照常。新主機 + 0.9.2 Agent:延後時沒有 `deferred`,顯示「執行中」(原行為)。**部署順序**:先套用 0010,再部署新版 endpoint-server(未套用時撤回後重新登錄同一檔案仍回 409,其他功能不受影響)。
+
+**驗收需重測**:L3(SlowMSI `timeout_sec` 300:逾時結果為「Windows Installer 仍在執行」;緊接著派另一個 MSI → 等到 SlowMSI 結束才安裝,或 15 分鐘後 `INSTALL_BUSY`,不出現 1618)、#9(TestInst-C 逾時,exe 類型訊息不變)、#11(電池 / 計量延後:畫面「延後中(原因)」、Agent 日誌每 5 分鐘一行;恢復後繼續仍無法以環境旗標驗證,§5-3)、撤回套件後同一檔案重新登錄、事件詳情 `detect` 以 JSON 顯示。
+
+**上線前待驗**(驗收未涵蓋,需另找環境或資料,§3、§4):#12 批次 > 20 台第二人核可(測試區只有 2 台)、下載 429(同一台 / 全域並行上限,需同時 21 個下載)、Watchdog 在軟體派送中延後升級 Agent(需暫改 pilot 目標版本)、#3 批次第 3 台。HANDOFF 由主工作階段統一更新(草稿見交接筆記)。
+
 ### 8.2 風險與已知限制(實作前先看)
 
 1. **全公司任意程式執行**:最高風險功能。防線:目錄第二人覆核、`published` 才能派送、參數字元白名單且不經 shell、簽章者需同時符合主機與本機清單(GPO)、SHA-256、> 20 台第二人核可、全部稽核。
@@ -461,6 +481,11 @@ VM 驗收(§8.3)#1、#2 通過時發現的問題(報告 `test-reports/2026-10-22
 12. **修改已發佈套件的安裝逾時不需第二人確認**(需求方 2026-10-27 接受):逾時只影響等待時間,不影響安裝的內容;調短可能讓較慢的電腦 `INSTALL_TIMEOUT`、調長會較久佔住串行與並行名額,修改留稽核日誌。
 13. **上線前待辦:上架腳本的版本表查詢改用唯讀權限**(需求方 2026-10-27):目前經 ssh 以 root 執行主機 docker、在 endpoint-server 容器內用其 SQL 帳號(有寫入權)查詢,唯讀只靠程式碼,且簽章人員要有主機管理權;正式區上線前改為唯讀 API 或只能 SELECT 的帳號。
 14. **上線前待辦:NAS `RustIT\test`、`RustIT\prod` 寫入群組分開**(需求方 2026-10-27,NAS 管理員):路徑分區目前只靠上架腳本檢查,直接用檔案總管或 robocopy 仍可寫入另一區;正式區只給正式簽章人員寫入權。
+15. **逾時後的半成品不回復**(需求方 2026-10-27 決定,已知行為):Agent 只結束安裝程式的行程樹,不回復廠商安裝程式已做的變更;MSI 的 deferred 自訂動作在 msiserver 內繼續,可能留下已登錄的產品(驗收 SlowMSI、TestInst-C),之後同套件派送會是 `already_installed`。由 IT 視需要手動移除;名稱含 `rustit` 等受保護字樣的軟體不能經 GigaItApp 移除(驗收 §5-7)。
+16. **Watchdog 的「Windows Installer 執行中」判斷有同樣的擁有者問題**(0.9.3 發現,Watchdog 不改):`scm::installer_running`(Watchdog `hands_off` 用)也只認 SYSTEM 擁有的 `_MSIExecute`,所以安裝 / 升級監控 MSI 期間 Watchdog 不會因 Windows Installer 執行中而暫停看守(實際由升級流程的維護中旗標處理,目前未見問題)。修正要出 Watchdog 0.3.6,由需求方決定是否處理。
+17. **上線前待驗**(§8.1.5):#12 21 台核可、下載 429、Watchdog 派送中延後升級、批次第 3 台。
+18. **撤回後重新登錄同一檔案,等於重新認可該檔案目前的內容**(0.9.3 資安稽核 L2):套件若因檔案被換掉(`software_file_tampered`)而撤回,檔案會重新出現在可登錄清單;重新登錄以當下內容計算雜湊,仍從 draft 開始、需 pilot 測試與第二人發佈。登錄前確認撤回原因(驗收前可另放新資料夾的做法不變)。
+19. **延後中的執行逾時上限**(0.9.3 資安稽核 M1):主機在延後中重設執行逾時,但不超過「開始 + 4 小時 + 類型逾時」,且進度 > 0 後不再接受延後;被冒用的裝置不能讓指令永遠佔住並行名額。
 
 ### 8.3 測試區 VM 驗收步驟(草案,`RUSTIT-P34` + 另 2 台 IT 同意的電腦;VM 內指令由需求方執行)
 

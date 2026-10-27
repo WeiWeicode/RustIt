@@ -775,7 +775,8 @@ export class MemoryCommandStore extends Failable implements CommandStore, Comman
     if (p.resultSummary !== undefined) c.resultSummary = p.resultSummary;
     if (p.errorCode) c.errorCode = p.errorCode;
     if (p.errorMessage) c.errorMessage = p.errorMessage;
-    c.timeoutAt ??= p.timeoutAt ?? null;
+    if (p.resetTimeout && p.timeoutAt) c.timeoutAt = p.timeoutAt;
+    else c.timeoutAt ??= p.timeoutAt ?? null;
     if (p.state === 'sent') {
       c.sendCount = (c.sendCount ?? 0) + 1;
       c.sentAt = p.at;

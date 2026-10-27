@@ -486,10 +486,10 @@ export class SoftwareService {
     return { items: rows.map((p) => packageView(p, byId.get(p.packageId) ?? null)) };
   }
 
-  /** 軟體庫內尚未登錄的安裝檔 */
+  /** 軟體庫內尚未登錄的安裝檔;已撤回的套件不佔用(0010,Agent 0.9.3 項目 5:同一個檔案撤回後可重新登錄) */
   async unregisteredFiles(ctx: MgmtCtx): Promise<{ items: (Omit<SoftwareFileInfo, 'modifiedAt'> & { modifiedAt: string })[] }> {
     const [files, rows] = await Promise.all([this.files.list(), this.sqlDo(ctx, 'package.list', () => this.store.listPackages({}))]);
-    const known = new Set(rows.map((r) => r.fileName.toLowerCase()));
+    const known = new Set(rows.filter((r) => r.status !== 'revoked').map((r) => r.fileName.toLowerCase()));
     return { items: files.filter((f) => !known.has(f.fileName.toLowerCase())).map((f) => ({ ...f, modifiedAt: f.modifiedAt.toISOString() })) };
   }
 

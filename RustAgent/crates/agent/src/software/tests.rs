@@ -38,8 +38,12 @@ struct Fake {
     /// 依序回傳的電源狀態;用完後為「不限制」
     power: Mutex<VecDeque<power::PowerState>>,
     drains: Mutex<Vec<Duration>>,
-    /// installer_busy 還會回 true 的次數(L3)
+    /// 安裝程式執行後 installer_busy 還會回 true 的次數(L3)
     msi_busy: Mutex<u32>,
+    /// 第一次執行安裝程式之前 installer_busy 回 true 的次數(0.9.3 執行前等空閒)
+    msi_busy_before: Mutex<u32>,
+    /// 回報過的延後(原因代碼)
+    deferred: Mutex<Vec<String>>,
     /// 登錄檔項目目前的 DisplayVersion(B-2)
     version: Mutex<String>,
     /// 安裝程式執行成功後把版本改成這個(升級:項目留著、版本更新);None = 依 run_changes 切換有 / 沒有
@@ -72,6 +76,8 @@ impl Fake {
             power: Mutex::new(VecDeque::new()),
             drains: Mutex::new(Vec::new()),
             msi_busy: Mutex::new(0),
+            msi_busy_before: Mutex::new(0),
+            deferred: Mutex::new(Vec::new()),
             version: Mutex::new(String::new()),
             upgrade_to: None,
             stop_at: Mutex::new(None),
@@ -203,7 +209,11 @@ impl Env for Fake {
         *self.collected.lock().unwrap() += 1;
     }
     fn installer_busy(&self) -> bool {
-        let mut n = self.msi_busy.lock().unwrap();
+        let mut n = if self.runs() == 0 {
+            self.msi_busy_before.lock().unwrap()
+        } else {
+            self.msi_busy.lock().unwrap()
+        };
         if *n == 0 {
             return false;
         }
@@ -212,6 +222,10 @@ impl Env for Fake {
     }
     async fn power(&self) -> power::PowerState {
         self.power.lock().unwrap().pop_front().unwrap_or_default()
+    }
+    fn deferred(&self, reason: &str, next_check_at: &str) {
+        assert!(chrono::DateTime::parse_from_rfc3339(next_check_at).is_ok());
+        self.deferred.lock().unwrap().push(reason.into());
     }
 }
 
@@ -626,13 +640,100 @@ async fn timeout_waits_for_windows_installer() {
     let f = run_install(&env, &p, &paths).await.unwrap_err();
     assert_eq!(f.code, "INSTALL_TIMEOUT");
     assert!(f.message.contains("已沒有進行中的安裝"), "{}", f.message);
+    assert_eq!(f.result.unwrap()["installer_busy"], false);
     assert_eq!(polls(&env), 3);
-    // 一直沒結束:等到上限
+    // 一直沒結束(SlowMSI 的 deferred 自訂動作):等到上限後如實回報「仍在執行」
     let env = Fake::new(content).exits(&[Ok(Exit::Timeout)]);
     *env.msi_busy.lock().unwrap() = u32::MAX;
     let f = run_install(&env, &p, &paths).await.unwrap_err();
-    assert!(f.message.contains("可能遇到 1618"), "{}", f.message);
+    assert_eq!(f.code, "INSTALL_TIMEOUT");
+    assert!(
+        f.message.contains("Windows Installer 仍在執行"),
+        "{}",
+        f.message
+    );
+    assert_eq!(f.result.unwrap()["installer_busy"], true);
     assert_eq!(polls(&env), SETTLE_MAX.as_secs() / SETTLE_POLL.as_secs());
+}
+
+/// L3 判斷:`_MSIExecute` 由 SYSTEM / Administrators 持有且 msiserver 執行中才算忙碌
+#[test]
+fn msi_busy_rules() {
+    use rustit_common::scm::MsiMutex;
+    assert!(msi_busy(MsiMutex::Privileged, true));
+    assert!(!msi_busy(MsiMutex::Privileged, false), "msiserver 已停止");
+    assert!(!msi_busy(MsiMutex::Absent, true), "沒有安裝工作階段");
+    assert!(
+        !msi_busy(MsiMutex::Other, true),
+        "一般使用者自建的同名 mutex 不採信"
+    );
+    assert!(!msi_busy(MsiMutex::Absent, false));
+}
+
+/// 0.9.3:執行 msiexec 前 Windows Installer 仍在執行 → 先等空閒;等到上限回 INSTALL_BUSY、不啟動安裝程式
+#[tokio::test]
+async fn msi_waits_for_idle_before_running() {
+    let content = b"idle";
+    let (_d, paths) = paths();
+    let p = install_params(content, &[SIGNER]);
+    let idle_polls = |env: &Fake| {
+        env.sleeps
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|d| **d == IDLE_POLL)
+            .count() as u64
+    };
+    // 上一筆逾時的安裝還在 msiserver 內跑 4 次輪詢,結束後才執行
+    let env = Fake::new(content);
+    *env.msi_busy_before.lock().unwrap() = 5;
+    assert_eq!(run_install(&env, &p, &paths).await.unwrap()["exit_code"], 0);
+    assert_eq!((env.runs(), idle_polls(&env)), (1, 4));
+
+    // 一直沒空閒:15 分鐘後 INSTALL_BUSY,沒有執行安裝程式(不撞 1618)
+    let env = Fake::new(content);
+    *env.msi_busy_before.lock().unwrap() = u32::MAX;
+    let f = run_install(&env, &p, &paths).await.unwrap_err();
+    assert_eq!(f.code, "INSTALL_BUSY");
+    assert!(
+        f.message.contains("Windows Installer 仍在執行"),
+        "{}",
+        f.message
+    );
+    assert_eq!(f.result.unwrap()["installer_busy"], true);
+    assert_eq!(env.runs(), 0);
+    assert_eq!(
+        idle_polls(&env),
+        IDLE_WAIT_MAX.as_secs() / IDLE_POLL.as_secs()
+    );
+
+    // 等待期間停止 / 關機:立即結束、未啟動安裝程式
+    let env = Fake::new(content);
+    *env.msi_busy_before.lock().unwrap() = u32::MAX;
+    *env.stop_at.lock().unwrap() = Some(1);
+    let f = run_install(&env, &p, &paths).await.unwrap_err();
+    assert_eq!(f.code, "EXECUTION_FAILED");
+    assert_eq!(f.result.unwrap()["interrupted"], true);
+    assert_eq!(env.runs(), 0);
+
+    // 不是 msiexec(exe 安裝程式):不等,1618 由既有重試處理
+    let mut p = install_params(content, &[SIGNER]);
+    p.installer = Installer::Inno;
+    p.install_args = String::new();
+    let env = Fake::new(content);
+    *env.msi_busy_before.lock().unwrap() = u32::MAX;
+    run_install(&env, &p, &paths).await.unwrap();
+    assert_eq!((env.runs(), idle_polls(&env)), (1, 0));
+
+    // MSI 移除(msiexec /x)也先等
+    let mut env = Fake::new(b"");
+    env.run_changes = true;
+    *env.installed.lock().unwrap() = true;
+    *env.msi_busy_before.lock().unwrap() = 3;
+    uninstall(&env, &paths, CMD, &uninstall_params("msi", ""))
+        .await
+        .unwrap();
+    assert_eq!((env.runs(), idle_polls(&env)), (1, 2));
 }
 
 #[tokio::test]
@@ -948,10 +1049,24 @@ async fn a6_defers_until_power_returns() {
     let waits = env.sleeps.lock().unwrap().clone();
     assert_eq!(waits, vec![power::CHECK_EVERY; 2], "每 5 分鐘重新檢查");
     assert_eq!(
-        env.progress.lock().unwrap().clone(),
-        vec![0, 0],
-        "延後期間以進度 0 讓主機重設逾時"
+        env.deferred.lock().unwrap().clone(),
+        vec!["battery", "battery"],
+        "每次檢查回報延後(畫面「延後中」、主機重設逾時)"
     );
+    assert_eq!(
+        env.progress.lock().unwrap().clone(),
+        vec![0],
+        "解除後回報不帶 deferred 的 running"
+    );
+    // 計量網路:原因代碼 metered;沒延後就不回報
+    let env = Fake::new(content);
+    *env.power.lock().unwrap() = [METERED].into_iter().collect();
+    defer(&env, &p, power::DEFER_MAX).await.unwrap();
+    assert_eq!(env.deferred.lock().unwrap().clone(), vec!["metered"]);
+    let env = Fake::new(content);
+    defer(&env, &p, power::DEFER_MAX).await.unwrap();
+    assert!(env.deferred.lock().unwrap().is_empty());
+    assert!(env.progress.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

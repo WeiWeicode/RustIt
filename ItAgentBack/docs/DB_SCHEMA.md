@@ -1,6 +1,6 @@
 # ItAgentBack 資料結構
 
-> 對應 `db/migrations/0001_init.sql`、`0002_sync_event.sql`(PLATFORM-PLAN P2)、`0003_command.sql`(P4)、`0004`(P3 軟體)、`0005`(E6 公司)、`0006_monitor.sql`(P5 監測)、`0007_release.sql`(P6 升級)、`0008_software.sql`(P7 軟體派送)、`0009_software_timeout.sql`(P7 套件安裝逾時)。原則(INTEGRATION-PLAN §3.1):**SQL Server 是唯一真相**;MongoDB 與 Redis 只放可重建的資料。
+> 對應 `db/migrations/0001_init.sql`、`0002_sync_event.sql`(PLATFORM-PLAN P2)、`0003_command.sql`(P4)、`0004`(P3 軟體)、`0005`(E6 公司)、`0006_monitor.sql`(P5 監測)、`0007_release.sql`(P6 升級)、`0008_software.sql`(P7 軟體派送)、`0009_software_timeout.sql`(P7 套件安裝逾時)、`0010_software_file_release.sql`(P7 撤回釋放安裝檔路徑)。原則(INTEGRATION-PLAN §3.1):**SQL Server 是唯一真相**;MongoDB 與 Redis 只放可重建的資料。
 > SQL Server 2012(`DATABASE.md` §0):無 JSON 函式、無 `CREATE OR ALTER`;JSON 由 ItAgentBack 組 / 解,需要查詢的值拆成獨立欄位。時間一律 UTC。
 
 ## 1. SQL Server(schema `ita`)
@@ -97,7 +97,7 @@ Agent 回報(0002,`POST /agent/v1/events`;`event.schema.json`):`offline_period`�
 
 ### `ita.software_package` — 軟體目錄(0008,P7;`docs/P7-SOFTWARE-DESIGN.md` §1)
 
-- `package_id`(對外)、`name` / `version`(`UNIQUE (name, version)`;同一軟體的不同版本是不同的列)、`file_name`(軟體庫 `SOFTWARE_DIR` 下的相對路徑 `{軟體}/{版本}/{檔名}`,以 `/` 分隔,`UNIQUE`:同一檔案只能登錄一次)、`sha256` / `size_bytes`(**登錄時由主機讀檔計算**,下載前再比對)。
+- `package_id`(對外)、`name` / `version`(`UNIQUE (name, version)`;同一軟體的不同版本是不同的列)、`file_name`(軟體庫 `SOFTWARE_DIR` 下的相對路徑 `{軟體}/{版本}/{檔名}`,以 `/` 分隔;同一檔案只能被一筆**未撤回**的套件登錄:0010 起為篩選唯一索引 `ux_software_package_file_active (file_name) WHERE status IN ('draft', 'tested', 'published')`,撤回後同一檔案可重新登錄(0008 原為 `uq_software_package_file UNIQUE`,涵蓋已撤回;**部署順序:先套用 0010,再部署新版 endpoint-server**))、`sha256` / `size_bytes`(**登錄時由主機讀檔計算**,下載前再比對)。
 - `installer_type`(`msi` / `inno` / `nsis` / `burn` / `exe`)、`install_args` / `uninstall_args`(額外靜默參數,字元白名單、不可指到其他檔案、不可含機密字樣;主機登錄、修改、建立指令時都驗)、`detect_type` / `detect_value`(`msi_product_code` 的 `{GUID}`,或 `display_name` 的 DisplayName `LIKE` 樣式,`%` 為萬用字元)、`reboot_policy`(`never` / `required`)。
 - `signer_thumbprints`(預期簽章者 SHA-1 指紋,逗號分隔;`tested` 之前為 NULL)、`observed_signers`(標記 `tested` 時從 pilot 測試機回報的 `result.signer` 寫入;IT 填的預期簽章者必須在其中)、`license_limit`(NULL = 不限;只做派送時的上限檢查,以 `device_software.name LIKE detect_value` 計數,必須是 `display_name` 偵測)。
 - `status`:`draft` → `tested` → `published` → `revoked`,一律條件更新;tested / published 改到安裝參數或偵測規則時退回 `draft`(清除 `signer_thumbprints`、`tested_*`、`published_*`)。撤回時同一交易把此套件 `queued` 的 `software.install` 改 `canceled`(`error_code = PACKAGE_REVOKED`);退回 `draft` 時同一交易把尚未送出(`queued`,含待核可批次)的 `software.install` / `software.uninstall` 舊快照改 `canceled`(`PACKAGE_CHANGED`);安裝檔被換掉時 `cancelQueuedInstalls` 取消排隊中的安裝(`PACKAGE_FILE_CHANGED`)。

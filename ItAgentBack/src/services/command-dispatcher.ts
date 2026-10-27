@@ -187,6 +187,26 @@ const IDLE_BATCH_LOOKBACK_MS = 8 * 24 * 3_600_000;
 /** 會送出指令的批次狀態 */
 const SENDABLE: readonly BatchState[] = ['running', 'done'];
 
+/** A6 延後上限(Agent `power::DEFER_MAX`):延後中重設執行逾時,最多到「開始 + 此上限 + 類型逾時」(資安 M1) */
+const DEFER_MAX_MS = 4 * 3_600_000;
+/** A6 延後原因代碼(Agent 0.9.3 `result.deferred.reason`) */
+export const DEFER_REASONS = ['battery', 'metered'] as const;
+export type DeferReason = (typeof DEFER_REASONS)[number];
+
+/**
+ * running 的 `result.deferred`(Agent 0.9.3 起,軟體安裝 A6 延後中):只收已知原因代碼與可解析的時間,其他一律當成沒有
+ * (不把 Agent 的任意字串存進 result_summary;P7 驗收 §5-4)
+ */
+export function deferredOf(result: unknown): { reason: DeferReason; next_check_at: string } | null {
+  const d = (result as { deferred?: unknown } | undefined)?.deferred as { reason?: unknown; next_check_at?: unknown } | undefined;
+  if (!d || typeof d !== 'object') return null;
+  if (!DEFER_REASONS.includes(d.reason as DeferReason)) return null;
+  if (typeof d.next_check_at !== 'string' || d.next_check_at.length > 40) return null;
+  const t = Date.parse(d.next_check_at);
+  if (Number.isNaN(t)) return null;
+  return { reason: d.reason as DeferReason, next_check_at: new Date(t).toISOString() };
+}
+
 const parse = (s: string | null): Record<string, unknown> | null => {
   if (!s) return null;
   try {
@@ -901,6 +921,19 @@ export class CommandDispatcher {
     if (body.progress !== undefined) patch.progress = body.progress;
     if (target === 'acked' || target === 'running') {
       patch.timeoutAt = new Date(at.getTime() + commandTimeoutSec(cmd.kind, cmd.params) * 1000);
+    }
+    if (target === 'running' && cmd.kind === 'software.install') {
+      // A6 延後中:result_summary 暫存延後狀態(畫面顯示「延後中(原因)」),並重設執行逾時(延後最多 4 小時,不該被判 TIMEOUT);
+      // 之後不帶 deferred 的 running 清除;終態的 result 覆寫
+      // 已進入下載 / 安裝(進度 > 0)後不再接受延後;重設的逾時不超過「開始 + 延後上限 + 類型逾時」,
+      // 被冒用的裝置不能讓指令永遠不逾時、一直佔住並行名額(資安 M1)
+      const deferred = (cmd.progress ?? 0) === 0 ? deferredOf(body.result) : null;
+      if (deferred) {
+        const cap = (cmd.startedAt ?? cmd.ackedAt ?? at).getTime() + DEFER_MAX_MS + commandTimeoutSec(cmd.kind, cmd.params) * 1000;
+        patch.resultSummary = JSON.stringify({ deferred });
+        patch.timeoutAt = new Date(Math.min(patch.timeoutAt!.getTime(), cap));
+        patch.resetTimeout = true;
+      } else if (cmd.resultSummary !== null) patch.resultSummary = null;
     }
     if (isFinal(target)) {
       if (body.result !== undefined) {

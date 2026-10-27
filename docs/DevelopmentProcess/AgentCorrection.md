@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。本檔自 P7-2 起記錄 `RustAgent/` 的修改,先前的 Agent 變更記在 `NewFeatures.md` / `BugFix.md`。
 
+## 2026-10-27 P7 驗收後修正:Windows Installer 忙碌判斷(L3)、延後回報(Agent 0.9.3)
+- 內容:需求方 2026-10-27 決定(設計 §8.1.5)。分支 `feature/p7-0.9.3`。(1)L3:`_MSIExecute` 擁有者改為 SYSTEM 或 Administrators(SYSTEM 權杖預設擁有者是 Administrators,0.9.2 只認 SYSTEM 所以永遠判為空閒);common 新增 `scm::msi_mutex`、`msiserver_running`,Agent `software::msi_busy`(純函式);逾時後再看 60 秒(原 10 分鐘)並如實回報「Windows Installer 仍在執行」與 `result.installer_busy`;執行 msiexec 前(MSI 安裝 / 移除)忙碌就等空閒(每 30 秒、最多 15 分鐘,超過 `INSTALL_BUSY`、不啟動)。Watchdog 用的 `installer_running` 不改(§8.2-16)。(2)A6 延後:每次檢查寫一行日誌(原因、下次檢查時間),`Env::deferred` → `command::report_deferred` 回報 `running` + `result.deferred`;解除時送不帶 deferred 的 running;`power::defer_reason` 改回 `Defer`(代碼 / 中文)。版本 0.9.3。
+- 檔案:`RustAgent/crates/common/src/scm.rs`、`RustAgent/crates/agent/src/software/mod.rs`、`power.rs`、`tests.rs`、`src/command.rs`、`Cargo.toml`;`docs/contracts/command-kinds.md`、`ws-envelope.schema.json`;`docs/P7-SOFTWARE-DESIGN.md` §8.1.5、§8.2-15~17。
+- 驗證:`cargo test -p rustit-agent` 133/133(新增 `msi_busy_rules`、`msi_waits_for_idle_before_running`,改寫 `timeout_waits_for_windows_installer`、`a6_defers_until_power_returns`)、`cargo test -p rustit-common` 通過、`cargo build -p rustit-watchdog` 通過(Watchdog 行為不變)。VM 重測 L3 / #9 / #11 待需求方。
+
 ## 2026-10-27 P7 VM 驗收:資安稽核新發現的決定(文件)
 - 內容:需求方 2026-10-27 決定(「4 項新發現照你的建議」),寫入設計 §8.1.4 與 §8.2 已知限制 / 上線前待辦:(1)修改已發佈套件的逾時不需第二人確認——接受(只影響等待時間,不影響安裝內容);(2)`REMOVE=` 逐一列出所有功能等於 `REMOVE=ALL`——已知限制 §8.2-11;(3)上架腳本查重用 endpoint-server 可寫入的 SQL 帳號且需主機 root 執行 docker——上線前待辦 §8.2-13(改唯讀 API 或只能 SELECT 的帳號);(4)NAS `RustIT\test` / `RustIT\prod` 寫入群組分開——上線前待辦 §8.2-14(NAS 管理員)。另確認「版本字串無法解析時當成已安裝」列為已知限制(§8.2-9)。程式不變。
 - 檔案:`docs/P7-SOFTWARE-DESIGN.md` §8.1.4、§8.2。

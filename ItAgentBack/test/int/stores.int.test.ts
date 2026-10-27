@@ -663,6 +663,12 @@ describe('SQL Server + Mongo + Redis', () => {
     assert.deepEqual([(await cmds.getCommand(c2.commandId))!.state, (await cmds.getCommand(c2.commandId))!.errorCode], ['canceled', 'PACKAGE_REVOKED']);
     assert.equal((await cmds.getCommand(c1.commandId))!.state, 'sent');
     assert.deepEqual(await sw.revoke(p.packageId, creator, at, 'int-p7'), { ok: false, canceledCommands: 0 });
+    // 0010:撤回後同一檔案可重新登錄(篩選唯一索引只限未撤回);版本號仍不可重用;兩筆未撤回不可共用檔案
+    await assert.rejects(sw.addPackage(base), { code: 'ITA_PACKAGE_EXISTS' }, '已撤回的版本號');
+    const again = await sw.addPackage({ ...base, version: '24.10' });
+    assert.equal(again.fileName, base.fileName);
+    await assert.rejects(sw.addPackage({ ...base, version: '24.11' }), { code: 'ITA_PACKAGE_EXISTS' }, '未撤回仍佔用');
+    assert.equal((await sw.revoke(again.packageId, creator, at, 'int-p7')).ok, true);
     assert.equal(await sw.deviceRing(d.id), 'all');
 
     // 已安裝台數(DisplayName LIKE;_ 與 [ 跳脫、% 萬用)
