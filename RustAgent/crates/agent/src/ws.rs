@@ -21,7 +21,7 @@ use rustit_common::backoff::Backoff;
 use rustit_common::backoff::random_up_to;
 use rustit_common::stop::wait;
 use rustit_common::transport::{SendError, WsStream};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -209,10 +209,19 @@ const UPDATE_RESEND: Duration = Duration::from_secs(60);
 /// 本連線已送出、等 ack 的 command_update
 #[derive(Default)]
 struct SentUpdates {
-    /// 信封 id → (command_id, state):ack 沿用信封 id,據此標記確切是哪一則被確認
-    by_envelope: HashMap<String, (String, String)>,
-    /// command_id → (最後送出的 state, 送出時間):同一狀態在 UPDATE_RESEND 內不重送
-    last: HashMap<String, (String, Instant)>,
+    /// 信封 id → (command_id, 送出的整則 update):ack 沿用信封 id,只有本機最新的仍是這則才標記已回報(0.9.4)
+    by_envelope: HashMap<String, (String, Value)>,
+    /// command_id → (最後送出的 state 與 result, 送出時間):相同的在 UPDATE_RESEND 內不重送
+    last: HashMap<String, (Value, Value, Instant)>,
+}
+
+/// 同一則(state 與 result 都相同)在 UPDATE_RESEND 內不重送;只有進度不同的 running 也一樣(下載中每 5 秒一次,不逐次送)。
+/// result 不同(A6 延後開始 / 解除、下次檢查時間)一定送:0.9.3 只比 state,`running` 之後立刻來的
+/// `running + result.deferred` 被略過,畫面要到下一次檢查(5 分鐘後)才顯示「延後中」(P7 驗收 §10.2-3)
+fn recently_sent(last: Option<&(Value, Value, Instant)>, v: &Value) -> bool {
+    last.is_some_and(|(state, result, at)| {
+        *state == v["state"] && *result == v["result"] && at.elapsed() < UPDATE_RESEND
+    })
 }
 
 /// 送出本機尚未被主機確認的 command_update
@@ -229,20 +238,20 @@ async fn flush_updates(
         }
     };
     for v in pending {
-        let (Some(id), Some(state)) = (v["command_id"].as_str(), v["state"].as_str()) else {
+        let Some(id) = v["command_id"].as_str().filter(|_| v["state"].is_string()) else {
             continue;
         };
-        if let Some((s, at)) = sent.last.get(id)
-            && s == state
-            && at.elapsed() < UPDATE_RESEND
-        {
+        if recently_sent(sent.last.get(id), &v) {
             continue;
         }
-        let (id, state) = (id.to_string(), state.to_string());
-        let env = Envelope::new("command_update", v);
+        let id = id.to_string();
+        let last = (v["state"].clone(), v["result"].clone(), Instant::now());
+        let env = Envelope::new("command_update", v.clone());
         send(ws, &env).await?;
-        sent.by_envelope.insert(env.id, (id.clone(), state.clone()));
-        sent.last.insert(id, (state, Instant::now()));
+        // 同一指令只留最新一則等 ack:舊信封的 ack 本來就不會再標記,主機一直不回 ack 時也不累積(資安 L1)
+        sent.by_envelope.retain(|_, (c, _)| *c != id);
+        sent.by_envelope.insert(env.id, (id.clone(), v));
+        sent.last.insert(id, last);
     }
     Ok(())
 }
@@ -259,8 +268,8 @@ fn on_update_ack(shared: &Shared, env: Envelope, sent: &mut SentUpdates) {
                 ack.command_id
             );
         }
-        if let Some((id, state)) = sent.by_envelope.remove(&env.id)
-            && let Err(e) = shared.store.lock().command_reported(&id, &state)
+        if let Some((id, update)) = sent.by_envelope.remove(&env.id)
+            && let Err(e) = shared.store.lock().command_reported(&id, &update)
         {
             warn!("無法標記指令狀態已回報:{e}");
         }
@@ -313,7 +322,7 @@ async fn session(
     let mut period = DEFAULT_HEARTBEAT;
     let mut beat = ticker(period);
     let mut last_rx = Instant::now();
-    // 收到 hello_ack(裝置未被停用)後才送指令狀態;本連線已送出、等 ack 的 (command_id → state)
+    // 收到 hello_ack(裝置未被停用)後才送指令狀態;本連線已送出、等 ack 的 (command_id → 整則 update)
     let mut ready = false;
     let mut sent_updates = SentUpdates::default();
     let mut hold = shared.ws_hold.subscribe();
@@ -432,5 +441,50 @@ async fn session(
                 return Ok(End::Shutdown);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn running(result: Option<Value>) -> Value {
+        let mut v = json!({ "command_id": "c", "state": "running", "progress": 0, "occurred_at": "2026-10-28T09:36:03.100Z" });
+        if let Some(r) = result {
+            v["result"] = r;
+        }
+        v
+    }
+
+    #[test]
+    fn deferred_running_right_after_running_is_sent() {
+        // P7 驗收 §10.2-3:派送後 running,幾毫秒後 running + result.deferred;0.9.3 只比 state 而略過後者
+        let plain = running(None);
+        let last = (
+            plain["state"].clone(),
+            plain["result"].clone(),
+            Instant::now(),
+        );
+        assert!(recently_sent(Some(&last), &plain), "同一則 60 秒內不重送");
+        let deferred = running(Some(
+            json!({ "deferred": { "reason": "battery", "next_check_at": "2026-10-28T09:41:03Z" } }),
+        ));
+        assert!(!recently_sent(Some(&last), &deferred), "延後開始要立刻送");
+        // 下次檢查時間更新、延後解除(不帶 result 的 running)也要送
+        let d_last = (
+            deferred["state"].clone(),
+            deferred["result"].clone(),
+            Instant::now(),
+        );
+        let next = running(Some(
+            json!({ "deferred": { "reason": "battery", "next_check_at": "2026-10-28T09:46:03Z" } }),
+        ));
+        assert!(!recently_sent(Some(&d_last), &next));
+        assert!(!recently_sent(Some(&d_last), &plain));
+        // 只有進度不同的 running 仍節流(下載中每 5 秒一次)
+        let mut pct = plain.clone();
+        pct["progress"] = json!(40);
+        assert!(recently_sent(Some(&last), &pct));
+        assert!(!recently_sent(None, &plain));
     }
 }

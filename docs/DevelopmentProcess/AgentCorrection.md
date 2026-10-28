@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。本檔自 P7-2 起記錄 `RustAgent/` 的修改,先前的 Agent 變更記在 `NewFeatures.md` / `BugFix.md`。
 
+## 2026-10-28 P7 重驗觀察:延後狀態在畫面上落後一次檢查(Agent 0.9.4)
+- 內容:需求方 2026-10-28 決定查修(驗收報告 §10.2-3:派送當下日誌已有延後行,畫面要到下一次檢查前後才顯示「延後中」)。分支 `feature/p7-deferred-report`。根因在 Agent 的 command_update 送出 / ack(endpoint-server 與 GigaItApp 不需修改):派送時先存 `running`、幾毫秒後存 `running + result.deferred`(本機每個指令只保留最新一則)。(1)`ws.rs` `flush_updates` 以「同一 state 在 60 秒內不重送」略過,第二則與第一則同為 `running` 而沒送出;(2)接著主機回第一則 `running` 的 ack,`store.rs` `command_reported` 只比 state,把尚未送出的延後那則一起標成已回報,之後不再重送;要等 5 分鐘後下一次檢查保存新的 `next_check_at` 才送出。修正:ack 只有在本機最新的 update 仍是被確認的那則(整則比對,在同一把 store 鎖內)才標記;重送節流改比 state 與 result,result 不同(延後開始 / 下次檢查時間 / 解除)一定立即送,只有進度不同的 running 仍 60 秒節流(下載中進度不逐次送,與先前相同;被略過的最新進度不再被舊 ack 標掉,下個心跳補送);同一指令只留最新一則等 ack 的信封(資安稽核 L1:主機一直不回 ack 時不在記憶體累積)。版本 0.9.3 → **0.9.4**;Watchdog 不改。
+- 檔案:`RustAgent/crates/agent/src/ws.rs`、`src/store.rs`、`agent/Cargo.toml`、`Cargo.lock`。
+- 驗證:`cargo test -p rustit-agent` 135/135(新增 `store::tests::ack_of_earlier_running_keeps_later_deferred_unreported`、`ws::tests::deferred_running_right_after_running_is_sent`,重現 §10.2-3 的時序)、`cargo test -p rustit-common` 通過、`cargo build -p rustit-watchdog` 通過;code-reviewer(無必修,採納註解更新)、security-auditor(無 Critical / High / Medium,L1 已修)已跑。VM 重驗(#11 延後顯示)待 0.9.4 建置與發佈後由需求方執行。
+
 ## 2026-10-27 P7 驗收後修正:Windows Installer 忙碌判斷(L3)、延後回報(Agent 0.9.3)
 - 內容:需求方 2026-10-27 決定(設計 §8.1.5)。分支 `feature/p7-0.9.3`。(1)L3:`_MSIExecute` 擁有者改為 SYSTEM 或 Administrators(SYSTEM 權杖預設擁有者是 Administrators,0.9.2 只認 SYSTEM 所以永遠判為空閒);common 新增 `scm::msi_mutex`、`msiserver_running`,Agent `software::msi_busy`(純函式);逾時後再看 60 秒(原 10 分鐘)並如實回報「Windows Installer 仍在執行」與 `result.installer_busy`;執行 msiexec 前(MSI 安裝 / 移除)忙碌就等空閒(每 30 秒、最多 15 分鐘,超過 `INSTALL_BUSY`、不啟動)。Watchdog 用的 `installer_running` 不改(§8.2-16)。(2)A6 延後:每次檢查寫一行日誌(原因、下次檢查時間),`Env::deferred` → `command::report_deferred` 回報 `running` + `result.deferred`;解除時送不帶 deferred 的 running;`power::defer_reason` 改回 `Defer`(代碼 / 中文)。版本 0.9.3。
 - 檔案:`RustAgent/crates/common/src/scm.rs`、`RustAgent/crates/agent/src/software/mod.rs`、`power.rs`、`tests.rs`、`src/command.rs`、`Cargo.toml`;`docs/contracts/command-kinds.md`、`ws-envelope.schema.json`;`docs/P7-SOFTWARE-DESIGN.md` §8.1.5、§8.2-15~17。
