@@ -342,7 +342,11 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
         case 'hello':
           send('hello_ack', m.id, await service.hello(mctx, device, m.body as unknown as HelloBody));
           // 重連補送 queued 指令(指南 §8.4);在 hello_ack 之後(Agent 才知道時鐘偏差)。不等待,避免擋住心跳
-          if (commands) void commands.onHello(mctx, device.id);
+          // 只退回這條連線登記前送出的;這條連線已被取代時不處理(新連線的 hello 會處理)
+          if (commands) {
+            const connectedAt = service.connectedAt(device.deviceId, conn);
+            if (connectedAt) void commands.onHello(mctx, device.id, connectedAt);
+          }
           return;
         case 'command_update': {
           if (!commands) return send('unsupported', m.id, { type: m.type });

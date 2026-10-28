@@ -787,11 +787,11 @@ export class MemoryCommandStore extends Failable implements CommandStore, Comman
     if (['succeeded', 'failed', 'canceled', 'expired'].includes(p.state)) c.finishedAt = p.at;
     return true;
   }
-  async requeueSent(deviceRef: number) {
+  async requeueSent(deviceRef: number, sentBefore?: Date) {
     this.hit('requeueSent');
     let n = 0;
     for (const c of this.commands)
-      if (c.deviceRef === deviceRef && c.state === 'sent') {
+      if (c.deviceRef === deviceRef && c.state === 'sent' && (!sentBefore || (!!c.sentAt && c.sentAt < sentBefore))) {
         c.state = 'queued';
         n++;
       }

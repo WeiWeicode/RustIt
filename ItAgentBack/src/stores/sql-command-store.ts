@@ -323,10 +323,14 @@ export class SqlCommandStore implements CommandStore, CommandFileStore {
     return (r.rowsAffected[0] ?? 0) > 0;
   }
 
-  async requeueSent(deviceRef: number): Promise<number> {
+  async requeueSent(deviceRef: number, sentBefore?: Date): Promise<number> {
     const r = await (await this.request())
       .input('dev', sql.Int, deviceRef)
-      .query(`UPDATE ita.command SET state = 'queued', updated_at = SYSUTCDATETIME() WHERE device_ref = @dev AND state = 'sent'`);
+      .input('before', sql.DateTime2(3), sentBefore ?? null)
+      .query(
+        `UPDATE ita.command SET state = 'queued', updated_at = SYSUTCDATETIME()
+          WHERE device_ref = @dev AND state = 'sent' AND (@before IS NULL OR sent_at < @before)`,
+      );
     return r.rowsAffected[0] ?? 0;
   }
 

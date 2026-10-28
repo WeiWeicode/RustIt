@@ -869,12 +869,16 @@ export class CommandDispatcher {
 
   /**
    * Agent 重連並收到 hello_ack 之後:依建立順序補送(指南 §8.4)。
-   * 先把 sent 改回 queued:上一條連線被新連線取代或半開時,未確認的指令沒有經過斷線處理(Agent 以 command_id 去重,重送無害)
+   * 先把 sent 改回 queued:上一條連線被新連線取代或半開時,未確認的指令沒有經過斷線處理(Agent 以 command_id 去重,重送無害)。
+   * 只改 connectedAt(這條連線登記)之前送出的:連線登記後、hello 處理前就推送到這條連線的指令不能改回 queued,
+   * 否則 Agent 立刻來下載時查不到被指派的安裝(404 ITA_PACKAGE_NOT_FOUND),running 也會從 queued 直接跳過去。
+   * 已知限制:trySend 的 sent_at 取在 claim(SQL)之前;派送在途時新連線剛好登記,sent_at 會早於 connectedAt 而仍被退回(窄窗口,
+   * Agent 以 command_id 去重、重派即可)。同一毫秒(sent_at = connectedAt)視為新連線的,不退回
    */
-  async onHello(ctx: Ctx, deviceRef: number): Promise<void> {
+  async onHello(ctx: Ctx, deviceRef: number, connectedAt?: Date): Promise<void> {
     let queued: CommandRecord[];
     try {
-      await this.store.requeueSent(deviceRef);
+      await this.store.requeueSent(deviceRef, connectedAt);
       queued = await this.store.queuedForDevice(deviceRef, this.now());
     } catch (err) {
       ctx.log.warn({ err }, '查詢待送指令失敗,下次掃描再送');

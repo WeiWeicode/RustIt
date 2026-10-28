@@ -70,6 +70,39 @@ describe('指令派送器', () => {
     );
   });
 
+  it('重連 hello 只退回這條連線登記前送出的;登記後、hello 處理前已推送到新連線的維持 sent 不重送(偶發下載 404)', async () => {
+    // 舊連線半開:送出後沒有經過斷線處理
+    await online(device);
+    const old = await env.commands.create(ctx, IT, 'basic', device.deviceId, { kind: 'inventory.collect' });
+    env.clock.advance(5);
+    const conn = await online(device);
+    const since = env.service.connectedAt(device.deviceId, conn);
+    assert.ok(since);
+    // 新連線已登記(在線),hello 還沒處理時派送:直接推送到新連線
+    const fresh = await env.commands.create(ctx, IT, 'basic', device.deviceId, { kind: 'message.show', params: { text: 'x' } });
+    assert.equal(fresh.state, 'sent');
+    await env.commands.onHello(ctx, device.id, since);
+    const rec = (id: string) => env.store.commands.find((c) => c.commandId === id)!;
+    assert.deepEqual([rec(fresh.commandId).state, rec(fresh.commandId).sendCount], ['sent', 1]);
+    assert.deepEqual([rec(old.commandId).state, rec(old.commandId).sendCount], ['sent', 2]);
+    assert.deepEqual(
+      commandsSent(conn).map((m) => m.id),
+      [fresh.commandId, old.commandId],
+    );
+  });
+
+  it('connectedAt:目前連線回登記時間;被取代或已關閉回 null(不做 hello 補送)', async () => {
+    const first = await online(device);
+    const at = env.service.connectedAt(device.deviceId, first);
+    assert.ok(at);
+    env.clock.advance(1);
+    const second = await online(device);
+    assert.equal(env.service.connectedAt(device.deviceId, first), null);
+    assert.ok(env.service.connectedAt(device.deviceId, second)! > at);
+    await env.service.disconnected(ctx, device, second);
+    assert.equal(env.service.connectedAt(device.deviceId, second), null);
+  });
+
   it('等級與路徑不符 400 ENDPOINT_COMMAND_LEVEL_MISMATCH;不認得的類型、參數錯誤、有效期限超出範圍 400', async () => {
     await assert.rejects(env.commands.create(ctx, IT, 'admin', device.deviceId, { kind: 'inventory.collect' }), { code: 'ENDPOINT_COMMAND_LEVEL_MISMATCH' });
     await assert.rejects(env.commands.create(ctx, IT, 'basic', device.deviceId, { kind: 'system.format' }), { code: 'ITA_COMMAND_KIND_UNKNOWN' });

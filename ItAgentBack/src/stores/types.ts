@@ -428,8 +428,8 @@ export interface CommandStore {
   listCommands(filter: CommandFilter): Promise<CommandRecord[]>;
   /** 條件更新:目前狀態在 from 之內才更新,回傳是否更新(狀態只能往前,指南 §8.4) */
   transition(id: number, from: CommandState[], patch: CommandPatch): Promise<boolean>;
-  /** WebSocket 斷線:該裝置 sent(尚未 acked)改回 queued */
-  requeueSent(deviceRef: number): Promise<number>;
+  /** WebSocket 斷線:該裝置 sent(尚未 acked)改回 queued;給 sentBefore 時只改在此之前送出的(重連 hello:不動新連線已送出的) */
+  requeueSent(deviceRef: number, sentBefore?: Date): Promise<number>;
   /** 該裝置未逾期的 queued,依建立順序 */
   queuedForDevice(deviceRef: number, now: Date): Promise<CommandRecord[]>;
   /** 該批次未逾期的 queued,依建立順序 */

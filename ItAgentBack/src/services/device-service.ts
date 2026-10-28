@@ -717,6 +717,12 @@ export class DeviceService implements CommandChannel {
     return !!current && current.conn !== conn;
   }
 
+  /** conn 是該裝置目前的連線時,回傳登記時間;已被取代或已關閉回 null */
+  connectedAt(deviceId: string, conn: AgentConnection): Date | null {
+    const current = this.connections.get(deviceId);
+    return current && current.conn === conn ? current.connectedAt : null;
+  }
+
   async disconnected(ctx: Ctx, device: DeviceRecord, conn: AgentConnection): Promise<void> {
     // 被新連線取代的舊連線關閉時,不影響新連線的在線狀態
     if (this.connections.get(device.deviceId)?.conn !== conn) return;
