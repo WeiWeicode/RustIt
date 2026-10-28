@@ -497,12 +497,16 @@ impl Store {
         Ok(())
     }
 
-    /// 主機回 command_update_ack:狀態相同才標記(之後又有新狀態時仍要送)
-    pub fn command_reported(&self, id: &str, state: &str) -> R<()> {
+    /// 主機回 command_update_ack:本機最新的仍是被確認的那則才標記(之後又有新的 update 時仍要送)。
+    /// 0.9.3 只比 state:`running` 的 ack 會把之後才保存、尚未送出的 `running + result.deferred` 一起標成已回報(P7 驗收 §10.2-3)
+    pub fn command_reported(&self, id: &str, update: &Value) -> R<()> {
+        if self.command_last_update(id)?.as_ref() != Some(update) {
+            return Ok(());
+        }
         self.conn
             .execute(
-                "UPDATE command_log SET reported = 1 WHERE command_id = ?1 AND state = ?2",
-                params![id, state],
+                "UPDATE command_log SET reported = 1 WHERE command_id = ?1",
+                [id],
             )
             .map_err(db_err)?;
         Ok(())
@@ -579,6 +583,29 @@ mod tests {
     }
 
     #[test]
+    fn ack_of_earlier_running_keeps_later_deferred_unreported() {
+        // P7 驗收 §10.2-3:running 送出後、ack 回來前已保存 running + result.deferred;
+        // running 的 ack 不能把尚未送出的延後狀態標成已回報(0.9.3 只比 state,畫面要等 5 分鐘)
+        let (_dir, s) = open();
+        let id = "5b2e8c1d-4f3a-4e6b-9d7c-1a2b3c4d5e02";
+        s.command_begin(id, "software.install", "2026-10-28T09:36:03.000Z")
+            .unwrap();
+        let running = json!({ "command_id": id, "state": "running", "occurred_at": "2026-10-28T09:36:03.100Z" });
+        s.command_save(id, "running", &running, "2026-10-28T09:36:03.100Z")
+            .unwrap();
+        let deferred = json!({
+            "command_id": id, "state": "running", "progress": 0, "occurred_at": "2026-10-28T09:36:03.180Z",
+            "result": { "deferred": { "reason": "battery", "next_check_at": "2026-10-28T09:41:03Z" } }
+        });
+        s.command_save(id, "running", &deferred, "2026-10-28T09:36:03.180Z")
+            .unwrap();
+        s.command_reported(id, &running).unwrap();
+        assert_eq!(s.command_unreported().unwrap(), vec![deferred.clone()]);
+        s.command_reported(id, &deferred).unwrap();
+        assert!(s.command_unreported().unwrap().is_empty());
+    }
+
+    #[test]
     fn command_log_dedup_and_unreported() {
         let (dir, s) = open();
         let id = "5b2e8c1d-4f3a-4e6b-9d7c-1a2b3c4d5e01";
@@ -600,7 +627,7 @@ mod tests {
         s.command_save(id, "succeeded", &done, "2026-10-06T08:00:02Z")
             .unwrap();
         // 舊狀態的 ack 不算
-        s.command_reported(id, "running").unwrap();
+        s.command_reported(id, &running).unwrap();
         assert_eq!(s.command_unreported().unwrap(), vec![done.clone()]);
         let raw: Vec<u8> = s
             .conn
@@ -612,8 +639,8 @@ mod tests {
         );
         drop(s);
         let s = Store::open(dir.path()).unwrap();
-        assert_eq!(s.command_last_update(id).unwrap(), Some(done));
-        s.command_reported(id, "succeeded").unwrap();
+        assert_eq!(s.command_last_update(id).unwrap(), Some(done.clone()));
+        s.command_reported(id, &done).unwrap();
         assert!(s.command_unreported().unwrap().is_empty());
         assert_eq!(s.purge_command_log("2026-10-06T08:00:01Z").unwrap(), 0);
         assert_eq!(s.purge_command_log("2026-10-07T00:00:00Z").unwrap(), 1);
