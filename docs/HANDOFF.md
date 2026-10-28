@@ -27,11 +27,10 @@
    - **下一步(依序)**
      1. 需求方在 GigaItApp 把 0.9.3 發佈(進行中);發佈後確認 pilot 環目標仍是 0.9.3。
      2. `all` / `it` 環何時推 0.9.3 由需求方決定(測試區只有 VM + 開發機兩台)。
-     3. 查「延後第一次回報畫面落後」(見下方「上線前待辦」第一項),不影響功能,可排在上線前。
+     3. **延後第一次回報畫面落後:另一個子任務查修中**(需求方 2026-10-28 決定派 Opus),分支 `feature/p7-deferred-report`,Agent 會出 **0.9.4**;**發版(建置 → 簽章 → 上架 → 登錄)並在 VM 重驗延後顯示後才算完成**,0.9.3 仍照原決定發佈。現象:電池 / 計量網路延後時,Agent 日誌在派送當下就寫「延後下載,下次檢查…」,但 GigaItApp 指令詳情要到第一次再檢查後(約 5 分鐘)才由「執行中」變「延後中(原因)」。可疑處:`RustAgent/crates/agent/src/command.rs` `report_deferred`(以 `running` + `result.deferred` 回報,與前一筆 `running` 同狀態)、endpoint-server 暫存 `result.deferred` 的時機、GigaItApp 指令列表輪詢。證據見驗收報告 §10.2-3。
      4. 下次發 Watchdog **0.3.6**,一起修 Windows Installer 忙碌判斷的擁有者問題(設計 §8.2-16)。
      5. **上線前準備**(正式區):migration 0009、0010 先套 `giganexus_It_Agent`、正式程式碼簽章憑證(IT AD CS)與 `-Environment prod` 演練、主機 3 掛 `RustIT\prod\...`、NAS 寫入群組分開與唯讀掛載帳號、上架腳本查重改用唯讀 API / 只能 SELECT 的帳號。
    - **上線前待辦 / 待驗**
-     - **延後回報落後(待查,未改程式)**:電池 / 計量網路延後時,Agent 日誌在派送當下就寫「延後下載,下次檢查…」,但 GigaItApp 指令詳情要到第一次再檢查後(約 5 分鐘)才由「執行中」變「延後中(原因)」。可疑處:`RustAgent/crates/agent/src/command.rs` `report_deferred`(以 `running` + `result.deferred` 回報,與前一筆 `running` 同狀態)、endpoint-server 暫存 `result.deferred` 的時機、GigaItApp 指令列表輪詢。證據見驗收報告 §10.2-3。
      - Watchdog 的 Windows Installer 忙碌判斷有和 L3 同樣的擁有者問題(設計 §8.2-16):這次不修,下次發 Watchdog **0.3.6** 時一起修。
      - 驗收未涵蓋:#12 批次 > 20 台第二人核可、下載 429、Watchdog 在軟體派送中延後升級 Agent、#3 第 3 台電腦、#11「恢復後繼續」與 `DEFERRED_TIMEOUT`(需要實機電池或計量網路)。
      - 上架腳本查重用的 SQL 帳號可以寫入,而且要以 root 執行 docker:正式區前改成唯讀 API 或只能 SELECT 的帳號。NAS `RustIT\test`、`RustIT\prod` 的寫入群組要分開(NAS 管理員);NAS 掛載帳號改成唯讀帳號。
