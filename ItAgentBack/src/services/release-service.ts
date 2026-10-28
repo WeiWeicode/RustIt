@@ -509,6 +509,12 @@ export class ReleaseService {
     return { items: rows.map(releaseView) };
   }
 
+  /** 版本號查重(上架腳本,API Key):同一元件同一版本號的登錄紀錄(含已撤回);只回元件、版本、狀態 */
+  async registry(ctx: MgmtCtx, component: ReleaseComponent, version: string): Promise<{ items: Pick<ReleaseView, 'component' | 'version' | 'status'>[] }> {
+    const rows = await this.sqlDo(ctx, 'release.list', () => this.store.listReleases({ component }));
+    return { items: rows.filter((r) => r.version === version).map((r) => ({ component: r.component, version: r.version, status: r.status })) };
+  }
+
   /** 版本檔目錄內尚未登錄的檔案 */
   async unregisteredFiles(ctx: MgmtCtx): Promise<{ items: (Omit<ReleaseFileInfo, 'modifiedAt'> & { modifiedAt: string })[] }> {
     const [files, rows] = await Promise.all([this.files.list(), this.sqlDo(ctx, 'release.list', () => this.store.listReleases({}))]);

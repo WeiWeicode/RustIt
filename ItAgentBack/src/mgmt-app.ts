@@ -133,7 +133,7 @@ export async function buildMgmtApp(opts: MgmtAppOptions): Promise<FastifyInstanc
   await app.register(deviceRoutes(service));
   if (opts.commands) await app.register(commandRoutes(opts.commands, opts.files));
   if (opts.alerts) await app.register(alertRoutes(opts.alerts));
-  if (opts.releases) await app.register(releaseRoutes(opts.releases));
+  if (opts.releases) await app.register(releaseRoutes(opts.releases, config.gateway.gwEnv));
   if (opts.software) await app.register(softwareRoutes(opts.software));
   return app;
 }

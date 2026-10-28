@@ -3,6 +3,7 @@
  *   - 查詢(endpoint.device.read):版本清單、未登錄的版本檔、發佈環目標與進度、裝置升級狀態
  *   - 版本登錄、發佈 / 撤回、環目標(endpoint.software.manage,且需全部公司角色,需求方 2026-10-20 §9-5):x-audit-level: meta
  *   - 裝置所屬環(endpoint.command.admin,PLATFORM-PLAN §5.3)
+ *   - 版本號查重(endpoint.release.registry,Gateway auth_mode = api_key):上架腳本以 API Key 呼叫(S1-SIGNING-DESIGN §2)
  * 路由只驗參數與宣告權限,邏輯在 ReleaseService(AGENT.md §8.1)。
  */
 import type { GatewayIdentity } from '@giganexus/backend-sdk';
@@ -95,7 +96,8 @@ const deviceUpgradeSchema = {
 const releaseIdParams = { type: 'object', required: ['releaseId'], properties: { releaseId: { type: 'string', format: 'uuid' } } } as const;
 const deviceIdParams = { type: 'object', required: ['deviceId'], properties: { deviceId: { type: 'string', format: 'uuid' } } } as const;
 
-export function releaseRoutes(releases: ReleaseService): FastifyPluginAsync {
+/** gwEnv:本服務所在部署區,版本號查重回傳給上架腳本確認查到的是目標區 */
+export function releaseRoutes(releases: ReleaseService, gwEnv: string): FastifyPluginAsync {
   return async (app) => {
     const who = (req: FastifyRequest): GatewayIdentity => {
       if (!req.identity) throw new AppError(401, 'ITA_INTERNAL_TOKEN_INVALID', '缺少內部 Token');
@@ -165,6 +167,52 @@ export function releaseRoutes(releases: ReleaseService): FastifyPluginAsync {
         },
       },
       async (req) => releases.unregisteredFiles(mgmtCtx(req)),
+    );
+
+    app.get<{ Querystring: { component: ReleaseComponent; version: string } }>(
+      '/v1/releases/registry',
+      {
+        schema: {
+          operationId: 'endpoint.release.registry',
+          summary: '版本號查重(上架腳本)',
+          description:
+            '上架腳本放檔前確認同一元件同一版本號是否已登錄(含已撤回,撤回的版本號也不能重用)。系統對系統路由:以 API Key 呼叫,只回元件、版本、狀態與所在部署區(environment),不含檔案路徑與簽章者。',
+          tags: TAGS,
+          'x-auth-mode': 'api_key',
+          'x-permission': 'endpoint.release.registry',
+          'x-gherkin': [
+            '場景: 上架前查詢版本號是否已登錄',
+            '  假如 測試區已登錄 agent 0.7.1 且已撤回',
+            '  而且 API Key 具備 endpoint.release.registry',
+            '  當 以 X-Api-Key 呼叫 GET /api/endpoint/releases/registry?component=agent&version=0.7.1',
+            '  那麼 回應 200',
+            '  而且 environment 為 "test"',
+            '  而且 items 包含 version 為 "0.7.1"、status 為 "revoked" 的版本',
+          ].join('\n'),
+          querystring: {
+            type: 'object',
+            required: ['component', 'version'],
+            additionalProperties: false,
+            properties: { component: { type: 'string', enum: COMPONENTS }, version: VERSION },
+          },
+          response: {
+            200: {
+              type: 'object',
+              properties: {
+                environment: { type: 'string', description: '本服務所在部署區(GW_ENV)' },
+                items: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: { component: { type: 'string', enum: COMPONENTS }, version: { type: 'string' }, status: { type: 'string', enum: STATUSES } },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      async (req) => ({ environment: gwEnv, ...(await releases.registry(mgmtCtx(req), req.query.component, req.query.version)) }),
     );
 
     app.post<{ Body: RegisterInput }>(

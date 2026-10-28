@@ -8,6 +8,8 @@ import type { SwaggerOptions } from '@fastify/swagger';
 declare module 'fastify' {
   interface FastifySchema {
     'x-permission'?: string;
+    /** 系統對系統路由(Gateway BACKEND-GUIDE §6,v0.8):X-Api-Key 驗證,x-permission 為 API Key 須具備的權限 */
+    'x-auth-mode'?: 'api_key';
     'x-gherkin'?: string;
     'x-audit-level'?: 'none' | 'meta' | 'body';
     'x-cache-ttl'?: number;
@@ -30,6 +32,8 @@ export const PERMISSIONS = [
   { code: 'endpoint.command.admin', name: '端點管理指令' },
   // P6 版本登錄、發佈環(指南 §8.2;P7 軟體目錄沿用)
   { code: 'endpoint.software.manage', name: '端點軟體與版本管理' },
+  // S1-1 上架腳本以 API Key 查詢版本號(S1-SIGNING-DESIGN §2):只授予 API Key,不授予使用者角色
+  { code: 'endpoint.release.registry', name: '端點版本號查詢(上架腳本)' },
 ];
 
 export function swaggerOptions(serviceCode: string, project: string): SwaggerOptions {
