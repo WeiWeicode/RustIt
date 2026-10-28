@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-28 ADR 0005 簽章與上架流程改善(建議中)
+- 內容:評估目前依賴簽章人員電腦的發版與軟體上架流程,提出:GigaItApp 上傳套件;所有派送套件以公司「軟體發佈憑證」重簽、端點只信任公司指紋(不採主機下發信任清單);Agent 發版與軟體重簽共用「簽章工作站」程式(經 NAS 佇列、不開連入 port,先在簽章人員電腦手動、再搬專用簽章機);登錄改走 GigaItApp 取代 ssh + SQL;分 S1~S3 階段與待決事項。
+- 檔案:`docs/decisions/0005-signing-and-publishing-pipeline.md`(新)、`docs/PROJECT-MAP.md`、`AGENT.md`
+- 驗證:文件,無程式變更
+
 ## 2026-10-21 P6-6 收尾:P6 升級測試區完成
 - 內容:依設計 §0「P6-6 收尾」:RUNBOOK 新增 §2 版本回滾(撤回止血、設回舊版需 `force`、版本下限 Agent 0.7.0 / Watchdog 0.3.0、單台 `agent.upgrade`、`ROLLBACK_FAILED` 處理),§1 上架指令補必填 `-Environment`;HANDOFF 目前狀態改為 Agent 0.8.2 / Watchdog 0.3.2、P6 完成與上線前待辦、修正 P6-5 狀態(GigaItApp MR !9 已上測試區);設計文件加完成摘要。跨 repo(需求方同意):Gateway `ENDPOINT-AGENT-GUIDE.md` v0.11(giga-api-gateway-bff MR !7,`978334b`)、根目錄 `workspace.json` / `PROJECT-MAP.md` / 甘特圖 seed W6-19 100% done(giganexusai MR !8,`94a5d40`;甘特圖 DB 已經 API 更新)。`command-kinds.md` 已有 `agent.upgrade`,不需修改。
 - 檔案:`docs/RUNBOOK.md`、`docs/HANDOFF.md`、`docs/P6-UPGRADE-DESIGN.md`
