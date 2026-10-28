@@ -1,6 +1,6 @@
 # P7 軟體派送:Agent 0.9.2 發版與 VM 驗收
 
-> **狀態:0.9.2 驗收完成,L3 未通過(§5-6);Agent 0.9.3 於 2026-10-28 重驗,L3 與其餘 6 項全部通過,見 §10。Watchdog 延後升級(需求方決定不做)、#3 第 3 台、#12、下載 429、延後「恢復後繼續」仍未驗證**(見 §3、§4、§10.3)。測試套件已撤回(§8),其餘清理由需求方處理。取代 2026-10-22 的進行中版本(Agent 0.9.1 / Watchdog 0.3.5 的發版與 #1、#2 結果併入本檔)。
+> **狀態:0.9.2 驗收完成,L3 未通過(§5-6);Agent 0.9.3 於 2026-10-28 重驗,L3 與其餘 6 項全部通過,見 §10;「延後第一次回報畫面落後」已於 Agent 0.9.4 修正並重驗通過(§11),另記錄一次間歇性下載 404(§11.4)待查。Watchdog 延後升級(需求方決定不做)、#3 第 3 台、#12、下載 429、延後「恢復後繼續」仍未驗證**(見 §3、§4、§10.3)。測試套件已撤回(§8),其餘清理由需求方處理。取代 2026-10-22 的進行中版本(Agent 0.9.1 / Watchdog 0.3.5 的發版與 #1、#2 結果併入本檔)。
 > 依需求方決定先用 2 台(開發機 `S1800-S112009` + VM `RUSTIT-P34`),設計中的「3 台」改 2 台,**第 3 台待補**。
 > 測試人:需求方(簽章、GigaItApp 操作、VM 內指令、NAS 放檔;第二人 V112001),Claude(雜湊與主機資料唯讀查證、經內建瀏覽器操作 GigaItApp、測試工具製作)。2026-10-27 起 GigaItApp 的登錄 / 派送 / 撤回由 Claude 在需求方已登入的瀏覽器操作,每個寫入都先取得需求方同意。
 
@@ -175,3 +175,56 @@
 | VM 環境變數 | `RUSTIT_TEST_POWER` 已清 | 無 |
 | `agent.toml`、`ita.env`、NAS、migration、發佈環 | 本次未動 | 無 |
 | 0.9.3 發佈狀態 | 仍為草稿,`pilot` 環目標 0.9.3、`all` 0.9.2、`it` 0.9.1,未動 | 通過後由主討論串安排發佈 |
+
+## 11. 0.9.4 發版與重驗(2026-10-28)
+
+> 0.9.3 重驗(§10)發現「延後第一次回報畫面落後」,另一個子任務修正為 Agent 0.9.4(RustIt !69,`9c06b12`,merge `a73f241`):`ws.rs` `flush_updates` 60 秒內同 state 跳過、`store.rs` `command_reported` 只比 state,把未送出的 `running + result.deferred` 標成已送;修正後延後開始 / 下次檢查時間 / 延後結束立即送出。只改 Agent,Watchdog 不變(0.3.5),無 migration,endpoint-server / GigaItApp 不用改。
+> 測試人:需求方(GitLab 建置、簽章、上架、VM 內指令),Claude(唯讀查版本表與主機日誌、經內建瀏覽器操作 GigaItApp;同意範圍:登錄 0.9.4 草稿、pilot 環目標改 0.9.4、派送 D2)。時間為本地時間(UTC+8)。
+
+### 11.1 發版
+
+| 步驟 | 結果 |
+| --- | --- |
+| 建置 | `build:release`:pipeline **502**、job **1442**,commit `a73f241f74b501a776c0b2b3cb518a350c36c0ed`(develop),成功(耗時約 533 秒,10:35 完成);產出 agent 0.9.4、watchdog 0.3.5(未改版本) |
+| 簽章 | `sign-release.ps1 -Test -NoTimestamp -ExpectedCommit a73f241f…`:簽章者 `bb8ced00c84798f6e098581e50f41b2ee4247cd3`(`GigaNexus Test Code Signing (RustIt P6, not for production)`),`test_mode=True`、`timestamp=none`,`signed_by=GSMCTW\S112009`,`signed_at=2026-10-28T02:37:58Z`,`source_commit=a73f241f…`,`source_sums_sha256=b19cfd0f9b9b3d3226d27e8a4c67a6c20e3ac57dceff905d814aead148e3be99` |
+| 簽章後 SHA-256 | **agent 0.9.4:`8ff81dd72e91ef95b7d89d8458ad0f4f1ee9a22564d199706b2847863ae45584`**(9,665,928 B);watchdog 0.3.5 簽章後 `506f273e58497a89e33f7589c95344f9e9af35c5fb3972dcd00207d47e6260d2`,**未上架**(版本號已登錄過,上架前從 `SHA256SUMS.signed.txt` 拿掉) |
+| 版本表查重 | 上架前由 Claude 唯讀查 `ita.agent_release`(`giganexus_It_Agent_test`,容器內應用程式自己的連線):agent 只有 0.9.0 / 0.9.1 / 0.9.2(已發佈)與 0.9.3(草稿),**0.9.4 沒登錄過**;上架腳本自己的查詢同樣 `REGISTRY-OK`、未登錄 |
+| 上架 | `publish-release.ps1 -Environment test`(先 `-DryRun` 通過):NAS **`RustIT\test\releases\agent\0.9.4\rustit-agent.exe`**;寫入後雜湊相符,經主機 2 唯讀掛載重算亦相符。NAS 其他路徑、`ita.env`、migration 都沒動 |
+| 登錄 | GigaItApp「Agent 版本」→「登錄版本」:Agent 0.9.4,預期簽章者 `bb8ced00…`,備註「修正延後第一次回報畫面落後(延後開始、下次檢查時間、延後結束立即送出)」;狀態**草稿**,主機計算 SHA-256 前綴 `8ff81dd72e91ef95…` 與簽章結果一致 |
+| 發佈環 | **pilot / Agent 目標改 0.9.4**(約 10:45;原 0.9.3);其餘未動:pilot Watchdog 0.3.5、`it` Agent 0.9.1、`all` Agent 0.9.2、`it` / `all` Watchdog 0.3.5,沒用 force。0.9.3 當時仍為草稿(發佈由需求方另行處理) |
+
+### 11.2 VM 升級到 0.9.4
+
+- 需求方在電腦詳情按「立即升級」(Watchdog 約 5 分鐘上報週期內也會自動取得目標);VM `rustit-agent.exe` ProductVersion **0.9.4**。
+- 電腦詳情「事件」Tab:10:46 `release_download`「下載 agent 0.9.4(9665928 bytes)」→ 10:46 `upgrade_started` `{"component":"agent","from":"0.9.3","to":"0.9.4"}` → 10:46「Agent 版本 0.9.4,上次結束:服務被停止」→ 10:47 **`upgrade_succeeded`** `{"component":"agent","duration_ms":43623,"from":"0.9.3","to":"0.9.4"}`。
+
+### 11.3 #11 延後顯示重驗
+
+| 項目 | 步驟 / 預期 | 實際 | 結果 |
+| --- | --- | --- | --- |
+| battery | VM `RUSTIT_TEST_POWER=battery`、重啟 `GigaNexusAgent`(10:48:34)後,10:49:05 派 `RustIt-TestInst-D2 1.0.0`(`/reg`,cmd `1a0c1c63-b43c-4b48-8e81-1beee4486ccc`,requestId `7b091f39dc07`)。預期派送後幾秒內顯示「延後中(電池供電)」,不是「執行中」 | 約 20 秒後(10:49)指令詳情已是「**延後中(電池供電)**」,「電腦目前電池供電,Agent 延後下載(每 5 分鐘重新檢查,最多 4 小時;計量網路不因『略過電池延後』而略過);下次檢查 10:54」。0.9.3 同樣情境要到約 5 分鐘後才轉成延後中、先顯示「執行中」 | **通過** |
+| metered | 旗標改 `metered`、重啟(10:49:31),10:50:05 再派 D2(cmd `87ee9426-2e4c-4c8e-a456-cf736ccc1b01`,requestId `a97c44836605`) | 約 20 秒內顯示「**延後中(計量網路)**」,下次檢查 10:55 | **通過** |
+| 重啟的影響 | 改旗標必須重啟 Agent,延後中的兩筆因此被終止 | 兩筆皆 `EXECUTION_FAILED`(預期,同 §5-3) | 符合預期 |
+| 清除旗標 | 10:51:05 `RUSTIT_TEST_POWER` 清除(`GetEnvironmentVariable(...,'Machine') -eq $null` → `True`)並重啟 | 服務 Running | 已清 |
+| 正常派送 | 旗標清除後派 D2 | 第一次回 `DOWNLOAD_FAILED` 404(見 §11.4);10:53 第二次成功:「安裝完成,結束代碼 0,耗時 2 秒。偵測到已安裝」「偵測到版本 1.0.0」「簽章者 `bb8ced00…`」(cmd `c3075aae-f608-4645-948e-2a409e6f6cd6`,requestId `6d8e6212a3f6`) | 通過(第二次) |
+
+- Agent 日誌每 5 分鐘一行(09:36 / 09:41 / 09:46 的證據見 §10.2-3,0.9.3);0.9.4 本次未收 VM 日誌,以畫面為準。
+- **「恢復後繼續」與 `DEFERRED_TIMEOUT` 仍未驗證**:旗標是 Agent 行程的環境變數,必須重啟才會生效,重啟又會終止延後中的指令,無法用旗標做到「延後中解除」;需要實機電池或計量網路。
+
+### 11.4 觀察:間歇性下載 404(未查明,未改程式)
+
+- **現象**:旗標清除並重啟 Agent(10:51:05)後的第一筆正常派送(10:51:34,cmd `f5710103-b54f-4f53-9df7-c2f126e2a0de`,requestId `8cc602beaca6`)回 `DOWNLOAD_FAILED`「安裝檔下載失敗 HTTP 404 `ITA_PACKAGE_NOT_FOUND`」;2 分鐘後同一套件、同一台重派(10:53)成功。
+- **主機日誌**(endpoint-server,唯讀):`/agent/v1/packages/4d56a1cd-…` 的下載請求(reqId `a586da0560e6822507674f31c65b1a08`)在「指令已推送」後約 27 毫秒到達(`.297` 推送 → `.324` 下載請求),`.370` 才收到 `running` 更新;下載判斷記錄「下載的套件不是這台被指派的安裝,拒絕」`status: draft`、`assigned: false`、`current: false`、`ring: pilot`。
+- **可疑處**:`ItAgentBack/src/services/software-service.ts` `download()` 以 `store.activeInstallPackages()`(`sql-software-store.ts`,`state IN ('sent','acked','running')`)判斷是否被指派;`command-dispatcher.ts` `trySend()` 先 `transition → sent` 再推送,理論上下載時資料庫已是 `sent`。資料庫當時紀錄顯示該指令 `sent_at` 與推送相符,看不出競爭條件在哪;可能與 Agent 重啟後第一筆指令 / 重連剛完成的時序有關。**不確定 0.9.3 以前是否也會發生**(0.9.3 的 D2 從未跑到下載;其他套件在重啟後的第一筆派送,如 09:58 的 Notepad++,成功)。
+- **影響**:偶發的單次失敗,重派即可;未重現,證據只有這一次。建議交主工作階段決定是否追(可在重啟 Agent 後連派數次的情境重現)。
+
+### 11.5 本次在測試區留下的痕跡
+
+| 位置 | 內容 | 建議處理 |
+| --- | --- | --- |
+| NAS | `RustIT\test\releases\agent\0.9.4\rustit-agent.exe`(新) | 保留(版本已登錄,撤回後才能刪) |
+| GigaItApp「Agent 版本」 | Agent 0.9.4:草稿;pilot Agent 目標 0.9.4;`it` 0.9.1、`all` 0.9.2 未動;0.9.3 發佈與否由需求方處理 | 0.9.4 是否發佈、`it` / `all` 是否推進由需求方決定(`pilot` 未滿 24 小時推進會被擋) |
+| VM `RUSTIT-P34` | Agent 0.9.4;`RustIt Test Installer 1.0.0` 登錄項目(D2 的 `/reg` 寫入,GigaItApp 因名稱含 rustit 無法移除);`RUSTIT_TEST_POWER` 已清 | VM 手動刪登錄項目 `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\RustItTestInst`,或驗收後還原檢查點 |
+| GigaItApp 軟體目錄 | 草稿 `RustIt-SlowMSI2`、`RustIt-TestInst-C2`、`RustIt-TestInst-D2`(§10.4 同) | 驗收後撤回 |
+| 告警 | D2 的 `software_install_failed`(EXECUTION_FAILED 兩筆、DOWNLOAD_FAILED 一筆,告警 `0e54decc-184a-4939-af10-e01a38e0a1a6`) | 驗收後處理 |
+| `ita.env`、migration、其他 NAS 路徑、Watchdog | 未動 | 無 |
