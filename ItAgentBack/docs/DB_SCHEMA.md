@@ -1,6 +1,6 @@
 # ItAgentBack 資料結構
 
-> 對應 `db/migrations/0001_init.sql`、`0002_sync_event.sql`(PLATFORM-PLAN P2)、`0003_command.sql`(P4)、`0004`(P3 軟體)、`0005`(E6 公司)、`0006_monitor.sql`(P5 監測)、`0007_release.sql`(P6 升級)、`0008_software.sql`(P7 軟體派送)、`0009_software_timeout.sql`(P7 套件安裝逾時)、`0010_software_file_release.sql`(P7 撤回釋放安裝檔路徑)。原則(INTEGRATION-PLAN §3.1):**SQL Server 是唯一真相**;MongoDB 與 Redis 只放可重建的資料。
+> 對應 `db/migrations/0001_init.sql`、`0002_sync_event.sql`(PLATFORM-PLAN P2)、`0003_command.sql`(P4)、`0004`(P3 軟體)、`0005`(E6 公司)、`0006_monitor.sql`(P5 監測)、`0007_release.sql`(P6 升級)、`0008_software.sql`(P7 軟體派送)、`0009_software_timeout.sql`(P7 套件安裝逾時)、`0010_software_file_release.sql`(P7 撤回釋放安裝檔路徑)、`0011_software_upload.sql`(S1-3 上傳與送簽)。原則(INTEGRATION-PLAN §3.1):**SQL Server 是唯一真相**;MongoDB 與 Redis 只放可重建的資料。
 > SQL Server 2012(`DATABASE.md` §0):無 JSON 函式、無 `CREATE OR ALTER`;JSON 由 ItAgentBack 組 / 解,需要查詢的值拆成獨立欄位。時間一律 UTC。
 
 ## 1. SQL Server(schema `ita`)
@@ -105,6 +105,15 @@ Agent 回報(0002,`POST /agent/v1/events`;`event.schema.json`):`offline_period`�
 - `timeout_sec`(INT,0009,P7 VM 驗收 B-1):Agent 執行安裝 / 移除程式的逾時(秒),`NOT NULL DEFAULT 1800`、CHECK `ck_software_package_timeout`(300–7200);既有套件以預設值補 1800。快照 `software.install` / `software.uninstall` 的 `timeout_sec` 取此值,主機的指令逾時依此加寬(`commandTimeoutSec`)。修改不退回 `draft`。**部署順序:先套用 0009,再部署新版 endpoint-server**。
 - 指令與套件的關聯:`ita.command.params` 的目錄快照含 `"package_id":"<uuid>"`(SQL 2012 無 JSON 函式,以 `LIKE` 比對;快照由主機產生,格式固定)。下載授權查這台 `software.install` 且 `state IN ('sent','acked','running')` 的 `params`。
 - **部署順序:先套用 0008,再部署新版 endpoint-server**:新版的指令查詢都會讀 `command_batch.state`(未套用時所有指令 API 失敗);`SOFTWARE_DIR` 未設定時軟體 API 與套件下載不註冊。
+
+### `ita.software_upload` — 軟體套件上傳與送簽(0011,S1-3;`docs/S1-SIGNING-DESIGN.md` §4)
+
+- `upload_id`(對外)、`file_name`(`{軟體}/{版本}/{檔名}`,規則同軟體庫:`incoming\` 的原始檔與簽章後軟體庫的目標位置是同一路徑)、`sha256` / `size_bytes`(上傳或登錄時由主機讀檔計算;核可時再算一次)、`source`(`upload` = API 串流上傳、`incoming` = 網路芳鄰放進 `incoming\` 後登錄)。
+- `state`:`uploaded` →(第二人核可,寫送簽工作單)`queued` →(工作站結果、主機以軟體庫實際檔案重算相符)`signed`;`uploaded` / `queued` 可駁回;工作站拒絕、核可時檔案被換掉(`INCOMING_CHANGED`)、結果不符(`RESULT_MISMATCH`)為 `rejected`(`rejected_by_emp` 為 NULL)。一律條件更新。
+- 同一路徑同時只能有一筆進行中:篩選唯一索引 `ux_software_upload_file_active (file_name) WHERE state IN ('uploaded', 'queued')`。
+- **兩人**:核可人不可是上傳者,程式、UPDATE 條件、CHECK `ck_software_upload_approver` 三道。
+- 工作站回報欄位(`vendor_signer`、`vendor_signer_subject`、`vendor_check`、`signed_signer`、`sign_operator`)只供覆核顯示,不作為安全判斷;`signed_sha256` 為主機重算值。
+- **部署順序:先套用 0011,再設定 `INCOMING_DIR` / `SIGN_QUEUE_DIR`**;未設定時上傳 API 不註冊、不讀寫此表。
 
 ### 離線補傳比對(`DeviceService.sync`,`POST /agent/v1/sync`)
 

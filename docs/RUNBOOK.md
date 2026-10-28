@@ -119,6 +119,20 @@
 
 **告警**:`software_install_failed`(warn,同一台再派同一套件成功自動關)、`reboot_pending`(warn)、`software_file_tampered`(critical,不自動關閉,確認後由 IT 手動關閉)。每台每條規則只留一筆開啟中的告警,同一台多個套件失敗時 detail 只留最近一次。
 
+### 3.1 套件上傳與送簽(S1-3,`docs/S1-SIGNING-DESIGN.md` §3.2、§4)
+
+前置(一次性):NAS 管理員建立上傳帳號(只能寫 `RustIT\<區>\incoming\`、`sign-queue\`)與簽章人員的寫入權(`software\`);主機 2 本人執行 `sudo sh ItAgentBack/deploy/host2-set-nas-upload.sh` 並照輸出改 `ita.env`;SQL 套用 migration 0011;Gateway 發佈 `endpoint.software.upload.*` 路由、建立簽章工作站 API Key(只授 `endpoint.software.sign-check`,限定簽章人員電腦 IP)。
+
+| 步驟 | 誰 | 做法 |
+| --- | --- | --- |
+| 1. 上傳 | IT | GigaItApp 上傳安裝檔(S1-4 前可用 `POST /api/endpoint/software/uploads?fileName=` 或網路芳鄰放進 `incoming\{軟體}\{版本}\` 後 `POST …/uploads/register`)。路徑就是簽章後在軟體庫的位置,軟體庫已有同路徑會被拒(換新的版本資料夾) |
+| 2. 核可送簽 | **另一位** IT(全部公司角色) | `POST …/uploads/{id}/approve`:主機重算雜湊後寫送簽工作單,狀態 `queued`。上傳者本人不能核可 |
+| 3. 重簽 | 簽章人員 | `powershell -ExecutionPolicy Bypass -File RustAgent\installer\signing-workstation.ps1 software -Environment <test\|prod> -Thumbprint <軟體發佈憑證> -GatewayUrl https://<該區 Gateway> -ApiKeyFile <金鑰檔>`(先加 `-DryRun`)。每筆先向主機確認 `queued` 與兩人,再複製到本機重算雜湊、檢查原廠簽章(白名單 `%USERPROFILE%\.rustit\vendor-signers.json`,範例 `vendor-signers.example.json`;不在白名單輸入 `yes` 才簽、`reject` 拒絕)、重簽、不覆蓋地放進 `software\`、寫結果檔 |
+| 4. 確認 | 主機(自動) | 每分鐘讀結果,重算軟體庫檔案雜湊相符才標記 `signed`;不符 `rejected / RESULT_MISMATCH`(查 endpoint-server 日誌) |
+| 5. 登錄與派送 | IT | 照 P7:「尚未登錄的安裝檔」登錄 → pilot 測試 → 第二人發佈。預期簽章者填**軟體發佈憑證**指紋 |
+
+拒絕代碼:`REJECTED`(人工駁回)、`INCOMING_CHANGED`(核可時檔案被換掉)、`NOT_APPROVED`(主機上不是 `queued`:已駁回或偽造的工作單)、`JOB_MISMATCH`(工作單與主機紀錄不一致)、`HASH_MISMATCH`、`ENVIRONMENT_MISMATCH`、`INVALID_JOB`、`INCOMING_MISSING`、`TARGET_EXISTS`、`VENDOR_NOT_ALLOWED`、`RESULT_MISMATCH`、`SIGN_JOB_WRITE_FAILED`。遇到 `NOT_APPROVED` / `JOB_MISMATCH` 要查誰寫了 `sign-queue\`。簽章失敗(token 沒插、時間戳記連不到)不寫結果,修好後重跑即可。
+
 ## 4. 廠商簽章者憑證換新流程(B10)
 
 適用:廠商(Notepad++、7-Zip 加簽用的公司憑證等)的程式碼簽章憑證續約或更換,新版安裝檔的簽章者指紋(葉憑證 SHA-1)改變。端點以**葉憑證指紋**比對,換憑證後若本機清單沒有新指紋,新版會以 `SIGNER_NOT_TRUSTED` 被拒;若提早拿掉舊指紋,舊版重派也會被拒。角色:**IT 管理員**(登錄套件)、**GPO 管理者 / 簽章人員**(本機清單)。

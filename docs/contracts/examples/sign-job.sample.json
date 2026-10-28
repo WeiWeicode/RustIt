@@ -1,0 +1,11 @@
+{
+  "schema": "sign-job/1",
+  "upload_id": "6f1c2b3a-4d5e-4f60-8a71-92b3c4d5e6f7",
+  "environment": "test",
+  "file_name": "Notepad++/8.7.1/npp.8.7.1.Installer.x64.exe",
+  "sha256": "9f2c4b1a0e8d7c6b5a49382716f5e4d3c2b1a09f8e7d6c5b4a3928170f6e5d4c",
+  "size_bytes": 6321456,
+  "uploaded_by": "S100001",
+  "approved_by": "S100002",
+  "approved_at": "2026-10-28T08:00:00.000Z"
+}

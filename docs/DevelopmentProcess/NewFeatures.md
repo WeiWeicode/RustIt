@@ -2,6 +2,15 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-28 S1-3 套件上傳與送簽(後端、簽章工作站 software 模式)
+- 內容:
+  - ItAgentBack:migration 0011 `ita.software_upload`(uploaded → queued → signed / rejected,核可人 ≠ 上傳者三道);`/v1/software/uploads` 串流上傳(收檔前檢查 Content-Length、同時 2 筆、軟體庫與進行中同路徑;閒置 2 分鐘中止;失敗刪檔)、登錄 `incoming\` 檔案、清單 / 詳情、核可(重算雜湊 → 寫工作單 → 重讀狀態)、駁回(一律移除工作單);每分鐘讀工作站結果,以軟體庫實際檔案重算雜湊確認;`GET …/{id}/sign-status`(`x-auth-mode: api_key`、`endpoint.software.sign-check`)給工作站確認。設定 `INCOMING_DIR`、`SIGN_QUEUE_DIR`(預設不啟用);compose 兩個讀寫掛載;`deploy/host2-set-nas-upload.sh`(上傳帳號讀寫掛載、試寫 software / releases / prod 應失敗)。
+  - 契約 `docs/contracts/sign-queue.schema.json`(sign-job/1、sign-result/1)與範例。
+  - 工作站:`sign-software-queue.ps1`(`signing-workstation.ps1 software` 轉交):向主機確認 → 本機副本重算 → 原廠簽章白名單 / 人工確認 → 重簽 → 不覆蓋放進 `software\` → 結果檔;`gateway-api.ps1` 抽出 API Key 讀取與 Gateway 呼叫,`publish-release.ps1` 改用。
+  - 資安審查(`security-auditor`):無 Critical / High;Medium 3 項(駁回與核可競態、工作單可偽造、上傳資源耗盡)與 Low(結果檔讀取、腳本細節、備註進日誌)已修;P7 登錄時檢查上傳紀錄狀態、暫存檔清理列為待做。
+- 檔案:`ItAgentBack/db/migrations/0011_software_upload.sql`、`src/stores/sql-upload-store.ts`、`src/stores/types.ts`、`src/services/upload-files.ts`、`src/services/upload-service.ts`、`src/routes/uploads.ts`、`src/mgmt-app.ts`、`src/server.ts`、`src/config.ts`、`src/openapi.ts`、`deploy/docker-compose.yml`、`deploy/test.env.example`、`deploy/host2-set-nas-upload.sh`、`docs/DB_SCHEMA.md`、`test/upload.test.ts`、`test/contract.test.ts`;`RustAgent/installer/sign-software-queue.ps1`、`gateway-api.ps1`、`signing-workstation.ps1`、`publish-release.ps1`、`vendor-signers.example.json`;`docs/contracts/`、`docs/RUNBOOK.md` §3.1、`docs/S1-SIGNING-DESIGN.md`
+- 驗證:`npm run typecheck`;`npm test` 242 項通過(新增上傳 / 核可 / 駁回 / 結果確認 / 上限 / 逾時 / sign-status / 契約);腳本 PowerShell 5.1 解析通過;工作站以測試憑證在暫存目錄實測(正常重簽放置、五種拒絕代碼、主機 `parseSignResult` 可解析結果檔);`sh -n host2-set-nas-upload.sh`。**未實測**:測試區(要 NAS 上傳帳號、migration 0011、Gateway 路由發佈與 API Key)、正式憑證 signtool 路徑、NSIS / MSI 重簽後實際安裝(VM)
+
 ## 2026-10-28 S1-1 版本號查重改走 API Key
 - 內容:需求方確認 S1 §9 全部照建議。ItAgentBack 新增 `GET /v1/releases/registry?component=&version=`(operationId / 權限 `endpoint.release.registry`,OpenAPI `x-auth-mode: api_key`):回 `environment`(GW_ENV)與同元件同版本號的登錄紀錄(含已撤回),只有元件、版本、狀態。`publish-release.ps1` 新增 `-GatewayUrl`、`-ApiKeyFile`:以 `X-Api-Key` 查詢,回應部署區須等於 `-Environment`;金鑰檔只允許本人、SYSTEM、Administrators 有權限(SID 白名單)、擁有者須為本人、不可放網路分享;`-GatewayUrl` 主機限每區允許清單(test `10.10.130.124`、prod `giganexus.gigasolar.com.tw`)、不跟隨重新導向(避免 X-Api-Key 被帶到別台)、每筆回應部署區都比對(資安審查 M1、M2、L1、L2);未給時沿用 ssh 舊方式並印警告。`signing-workstation.ps1` 轉交兩個參數。需要 Gateway `x-auth-mode` 支援(Gateway 分支 `feature/openapi-api-key-auth`)。
 - 檔案:`ItAgentBack/src/routes/releases.ts`、`src/services/release-service.ts`、`src/mgmt-app.ts`、`src/openapi.ts`、`test/release.test.ts`;`RustAgent/installer/publish-release.ps1`、`signing-workstation.ps1`;`docs/RUNBOOK.md` §1、`docs/S1-SIGNING-DESIGN.md`

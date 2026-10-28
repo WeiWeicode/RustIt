@@ -873,3 +873,73 @@ export interface SoftwareStore {
     opts: { companies?: string[]; onlyRefs?: number[]; limit: number },
   ): Promise<{ deviceRef: number; deviceId: string; computerName: string; company: string | null; name: string; version: string | null }[]>;
 }
+
+// ---- 軟體套件上傳與送簽(S1-3,migration 0011;S1-SIGNING-DESIGN §4)----
+
+export type UploadState = 'uploaded' | 'queued' | 'signed' | 'rejected';
+export type UploadSource = 'upload' | 'incoming';
+
+export interface UploadRecord {
+  id: number;
+  uploadId: string;
+  /** {軟體}/{版本}/{檔名}:incoming\ 的原始檔與軟體庫的目標位置相同 */
+  fileName: string;
+  sha256: string;
+  sizeBytes: number;
+  state: UploadState;
+  source: UploadSource;
+  notes: string | null;
+  uploadedByEmp: string;
+  uploadedByName: string | null;
+  uploadedAt: Date;
+  approvedByEmp: string | null;
+  approvedByName: string | null;
+  approvedAt: Date | null;
+  rejectCode: string | null;
+  rejectReason: string | null;
+  rejectedByEmp: string | null;
+  rejectedAt: Date | null;
+  vendorSigner: string | null;
+  vendorSignerSubject: string | null;
+  vendorCheck: string | null;
+  signedSigner: string | null;
+  signOperator: string | null;
+  signedSha256: string | null;
+  signedAt: Date | null;
+}
+
+export interface NewUpload {
+  fileName: string;
+  sha256: string;
+  sizeBytes: number;
+  source: UploadSource;
+  notes: string | null;
+  actor: Actor;
+  at: Date;
+  requestId: string;
+}
+
+/** 工作站結果(signed 時)寫入的欄位;signedSha256 為主機以軟體庫實際檔案重算的值 */
+export interface UploadSignedPatch {
+  vendorSigner: string | null;
+  vendorSignerSubject: string | null;
+  vendorCheck: string | null;
+  signedSigner: string;
+  signOperator: string | null;
+  signedSha256: string;
+  at: Date;
+}
+
+export interface UploadStore {
+  /** 新到舊,最多 500 筆 */
+  listUploads(f: { state?: UploadState }): Promise<UploadRecord[]>;
+  getUpload(uploadId: string): Promise<UploadRecord | null>;
+  /** 同一路徑已有進行中(uploaded / queued)的上傳丟 AppError 409 ITA_UPLOAD_EXISTS */
+  addUpload(n: NewUpload): Promise<UploadRecord>;
+  /** uploaded → queued,且核可人 ≠ 上傳者(條件更新) */
+  approveUpload(uploadId: string, actor: Actor, at: Date, requestId: string): Promise<boolean>;
+  /** 狀態在 expect 之中才改為 rejected;actor 為 null 代表工作站拒絕或主機重算不符 */
+  rejectUpload(uploadId: string, expect: UploadState[], code: string, reason: string | null, actor: Actor | null, at: Date): Promise<boolean>;
+  /** queued → signed */
+  markSigned(uploadId: string, patch: UploadSignedPatch): Promise<boolean>;
+}

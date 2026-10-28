@@ -70,15 +70,9 @@ if ($HostStage -notmatch '^[A-Za-z]:/[A-Za-z0-9/_.-]+$' -or $HostStage -match '\
 if ($Environment -eq 'prod' -and $HostAlias -eq 'host2') { throw 'host2 是測試區主機:正式區請指定正式區主機(-HostAlias / -HostStage / -ReleasesDir)' }
 if ($Environment -eq 'test' -and $HostAlias -eq 'host3') { throw 'host3 是正式區主機:-Environment test 不可指向它' }
 if ($ApiKeyFile -and -not $GatewayUrl) { throw '-ApiKeyFile 要搭配 -GatewayUrl(https://Gateway 主機)' }
-# 每區允許的 Gateway 主機(資安審查 M2 / L1):打錯網址不會把 API Key 送到別台;換主機時改這裡(與 $NasReleaseDirs 相同作法)
-$GatewayHosts = @{
-    test = @('10.10.130.124')
-    prod = @('giganexus.gigasolar.com.tw')
-}
-if ($GatewayUrl) {
-    $gwHost = ([uri]$GatewayUrl).Host
-    if ($GatewayHosts[$Environment] -notcontains $gwHost) { throw "-GatewayUrl 的主機 $gwHost 不是 $Environment 區的 Gateway(允許:$($GatewayHosts[$Environment] -join ', '))" }
-}
+# Gateway API Key 呼叫(與 sign-software-queue.ps1 共用):每區允許的主機、金鑰檔權限、不跟隨重新導向
+. (Join-Path $PSScriptRoot 'gateway-api.ps1')
+if ($GatewayUrl) { Assert-GatewayHost $GatewayUrl $Environment }
 if ($GatewayUrl -and -not $ApiKeyFile) { throw '-GatewayUrl 要搭配 -ApiKeyFile' }
 # 同一台 NAS、兩區路徑分開(B-3):目的地必須與環境一致
 $NasReleaseDirs = @{
@@ -166,50 +160,18 @@ await pool.close();console.log('REGISTRY-OK '+e.ITA_DB_NAME);for(const l of out)
     [pscustomobject]@{ Ok = $true; Why = $ok; Rows = @($out | Where-Object { $_ -match '^REGISTERED ' }) }
 }
 # S1-1:以 API Key 呼叫 Gateway 的版本號查重(唯讀、只回元件 / 版本 / 狀態 / 部署區),不需要主機帳號
-function Read-ApiKey {
-    if ($ApiKeyFile -match '^\\') { throw '-ApiKeyFile 不可放在網路分享(分享層權限檢查不到);放本機使用者目錄' }
-    $f = (Resolve-Path -LiteralPath $ApiKeyFile).Path
-    # 白名單(資安審查 M1):只允許本人、SYSTEM、Administrators 有任何 Allow 權限;擁有者須為本人或 Administrators。
-    # 以 SID 比對(中文版 Windows 名稱會在地化);Domain Users、其他同仁等任何其他身分有權限就拒絕
-    $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    $okSids = @($me, 'S-1-5-18', 'S-1-5-32-544')
-    $acl = Get-Acl -LiteralPath $f
-    $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
-    if ($owner -ne $me -and $owner -ne 'S-1-5-32-544') { throw "API Key 檔的擁有者不是本人(SID $owner):$f" }
-    $other = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | Where-Object {
-            $_.AccessControlType -eq 'Allow' -and ($okSids -notcontains $_.IdentityReference.Value)
-        })
-    if ($other.Count) {
-        throw "API Key 檔有其他身分的權限(SID $($other[0].IdentityReference.Value)):$f;執行 icacls `"$f`" /inheritance:r /grant:r `"*${me}:(R)`" 只留本人"
-    }
-    $k = (Get-Content -LiteralPath $f -Raw -Encoding UTF8).Trim()
-    if ($k -notmatch '^[!-~]{16,512}$') { throw "API Key 檔格式不對(只放金鑰一行):$f" }
-    $k
-}
 function Get-RegisteredReleasesApi {
-    $key = Read-ApiKey
-    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    $base = $GatewayUrl.TrimEnd('/')
+    $key = Read-GatewayApiKey $ApiKeyFile
     $rows = @()
     foreach ($it in $items) {
         # 元件 / 版本已由上面的路徑規則驗過(英數與 . -),仍以 EscapeDataString 組查詢字串
-        $u = '{0}/api/endpoint/releases/registry?component={1}&version={2}' -f $base, [uri]::EscapeDataString($it.Component), [uri]::EscapeDataString($it.Version)
-        # 不跟隨重新導向(資安審查 M2):PowerShell 5.1 會把 X-Api-Key 一併帶到導向的主機;3xx 視為失敗
-        try {
-            $resp = Invoke-WebRequest -Uri $u -Headers @{ 'X-Api-Key' = $key } -UseBasicParsing -TimeoutSec 20 -MaximumRedirection 0 -ErrorAction Stop
-        } catch {
-            $code = $null
-            if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
-            return [pscustomobject]@{ Ok = $false; Why = $(if ($code) { "HTTP $code(401 / 403:API Key 無效、權限不足或來源 IP 不在允許清單;3xx:不跟隨重新導向)" } else { $_.Exception.Message }); Rows = @() }
-        }
-        if ($resp.StatusCode -ne 200) { return [pscustomobject]@{ Ok = $false; Why = "HTTP $($resp.StatusCode)(不跟隨重新導向)"; Rows = @() } }
-        try { $r = $resp.Content | ConvertFrom-Json } catch { $r = $null }
-        if (-not $r -or -not $r.environment) { return [pscustomobject]@{ Ok = $false; Why = '回應格式不對(缺 environment)'; Rows = @() } }
-        # 每一筆回應都要是目標區(資安審查 L2;避免 -GatewayUrl 指到另一區而照樣通過)
-        if ([string]$r.environment -cne $Environment) { return [pscustomobject]@{ Ok = $false; Why = "回應的部署區是 $($r.environment),不是 $Environment"; Rows = @() } }
-        foreach ($x in @($r.items)) { if ($x) { $rows += ('REGISTERED {0} {1} {2}' -f $x.component, $x.version, $x.status) } }
+        $q = '/api/endpoint/releases/registry?component={0}&version={1}' -f [uri]::EscapeDataString($it.Component), [uri]::EscapeDataString($it.Version)
+        # 每一筆回應都要是目標區(Invoke-GatewayGet 比對 environment)
+        $r = Invoke-GatewayGet $GatewayUrl $key $q $Environment
+        if (-not $r.Ok) { return [pscustomobject]@{ Ok = $false; Why = $r.Why; Rows = @() } }
+        foreach ($x in @($r.Body.items)) { if ($x) { $rows += ('REGISTERED {0} {1} {2}' -f $x.component, $x.version, $x.status) } }
     }
-    [pscustomobject]@{ Ok = $true; Why = "Gateway $base(environment=$Environment)"; Rows = $rows }
+    [pscustomobject]@{ Ok = $true; Why = "Gateway $($GatewayUrl.TrimEnd('/'))(environment=$Environment)"; Rows = $rows }
 }
 if ($DryRun) {
     Write-Host '[DryRun] 未查版本表(上架時會查目標區是否已登錄過同一版本)。'

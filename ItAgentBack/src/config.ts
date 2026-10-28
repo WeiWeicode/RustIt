@@ -28,6 +28,8 @@
  *                             (軟體 API 與套件下載不註冊、software.* 指令建立時回 404)。容器 /srv/software
  *   SOFTWARE_MAX_BYTES        單一安裝檔大小上限(位元組),預設 4 GB
  *   SOFTWARE_MAX_CONCURRENT   software.install / uninstall 同時執行的總數上限(跨批次與單台),預設 20
+ *   INCOMING_DIR              上傳的原始安裝檔(讀寫;NAS RustIT\<區>\incoming\,S1-SIGNING-DESIGN §1)
+ *   SIGN_QUEUE_DIR            送簽工作單與簽章結果(讀寫;NAS RustIT\<區>\sign-queue\);與 INCOMING_DIR 都設定且已啟用軟體派送才啟用上傳送簽
  *   BATCH_APPROVAL_THRESHOLD  admin 批次超過幾台需第二人核可(PLATFORM-PLAN B1),預設 20
  */
 import { readFileSync } from 'node:fs';
@@ -98,6 +100,9 @@ export interface Config {
   softwareMaxBytes: number;
   /** software.* 同時執行的總數上限(P7) */
   softwareMaxConcurrent: number;
+  /** 上傳與送簽(S1-3);任一為 null = 不啟用 */
+  incomingDir: string | null;
+  signQueueDir: string | null;
   /** admin 批次超過幾台需第二人核可(B1) */
   batchApprovalThreshold: number;
 }
@@ -229,6 +234,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd?: string): 
     softwareDir: env.SOFTWARE_DIR?.trim() || null,
     softwareMaxBytes: int('SOFTWARE_MAX_BYTES', env.SOFTWARE_MAX_BYTES, SOFTWARE_DEFAULT_MAX_BYTES, 1024 * 1024, 16 * 1024 ** 3),
     softwareMaxConcurrent: int('SOFTWARE_MAX_CONCURRENT', env.SOFTWARE_MAX_CONCURRENT, 20, 1, 1000),
+    incomingDir: env.INCOMING_DIR?.trim() || null,
+    signQueueDir: env.SIGN_QUEUE_DIR?.trim() || null,
     batchApprovalThreshold: int('BATCH_APPROVAL_THRESHOLD', env.BATCH_APPROVAL_THRESHOLD, 20, 1, 200),
   };
 }

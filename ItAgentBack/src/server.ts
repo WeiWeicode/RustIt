@@ -17,6 +17,8 @@ import { ReleaseFiles } from './services/release-files.js';
 import { ReleaseService } from './services/release-service.js';
 import { SoftwareFiles } from './services/software-files.js';
 import { SoftwareService } from './services/software-service.js';
+import { SignQueue } from './services/upload-files.js';
+import { UploadService } from './services/upload-service.js';
 import { SOFTWARE_KINDS } from './commands/kinds.js';
 import { MongoSnapshotStore } from './stores/mongo-store.js';
 import { RedisStateStore } from './stores/redis-store.js';
@@ -24,6 +26,7 @@ import { SqlCommandStore } from './stores/sql-command-store.js';
 import { SqlMonitorStore } from './stores/sql-monitor-store.js';
 import { SqlReleaseStore } from './stores/sql-release-store.js';
 import { SqlSoftwareStore } from './stores/sql-software-store.js';
+import { SqlUploadStore } from './stores/sql-upload-store.js';
 import { SqlDeviceStore } from './stores/sql-store.js';
 
 const config = loadConfig();
@@ -65,6 +68,17 @@ const software = config.softwareDir
       onPackageTampered: (ctx, deviceRef, detail) => alerts!.onPackageTampered(ctx, deviceRef, detail),
     })
   : undefined;
+// 上傳與送簽(S1-3):INCOMING_DIR、SIGN_QUEUE_DIR 都設定且已啟用軟體派送才啟用;incoming\ 讀取規則與軟體庫相同
+const uploads =
+  config.softwareDir && config.incomingDir && config.signQueueDir
+    ? new UploadService(
+        new SqlUploadStore(() => sql.connection()),
+        new SoftwareFiles(config.incomingDir, config.softwareMaxBytes),
+        new SignQueue(config.signQueueDir),
+        new SoftwareFiles(config.softwareDir, config.softwareMaxBytes),
+        { environment: config.gateway.gwEnv, maxBytes: config.softwareMaxBytes },
+      )
+    : undefined;
 // 指令派送(P4):SQL 與裝置共用連線池,推送經 DeviceService 的 WebSocket 連線表;agent.upgrade 建立前後交給 ReleaseService(P6);
 // software.install / uninstall 由 SoftwareService 檢查並換成目錄快照、授權數(P7);admin 批次超過門檻待第二人核可(B1)
 const commandStore = new SqlCommandStore(() => sql.connection());
@@ -129,7 +143,7 @@ const deps = (): Promise<DepStatus[]> =>
     }),
   );
 
-const mgmt = await buildMgmtApp({ config, service, commands, files, alerts, releases, software, readiness, deps });
+const mgmt = await buildMgmtApp({ config, service, commands, files, alerts, releases, software, uploads, readiness, deps });
 const agent = await buildAgentApp({ config, service, commands, files, alerts, releases, software, monitor: config.agentMonitor, deps });
 
 await mgmt.listen({ host: config.host, port: config.port });
@@ -148,6 +162,7 @@ mgmt.log.info(
     agentMonitor: config.agentMonitor.enabled,
     releases: !!config.releasesDir,
     software: !!config.softwareDir,
+    uploads: !!uploads,
     softwareMaxConcurrent: config.softwareMaxConcurrent,
     batchApprovalThreshold: config.batchApprovalThreshold,
   },
