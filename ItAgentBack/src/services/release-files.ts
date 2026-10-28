@@ -1,5 +1,5 @@
 /**
- * 版本檔目錄(P6-UPGRADE-DESIGN §4):RELEASES_DIR 底下 {component}/{version}/{檔名},唯讀掛載(正式 NAS RustIT\releases\,測試區主機 2 本機目錄)。
+ * 版本檔目錄(P6-UPGRADE-DESIGN §4):RELEASES_DIR 底下 {component}/{version}/{檔名},唯讀掛載(NAS 測試 / 正式分開:測試區 RustIT\test\releases\、正式區 RustIT\prod\releases\)。
  *   - 路徑只由已驗證格式的三段組成,並確認實際位置(含符號連結)仍在根目錄內,防路徑穿越
  *   - SHA-256 以 (路徑, 大小, 修改時間) 快取,檔案被換掉時重新計算(登錄時寫入 SQL,下載前再比對)
  * 路徑檢查、雜湊快取與 Range 解析與軟體庫共用(rooted-files.ts,P7)。

@@ -136,7 +136,7 @@
 
 ### `agent.upgrade` — 立即檢查升級 / 指定版本(P6)
 
-路徑:`POST /api/endpoint/devices/{deviceId}/admin-commands`(`endpoint.command.admin`;admin 批次等 B1 第二人核可再開)。`params`:`component`(必填,`agent` / `watchdog`)、`version`(選填,`x.y.z` 可帶 `-後綴`)。
+路徑:`POST /api/endpoint/devices/{deviceId}/admin-commands`(`endpoint.command.admin`),**只有單台**:沒有多台的 admin 批次 API(批次建立只有 `POST /batches/basic-commands`(basic 類型)與軟體派送 `POST /software/{packageId}/deploy`),`agent.upgrade` 也不在核可門檻群組(`command-dispatcher.ts` `GATED_GROUPS`),不累計台數、不需第二人核可。要多台升級改用升級環目標(Agent 版本頁)。`params`:`component`(必填,`agent` / `watchdog`)、`version`(選填,`x.y.z` 可帶 `-後綴`)。
 
 - 省略 `version`:重設這台該元件的失敗次數,依所屬環的目標立即檢查。
 - 指定 `version`:這台強制升級 / 降版到該版本(優先於所屬環,到達後清除)。版本必須已登錄且 `published`(`draft` 只能經 pilot 環目標下發,改環目標需 `endpoint.software.manage` 與全部公司角色),否則建立時回 `404 ITA_RELEASE_NOT_FOUND` / `409 ITA_RELEASE_NOT_PUBLISHED` / `409 ITA_RELEASE_REVOKED`,不建立指令。
@@ -162,7 +162,7 @@
 
 - 單台派送也累計(D2-1):同一人 24 小時內 `software.install` / `software.uninstall`(一組)累計涉及的電腦台數 + 這次 > `BATCH_APPROVAL_THRESHOLD`(20)時,該單台指令放進一個**待核可的單台批次**(`CommandView.batchState = pending_approval`,回應仍是 `CommandView`),需第二人核可後才送出;`system.reboot` 另算一組。已由第二人核可的批次不計入累計,已取消的單台照計。
 - 主機檢查(不符就不建立指令):套件存在(`404 ITA_PACKAGE_NOT_FOUND`)、未撤回(`409 ITA_PACKAGE_REVOKED`)、`draft` / `tested` 只能派到 **pilot 環**(`409 ITA_PACKAGE_NOT_PUBLISHED`)、已發佈套件的授權數(`409 ITA_LICENSE_EXCEEDED`)。
-- `result`(序列化後 4,000 字元內;範例 `ws-command-update-software-install.sample.json`):`exit_code`、`reboot_required`、`signer`(實際簽章者 SHA-1 指紋)、`signer_subject`、`duration_ms`、`detected`、`already_installed`、`log_tail`(安裝記錄最後 20 行,經 `logs.collect` 同一套遮罩)。結束代碼 `0` 成功;`3010` / `1641` 成功且 `reboot_required = true`;`1638` 視為 `already_installed`;其餘 `INSTALL_FAILED`。
+- `result`(序列化後 4,000 字元內;範例 `ws-command-update-software-install.sample.json`):`exit_code`、`reboot_required`、`signer`(實際簽章者 SHA-1 指紋)、`signer_subject`、`duration_ms`、`detected`、`already_installed`、`installed_version`(偵測到的版本,0.9.2 起)、`previous_version`(升級前的舊版本,有舊版才有)、`version_unknown`(版本字串無法解析時為 `true`)、`installer_busy`(0.9.3 起:執行前等 Windows Installer 15 分鐘仍忙碌的 `INSTALL_BUSY` 為 `true`;`INSTALL_TIMEOUT` 一律帶,值表示逾時後 Windows Installer 是否仍在執行,可能為 `false`;1618 重試用盡的 `INSTALL_BUSY` 不帶此欄)、`interrupted`(安裝 / 移除流程中 Agent 停止或關機時為 `true`:含執行前等待 Windows Installer 空閒期間,此時尚未啟動安裝程式)、`log_tail`(安裝記錄最後 20 行,經 `logs.collect` 同一套遮罩)。失敗時 `result` 也可能帶其中幾項(例如 `INSTALL_TIMEOUT` 帶 `installer_busy`)。結束代碼 `0` 成功;`3010` / `1641` 成功且 `reboot_required = true`;`1638` 視為 `already_installed`;其餘 `INSTALL_FAILED`。
   - **版本比對(Agent 0.9.2 起,P7 VM 驗收 B-2)**:`detect` 找到項目時比對登錄檔 DisplayVersion 與快照的 `version`(數字分段比較,段數不同補 0:`24.09` = `24.09.00.0`、`26.05` < `26.05.2`)。較舊 → 繼續安裝(升級),結果帶 `previous_version`;相同或較新 → 直接 `succeeded` + `already_installed = true`;**無法解析(例如沒有 DisplayVersion、`1.2-beta`)→ 保守視為已安裝**(0.9.1 的行為,不重新安裝、不降版),帶 `version_unknown: true`。多個項目符合時任一個相同或較新即算已安裝。結果一律帶 `installed_version`(偵測到的版本,最多 50 字、已去控制字元)。安裝後的登錄檔確認(120 秒)要等到版本相同或較新;仍是舊版 → `DETECT_FAILED`。0.9.1 以前的 Agent 不比對版本、不帶這些欄位。
   - **延後中(Agent 0.9.3 起,P7 驗收 §5-4)**:電池 / 計量網路延後下載期間,每次檢查(5 分鐘)回報 `running`、`progress = 0`、`result = { "deferred": { "reason": "battery" | "metered", "next_check_at": "<UTC>" } }`,並寫一行日誌(原因、下次檢查時間)。主機只採用已知原因代碼與可解析的時間,暫存為該指令的 `result`(畫面顯示「延後中(電池供電 / 計量網路)」),並**重設執行逾時**(延後最多 4 小時,不被判 `TIMEOUT`;上限為開始 + 4 小時 + 類型逾時,進度 > 0 後不再接受延後);延後解除時 Agent 送不帶 `deferred` 的 `running`,主機清除;終態的 `result` 覆寫。只有 `software.install` 採用,0.9.2 以前的 Agent 延後時只送 `running`(畫面顯示「執行中」)。
   - **Windows Installer 忙碌(Agent 0.9.3 起,P7 驗收 L3)**:以 `Global\_MSIExecute` 由 SYSTEM / Administrators 持有且 msiserver 執行中判斷(設計 §8.1.5)。執行 msiexec(MSI 安裝、MSI 移除)前仍忙碌 → 每 30 秒檢查、最多 15 分鐘,超過 `INSTALL_BUSY`(不撞 1618);逾時結束行程樹後再看 60 秒,仍忙碌時訊息為「Windows Installer 仍在執行」。exe 類型不等,1618 由重試處理。
@@ -178,7 +178,7 @@
 
 ### `system.reboot` — 重新開機(P7-3)
 
-路徑:單台 `admin-commands`(多台走批次,同樣受核可門檻限制)。`params`(範例 `ws-command-system-reboot.sample.json`):
+路徑:**只有單台** `POST /api/endpoint/devices/{deviceId}/admin-commands`(`endpoint.command.admin`);**沒有多台批次 API**。核可門檻仍適用(D2-1):同一人 24 小時內 `system.reboot` 累計涉及的電腦台數 + 這次 > `BATCH_APPROVAL_THRESHOLD`(20)時(`command-dispatcher.ts` `GATED_GROUPS` 的 `system.reboot` 組、`createOne()` 的 `overGate`),該單台指令自動成為 1 台的**待核可批次**(`CommandView.batchState = pending_approval`,回應仍是 `CommandView`),由第二人經 `POST /api/endpoint/batches/{batchId}/approve-command`(駁回 `/reject-command`,`endpoint.command.admin`)核可後才送出;軟體派送批次走 `/approve`、`/reject`(`endpoint.software.manage`),路由與類型不符回 `403 ITA_APPROVAL_ROUTE_MISMATCH`。`params`(範例 `ws-command-system-reboot.sample.json`):
 
 | 欄位 | 型別 | 必填 | 說明 |
 | --- | --- | --- | --- |
