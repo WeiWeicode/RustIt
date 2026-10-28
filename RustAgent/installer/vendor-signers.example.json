@@ -1,0 +1,6 @@
+{
+  "_comment": "簽章工作站的原廠簽章者白名單範例(S1-SIGNING-DESIGN §3.2、§9-6)。實際清單放 %USERPROFILE%\\.rustit\\vendor-signers.json,由簽章人員維護,不進 repo。thumbprint 為原廠簽章憑證的 SHA-1 指紋(Get-AuthenticodeSignature 的 SignerCertificate.Thumbprint);簽章不是 Valid 或不在清單內的檔案要人工確認(7-Zip MSI 沒有原廠簽章,一律人工)。",
+  "signers": [
+    { "thumbprint": "0000000000000000000000000000000000000000", "name": "Notepad++(換成實際指紋)" }
+  ]
+}

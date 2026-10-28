@@ -1,0 +1,15 @@
+{
+  "schema": "sign-result/1",
+  "upload_id": "6f1c2b3a-4d5e-4f60-8a71-92b3c4d5e6f7",
+  "state": "signed",
+  "vendor_signer": "0123456789abcdef0123456789abcdef01234567",
+  "vendor_signer_subject": "CN=Example Vendor, O=Example Vendor, C=FR",
+  "vendor_check": "allowlist",
+  "signed_file": "Notepad++/8.7.1/npp.8.7.1.Installer.x64.exe",
+  "signed_sha256": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809",
+  "signed_signer": "c1c2d3e4f5a60718293a4b5c6d7e8f9012345678",
+  "signed_at": "2026-10-28T08:05:00Z",
+  "operator": "EXAMPLE\\signer01",
+  "reject_code": null,
+  "reject_reason": null
+}

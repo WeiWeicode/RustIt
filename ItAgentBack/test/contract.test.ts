@@ -23,6 +23,9 @@ ajv.addSchema(JSON.parse(readFileSync(path.join(CONTRACTS_DIR, 'pipe.schema.json
 // 指令附檔上傳回應(P4-2):Agent 通道以 Fastify 回傳,只在契約測試編譯
 const COMMAND_FILE_ID = 'https://giganexus.local/rustit/contracts/command-file.schema.json';
 ajv.addSchema(JSON.parse(readFileSync(path.join(CONTRACTS_DIR, 'command-file.schema.json'), 'utf8')) as object);
+// 送簽佇列(S1-3):endpoint-server ↔ 簽章工作站(PowerShell),只在契約測試驗證範例
+const SIGN_QUEUE_ID = 'https://giganexus.local/rustit/contracts/sign-queue.schema.json';
+ajv.addSchema(JSON.parse(readFileSync(path.join(CONTRACTS_DIR, 'sign-queue.schema.json'), 'utf8')) as object);
 
 function check(ref: string, file: string) {
   const validate = ajv.getSchema(ref);
@@ -46,6 +49,8 @@ describe('資料契約範例', () => {
       'pipe-replace-watchdog-ack.sample.json',
       'pipe-replace-watchdog.sample.json',
       'pipe-status.sample.json',
+      'sign-job.sample.json',
+      'sign-result.sample.json',
       'sync-response.sample.json',
       'sync.sample.json',
       'watchdog-report-response-target.sample.json',
@@ -72,6 +77,16 @@ describe('資料契約範例', () => {
       'ws-prepare-shutdown.sample.json',
       'ws-unsupported.sample.json',
     ]);
+  });
+
+  it('S1-3:送簽工作單與簽章結果;signed 缺雜湊、rejected 缺代碼不通過', () => {
+    check(`${SIGN_QUEUE_ID}#/definitions/SignJob`, 'sign-job.sample.json');
+    check(`${SIGN_QUEUE_ID}#/definitions/SignResult`, 'sign-result.sample.json');
+    const result = ajv.getSchema(`${SIGN_QUEUE_ID}#/definitions/SignResult`)!;
+    const sample = example<Record<string, unknown>>('sign-result.sample.json');
+    assert.equal(result({ ...sample, signed_sha256: null }), false);
+    assert.equal(result({ schema: 'sign-result/1', upload_id: sample.upload_id, state: 'rejected' }), false);
+    assert.ok(result({ schema: 'sign-result/1', upload_id: sample.upload_id, state: 'rejected', reject_code: 'VENDOR_NOT_ALLOWED' }));
   });
 
   it('inventory 請求與回應', () => {

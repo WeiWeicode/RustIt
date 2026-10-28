@@ -34,6 +34,8 @@ export const PERMISSIONS = [
   { code: 'endpoint.software.manage', name: '端點軟體與版本管理' },
   // S1-1 上架腳本以 API Key 查詢版本號(S1-SIGNING-DESIGN §2):只授予 API Key,不授予使用者角色
   { code: 'endpoint.release.registry', name: '端點版本號查詢(上架腳本)' },
+  // S1-3 簽章工作站簽章前確認送簽狀態(API Key,只授予工作站)
+  { code: 'endpoint.software.sign-check', name: '端點送簽狀態確認(簽章工作站)' },
 ];
 
 export function swaggerOptions(serviceCode: string, project: string): SwaggerOptions {

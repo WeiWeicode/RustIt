@@ -1,7 +1,7 @@
 # S1 簽章上架優化:設計(ADR 0005 第一階段)
 
 > 草案 2026-10-28,分支 `docs/s1-signing-design`(疊在 `docs/adr-0005-signing-pipeline` 上,MR !73 合併後改以 develop 為基底)。依據:[ADR 0005](decisions/0005-signing-and-publishing-pipeline.md) §分階段 S1、[ADR 0003](decisions/0003-code-signing-pki.md)、[RUNBOOK](RUNBOOK.md) §1、[P7-SOFTWARE-DESIGN](P7-SOFTWARE-DESIGN.md) §3、§4、§8.2-13、§8.2-14;甘特圖 W6-25。
-> **狀態**:需求方 2026-10-28 確認 §9 全部照建議(A),並同意 Gateway、GigaItApp 跨 repo 修改。S1-2 `release` 模式完成;**S1-1 程式完成**(分支 `feature/s1-1-release-registry`、Gateway `feature/openapi-api-key-auth`),待 Gateway 合併部署、IT 建立 API Key 後實測(測試區 Gateway 主機暫定 `10.10.130.124`,見 `publish-release.ps1` `$GatewayHosts`,實測時確認);S1-3 起未開工。
+> **狀態**:需求方 2026-10-28 確認 §9 全部照建議(A),並同意 Gateway、GigaItApp 跨 repo 修改。S1-2 `release` 模式完成;**S1-1 程式完成**(分支 `feature/s1-1-release-registry`、Gateway `feature/openapi-api-key-auth`),待 Gateway 合併部署、IT 建立 API Key 後實測(測試區 Gateway 主機暫定 `10.10.130.124`,見 `installer/gateway-api.ps1` `$GatewayHosts`,實測時確認);**S1-3 程式完成**(分支 `feature/s1-3-software-upload`:後端上傳 / 核可 / 送簽 / 結果確認、工作站 `software` 模式、Gateway `feature/endpoint-software-upload-direct` Nginx 直送),待 NAS 上傳帳號(S1-5)、migration 0011、測試區部署後實測;S1-4 GigaItApp 未開工。
 
 ## 0. 範圍
 
@@ -31,7 +31,8 @@ S1 的目標:正式區上線前,**簽章人員不需要主機管理權**、**IT 
 | `RustIT\<區>\sign-queue\` | 送簽工作單(`<uploadId>.json`)與簽章結果(`<uploadId>.result.json`) | **讀寫** | 讀寫 | — |
 
 - 主機仍**寫不到** `software\` 與 `releases\`:主機被入侵也不能自己放檔案進軟體庫,只能寫工作單,而工作單要過簽章工作站的獨立檢查(§3.3)。
-- endpoint-server 新增兩個讀寫掛載 `INCOMING_DIR`、`SIGN_QUEUE_DIR`(compose:`/srv/giganexus/nas-rustit/<區>/incoming`、`/sign-queue`);主機 2 的 NAS 掛載腳本(`host2-set-nas-credentials.sh`)要加這兩個子目錄的讀寫掛載,其餘維持唯讀。
+- endpoint-server 新增兩個讀寫掛載 `INCOMING_DIR`、`SIGN_QUEUE_DIR`(容器 `/srv/incoming`、`/srv/sign-queue`):主機 2 以**另一個 NAS 上傳帳號**(只能寫 `incoming\`、`sign-queue\`)執行 `ItAgentBack/deploy/host2-set-nas-upload.sh` 掛到 `/srv/giganexus/nas-rustit-rw/test/`,腳本會試寫 `software\`、`releases\`、`prod\`,寫得進去就失敗結束;原本的唯讀掛載(`host2-set-nas-credentials.sh`)不變。`ita.env` 設定四個變數才啟用(預設不啟用)。
+- **`sign-queue\` 只開給 endpoint-server 上傳帳號與簽章工作站帳號,不開給 IT 群組**:能寫的人就能偽造工作單(資安審查 S1-3 M2)。主機 2 的掛載點只有 uid 1000 可讀寫,但 WSL 預設使用者也是 uid 1000,所以工作站一律以 API Key 向主機確認送簽狀態(§3.2 第 1a 步),不只看工作單。
 
 ## 2. S1-1 版本查重改走 API
 
@@ -69,19 +70,22 @@ signing-workstation.ps1 release -Artifact <CI 產物 zip 或解壓目錄> -Envir
 ### 3.2 `software` 模式
 
 ```
-signing-workstation.ps1 software -Environment test -Thumbprint <指紋> [-Job <uploadId>] [-DryRun]
+signing-workstation.ps1 software -Environment test -Thumbprint <指紋> -GatewayUrl https://<Gateway> -ApiKeyFile <檔> [-Job <uploadId>] [-DryRun] [-Unattended]
 ```
 
-逐筆處理 `sign-queue\*.json`(沒有 `.result.json` 的):
+實作在 `RustAgent/installer/sign-software-queue.ps1`(`signing-workstation.ps1 software` 轉交)。逐筆處理 `sign-queue\*.json`(沒有 `.result.json` 的):
 
-1. 讀工作單(§4.3 格式),檢查欄位與路徑規則(三段路徑、副檔名,與 `software-files.ts` 相同)。
-2. 從 `incoming\` 複製到本機暫存,**重算 SHA-256 = 工作單的 `sha256`**;不符 → 結果 `rejected / HASH_MISMATCH`。
+1. 讀工作單(§4.3 格式),檢查欄位、部署區與路徑規則(三段路徑、副檔名,與 `software-files.ts` 相同);不符 → `INVALID_JOB` / `ENVIRONMENT_MISMATCH`。
+1a. **向主機確認**(資安審查 S1-3 M1、M2):以 API Key(只授 `endpoint.software.sign-check`)呼叫 `GET /api/endpoint/software/uploads/{id}/sign-status`,主機上必須是 `queued`、核可人 ≠ 上傳者,路徑 / 雜湊 / 大小 / 上傳者 / 核可人與工作單相同;不是 `queued` → `NOT_APPROVED`(駁回後殘留、偽造),不一致 → `JOB_MISMATCH`,連不到主機 → 略過、下次重跑。只有測試區可用 `-SkipHostCheck`(本機測試)。
+2. 從 `incoming\` 複製到本機暫存,**重算 SHA-256 與大小 = 工作單**;不符 → `HASH_MISMATCH`。之後簽章與放置都用這份本機副本(核可後 `incoming\` 被換掉也不影響,資安審查 L2)。軟體庫已有同路徑 → `TARGET_EXISTS`。
 3. **廠商原簽章檢查(工作站自己的規則,不聽主機)**:`Get-AuthenticodeSignature`;
    - 有效且簽章者指紋在工作站本機 `vendor-signers.json`(簽章人員維護,不進 repo 的實際清單;repo 只放範例)→ 可簽;
    - 未簽章 / 不在清單 / 無效 → 停下來顯示檔案資訊,**簽章人員輸入 `yes` 才簽**(第一階段本來就是人工);`-Unattended`(S3 用)時直接 `rejected / VENDOR_NOT_ALLOWED`。
 4. 以軟體發佈憑證 `signtool sign /fd SHA256 /tr <時間戳記> /td SHA256 /sha1 <指紋>` 簽章(會**取代**原有簽章),`signtool verify /pa`。
 5. 不覆蓋地放到 `software\{軟體}\{版本}\{檔名}`(沿用 `publish-release.ps1` 的暫存檔 → 重算 → `File.Move` 作法)。
-6. 寫 `<uploadId>.result.json`(§4.3),最後才寫,寫入即代表完成。
+6. 寫 `<uploadId>.result.json`(§4.3),最後才寫,寫入即代表完成。確定性的錯誤寫 rejected;簽章失敗(token 沒插、時間戳記連不到)不寫結果,下次重跑。
+
+本機以測試憑證實測(2026-10-28,暫存目錄模擬 NAS,`-SkipHostCheck`):正常一筆重簽後放進軟體庫、結果檔雜湊相符且主機 `parseSignResult` 可解析;`HASH_MISMATCH`、`ENVIRONMENT_MISMATCH`、`TARGET_EXISTS`、`-Unattended` 不在白名單 `VENDOR_NOT_ALLOWED` 都寫入對應結果;`incoming\` 原檔不被修改。測試憑證的原廠簽章狀態不是 Valid(根不受信任),所以走人工確認。
 
 > **待驗證(ADR 0005「先做」第 2 項)**:重簽會取代廠商簽章、改變檔案的簽章區,少數自解壓 / 自我檢查的安裝程式可能失效。S1-2 完成後先在 VM 以 Notepad++(NSIS)驗證,失敗就退回「附加簽章 `/as`」或改設計。
 
@@ -99,26 +103,13 @@ signing-workstation.ps1 software -Environment test -Thumbprint <指紋> [-Job <u
 
 ### 4.2 資料(migration 0011,`ita.software_upload`)
 
-| 欄位 | 型別 | 說明 |
-| --- | --- | --- |
-| `upload_id` | `UNIQUEIDENTIFIER` PK | |
-| `software` / `version` / `file_name` | `NVARCHAR(100)` ×3 | 目標三段路徑(與 `software-files.ts` 同規則) |
-| `incoming_path` | `NVARCHAR(400)` | `incoming\` 內的相對路徑(`{upload_id}\{file_name}`) |
-| `sha256` / `size_bytes` | `CHAR(64)` / `BIGINT` | 上傳完成時計算 |
-| `state` | `VARCHAR(16)` | `uploaded` / `queued` / `signed` / `rejected`(CHECK) |
-| `uploaded_by_emp` / `uploaded_at` | | |
-| `approved_by_emp` / `approved_at` | | 送簽核可人;**≠ uploaded_by_emp**(服務層 + CHECK) |
-| `reject_code` / `reject_reason` / `rejected_by` | | 駁回或工作站拒絕 |
-| `vendor_signer` / `vendor_signer_subject` | | 工作站回報的原廠簽章者(未簽章為 NULL) |
-| `signed_sha256` / `signed_signer` / `signed_at` | | 工作站結果;主機另以 `software\` 實際檔案重算比對 |
-| `row_ver` | `ROWVERSION` | 狀態條件更新 |
+實作時簡化(欄位說明見 `ItAgentBack/docs/DB_SCHEMA.md`):**`incoming\` 的原始檔與軟體庫的目標位置用同一個三段路徑** `file_name`(`{軟體}/{版本}/{檔名}`),不另存 `incoming_path`;同一路徑同時只能有一筆進行中(篩選唯一索引 `state IN ('uploaded','queued')`);`source`(`upload` / `incoming`)記來源;狀態一律條件更新(`WHERE state = …`),不用 `ROWVERSION`。核可人 ≠ 上傳者:程式、UPDATE 條件、CHECK 三道。
 
-### 4.3 送簽工作單與結果(檔案契約,`docs/contracts/sign-job.schema.json`)
+### 4.3 送簽工作單與結果(檔案契約,`docs/contracts/sign-queue.schema.json`、範例 `examples/sign-job.sample.json` / `sign-result.sample.json`)
 
 ```json
 { "schema": "sign-job/1", "upload_id": "…", "environment": "test",
-  "software": "Notepad++", "version": "8.7.1", "file_name": "npp.8.7.1.Installer.x64.exe",
-  "incoming_path": "…/npp.8.7.1.Installer.x64.exe", "sha256": "…", "size_bytes": 1234,
+  "file_name": "Notepad++/8.7.1/npp.8.7.1.Installer.x64.exe", "sha256": "…", "size_bytes": 1234,
   "uploaded_by": "S1xxxxx", "approved_by": "S1yyyyy", "approved_at": "…" }
 ```
 
@@ -129,16 +120,22 @@ signing-workstation.ps1 software -Environment test -Thumbprint <指紋> [-Job <u
   "signed_at": "…", "operator": "<Windows 帳號>", "reject_code": null }
 ```
 
-endpoint-server 每分鐘掃 `sign-queue\*.result.json`:`signed` 時**重算** `software\` 實際檔案的 SHA-256 必須等於 `signed_sha256`,不符記 `rejected / RESULT_MISMATCH` 並告警;不採信結果檔自報的其他欄位作為安全判斷(只做顯示)。
+endpoint-server 每分鐘掃 `queued` 紀錄的 `{id}.result.json`(以同一檔案代號讀,64 KB 內,不跟隨符號連結):`signed` 時**重算** `software\` 實際檔案的 SHA-256,必須等於 `signed_sha256`、`signed_file` 必須等於上傳路徑、且與原始檔不同(確實重簽),否則 `rejected / RESULT_MISMATCH`(記 error 日誌;告警規則是裝置層級,尚未接上);軟體庫還讀不到檔案時下一輪再試;格式錯誤保持 `queued`。不採信結果檔自報的其他欄位作為安全判斷(只做顯示;畫面要標成「工作站回報」)。
 
-### 4.4 API(`/v1/software/uploads`,`endpoint.software.manage`)
+### 4.4 API(`/v1/software/uploads`)
 
-| 方法 | 路徑 | 說明 |
-| --- | --- | --- |
-| `POST` | `/v1/software/uploads` | 上傳(§9-2 決定方式);回 `uploadId`、`sha256` |
-| `GET` | `/v1/software/uploads?state=` | 清單 |
-| `POST` | `/v1/software/uploads/{id}/approve` | 第二人核可送簽(≠ 上傳者、需全部公司角色);寫工作單 → `queued`;`x-audit-level: meta` |
-| `POST` | `/v1/software/uploads/{id}/reject` | 駁回(`uploaded` / `queued`) |
+| 方法 | 路徑 | 權限 | 說明 |
+| --- | --- | --- | --- |
+| `POST` | `/v1/software/uploads?fileName=` | `endpoint.software.manage` | 串流上傳(`application/octet-stream`,需 `Content-Length`);收檔前擋:超過上限 413、同時上傳超過 2 筆 429、軟體庫或進行中已有同路徑 409;閒置 2 分鐘 408;建立紀錄失敗刪檔。大檔經 Gateway Nginx 直送(§4.5 A) |
+| `POST` | `/v1/software/uploads/register` | 同上 | 登錄網路芳鄰放進 `incoming\` 的檔案(過渡期,§4.5 B) |
+| `GET` | `/v1/software/uploads?state=`、`/incoming`、`/{id}` | 同上 | 清單、`incoming\` 未登錄檔案、詳情 |
+| `POST` | `/v1/software/uploads/{id}/approve` | 同上 | 第二人核可送簽(≠ 上傳者、需全部公司角色);重算 `incoming\` 雜湊(不符 → `INCOMING_CHANGED`)→ 寫工作單 → `queued`;寫完後狀態已變(同時被駁回)就移除工作單 |
+| `POST` | `/v1/software/uploads/{id}/reject` | 同上 | 駁回(`uploaded` / `queued`),一律移除工作單 |
+| `GET` | `/v1/software/uploads/{id}/sign-status` | `endpoint.software.sign-check`(**API Key**,`x-auth-mode: api_key`) | 簽章工作站簽章前確認(§3.2 第 1a 步):`state`(找不到為 `not_found`)、路徑、雜湊、大小、上傳者、核可人、`environment` |
+
+全部使用者路由需全部公司角色(其他回 403 `ITA_SCOPE_ALL_REQUIRED`);寫入類 `x-audit-level: meta`。上傳 API 不收備註(查詢字串會進請求日誌,資安審查 L8),備註只在登錄 `incoming\` 檔案時填。
+
+**待做**:P7 登錄時,若安裝檔路徑對到的上傳紀錄不是 `signed`(例如 `rejected`),擋下或醒目警示(資安審查 M1 建議);定期清理 `incoming\` 的 `.part-*` 暫存檔與過期原始檔(保留期限待決,ADR 0005)。
 
 ### 4.5 上傳方式(§9-2)
 
@@ -158,7 +155,9 @@ endpoint-server 每分鐘掃 `sign-queue\*.result.json`:`signed` 時**重算** `
 | 威脅 | 防線 |
 | --- | --- |
 | 單一 IT 帳號被盜,上傳惡意程式取得公司簽章 | 送簽要第二人核可;工作站對非白名單廠商要人工確認 |
-| 主機被入侵,偽造工作單 | 主機寫不到 `software\`;工作站重算雜湊、獨立的廠商白名單;每筆簽章都有結果檔與稽核 |
+| 能寫 `sign-queue\` 的人偽造工作單(繞過兩人核可) | 工作站簽章前以 API Key 向主機確認 `queued` 與兩人(§3.2 第 1a 步);`sign-queue\` 不開給 IT 群組;獨立的廠商白名單、非白名單人工確認 |
+| 主機被入侵,偽造工作單與確認回應 | 主機寫不到 `software\`;工作站獨立的廠商白名單與人工確認(白名單內的也顯示上傳者 / 核可人);每筆簽章都有結果檔;之後仍要 P7 登錄、pilot 測試與第二人發佈 |
+| 駁回與核可同時發生,留下已駁回的工作單 | 駁回一律移除工作單;核可寫完工作單後重讀狀態;工作站確認主機狀態是 `queued` |
 | 結果檔被竄改 | 主機重算 `software\` 實際檔案雜湊;後續 Agent 仍驗 Authenticode 與本機信任清單 |
 | API Key 外洩(S1-1) | 只授唯讀 `endpoint.release.registry`、限定來源 IP、可隨時停用 |
 | 跨區誤放 | 工作單帶 `environment`,工作站只處理與 `-Environment` 相同的;NAS 兩區寫入群組分開 |

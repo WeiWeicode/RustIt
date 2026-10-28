@@ -9,17 +9,21 @@
     2. sign-release.ps1:核對清單、雜湊、版本,輸入 YES 後簽章
     3. publish-release.ps1:重新核對、版本號查重、放到 NAS 版本檔目錄,印出登錄資料
   核對與簽章邏輯都在上面兩支腳本,本腳本只負責串接;參數照原樣轉交。
-  software 模式(NAS 送簽佇列)在 S1-3 後端完成後加入(設計 §3.2)。
+
+  software 模式(S1-3 送簽佇列,設計 §3.2、§4.3):交給 sign-software-queue.ps1,逐筆處理 NAS RustIT\<區>\sign-queue\ 的工作單,
+  以軟體發佈憑證重簽後放進 software\,最後寫結果檔(說明見該腳本)。
 
   請用**受保護 tag 或 main 的 checkout** 執行(腳本本身在信任鏈內;RUNBOOK §1)。
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File RustAgent\installer\signing-workstation.ps1 release -Artifact C:\Users\me\Downloads\artifacts.zip -Environment test -Thumbprint <測試憑證指紋> -Test -NoTimestamp
+  powershell -ExecutionPolicy Bypass -File RustAgent\installer\signing-workstation.ps1 software -Environment test -Thumbprint <測試憑證指紋> -Test -NoTimestamp -DryRun
   powershell -ExecutionPolicy Bypass -File RustAgent\installer\signing-workstation.ps1 release -Artifact C:\release-out -Environment prod -Thumbprint <正式憑證指紋> -ExpectedCommit <tag 的 commit> -HostAlias host3 -GatewayUrl https://<正式區 Gateway> -ApiKeyFile $env:USERPROFILE\.rustit\publish-prod.key
 #>
 param(
-    [Parameter(Mandatory, Position = 0)][ValidateSet('release')][string]$Mode,
-    [Parameter(Mandatory)][string]$Artifact,
+    [Parameter(Mandatory, Position = 0)][ValidateSet('release', 'software')][string]$Mode,
+    # release:CI 產物 zip 或解壓後的目錄
+    [string]$Artifact,
     [Parameter(Mandatory)][ValidateSet('test', 'prod')][string]$Environment,
     [Parameter(Mandatory)][ValidatePattern('^[0-9A-Fa-f]{40}$')][string]$Thumbprint,
     # 以下轉交 sign-release.ps1
@@ -35,10 +39,25 @@ param(
     [string]$GatewayUrl,
     [string]$ApiKeyFile,
     [switch]$SkipRegistryCheck,
+    # 以下轉交 sign-software-queue.ps1(software 模式)
+    [string]$NasRoot,
+    [string]$Job,
+    [string]$VendorSigners,
+    [switch]$Unattended,
+    [switch]$SkipHostCheck,
     [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
 if ($Environment -eq 'prod' -and ($Test -or $NoTimestamp)) { throw '正式區不可用 -Test / -NoTimestamp' }
+
+if ($Mode -eq 'software') {
+    $swArgs = @{ Environment = $Environment; Thumbprint = $Thumbprint; TimestampUrl = $TimestampUrl }
+    foreach ($k in 'NasRoot', 'Job', 'VendorSigners', 'GatewayUrl', 'ApiKeyFile') { if ($PSBoundParameters.ContainsKey($k)) { $swArgs[$k] = $PSBoundParameters[$k] } }
+    foreach ($k in 'NoTimestamp', 'Test', 'Unattended', 'SkipHostCheck', 'DryRun') { if ($PSBoundParameters.ContainsKey($k)) { $swArgs[$k] = $true } }
+    & (Join-Path $PSScriptRoot 'sign-software-queue.ps1') @swArgs
+    return
+}
+if (-not $Artifact) { throw 'release 模式要指定 -Artifact(CI 產物 zip 或解壓後的目錄)' }
 
 # 1. 取得產出目錄(含 SHA256SUMS.txt)
 $src = (Resolve-Path -LiteralPath $Artifact).Path
