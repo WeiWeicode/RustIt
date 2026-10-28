@@ -1,6 +1,6 @@
 # P7 軟體派送:Agent 0.9.2 發版與 VM 驗收
 
-> **狀態:驗收完成。L3 未通過(見 §5-6);Watchdog 延後升級(需求方決定不做)、#3 第 3 台、#12、下載 429 未驗證**(見 §3、§4)。測試套件已撤回(§8),其餘清理由需求方處理。取代 2026-10-22 的進行中版本(Agent 0.9.1 / Watchdog 0.3.5 的發版與 #1、#2 結果併入本檔)。
+> **狀態:0.9.2 驗收完成,L3 未通過(§5-6);Agent 0.9.3 於 2026-10-28 重驗,L3 與其餘 6 項全部通過,見 §10。Watchdog 延後升級(需求方決定不做)、#3 第 3 台、#12、下載 429、延後「恢復後繼續」仍未驗證**(見 §3、§4、§10.3)。測試套件已撤回(§8),其餘清理由需求方處理。取代 2026-10-22 的進行中版本(Agent 0.9.1 / Watchdog 0.3.5 的發版與 #1、#2 結果併入本檔)。
 > 依需求方決定先用 2 台(開發機 `S1800-S112009` + VM `RUSTIT-P34`),設計中的「3 台」改 2 台,**第 3 台待補**。
 > 測試人:需求方(簽章、GigaItApp 操作、VM 內指令、NAS 放檔;第二人 V112001),Claude(雜湊與主機資料唯讀查證、經內建瀏覽器操作 GigaItApp、測試工具製作)。2026-10-27 起 GigaItApp 的登錄 / 派送 / 撤回由 Claude 在需求方已登入的瀏覽器操作,每個寫入都先取得需求方同意。
 
@@ -95,3 +95,83 @@
 ## 9. 下一步
 
 測試套件已撤回。待需求方處理:VM / 開發機測試軟體、測試根憑證、NAS 測試檔(須套件撤回後再刪)、告警 `d28ac339-…`。待主工作階段:L3 查因、#3 第 3 台與 #12 的補驗環境。#12 與新行為 9(429)在測試區無法驗證,交主工作階段決定是否另找環境。
+
+## 10. 0.9.3 重驗(2026-10-28)
+
+> 測試人:需求方(VM 內指令、GigaItApp 已登入的瀏覽器),Claude(經內建瀏覽器操作 GigaItApp;每項寫入限於需求方 2026-10-28 同意的範圍:登錄、派送、移除)。時間為 VM / 開發機本地時間(UTC+8)。
+> 程式:develop `9d70306`(含 Agent 0.9.3、GigaItApp !12);VM `RUSTIT-P34`:Agent 0.9.3、Watchdog 0.3.5;`pilot` 環。
+
+### 10.1 結果總表
+
+| # | 項目 | 結果 |
+| --- | --- | --- |
+| 0 | 前置:VM 升到 0.9.3、msiserver 空閒 | **通過** |
+| 1 | L3:SlowMSI 逾時 → 緊接 Notepad++ MSI | **通過** |
+| 2 | #9:exe 類型逾時訊息不變 | **通過** |
+| 3 | #11:延後顯示與日誌(電池、計量網路) | **通過**(「恢復後繼續」仍無法驗證) |
+| 4 | 撤回後重新登錄同一安裝檔 | **通過** |
+| 5 | 事件詳情 `detect` 以 JSON 顯示 | **通過** |
+| 6 | 回歸:Notepad++ 單台派送、同版本重派 | **通過** |
+
+### 10.2 逐項證據
+
+**0. 前置**
+- 步驟:VM 查執行檔版本與 Agent 日誌;查 `RustIt Test Slow MSI` 是否還在、`Global\_MSIExecute`、`msiexec`。
+- 預期:Agent 0.9.3、日誌有「Agent 0.9.3 啟動」、事件 `upgrade_succeeded`;SlowMSI 已不在,msiserver 空閒。
+- 實際:`rustit-agent.exe` 0.9.3、`rustit-watchdog.exe` 0.3.5,服務 Running;`agent-2026-10-27.log` 16:44:10「Agent 0.9.3 啟動」(最新的日誌檔看不到,因為在 10-27 的檔);電腦詳情「事件」Tab:10-27 16:44 `upgrade_succeeded` `{"component":"agent","duration_ms":23958,"from":"0.9.2","to":"0.9.3"}`;`RustIt Test Slow MSI` 已不在(原先預期要手動移除,實際上 10-27 16:39 已移除,事件「移除軟體 RustIt Test Slow MSI」);`_MSIExecute` 不存在、無 `msiexec`。VM 殘留 7-Zip 26.05、Notepad++ 8.9.8。
+- 前置動作:08:49 經 GigaItApp 移除 VM 的 Notepad++ 8.9.8(結束代碼 0,cmd `cb4c7d1b…`),讓 L3 的 Notepad++ 是真安裝。
+
+**1. L3(SlowMSI 逾時 → Notepad++ MSI)**
+- 步驟:登錄 `RustIt-SlowMSI2 1.0.0`(MSI,產品代碼 `{20ADC0A9-4C08-412D-82B4-222694115B82}`,`timeout_sec` 300,與撤回的 SlowMSI 同一安裝檔)→ 08:50:52 派到 VM(cmd `7cac4691-7aad-4c42-bef8-9473ce6e9767`,見 VM Agent 日誌)→ 逾時後 09:01:05 派 Notepad++ 8.9.8(cmd `52d57952…`,requestId `e74dcd5d053c`)。
+- 預期:SlowMSI 結果為「Windows Installer 仍在執行」;Notepad++ 等待至空閒,或 15 分鐘後 `INSTALL_BUSY`,不得 1618。
+- 實際:
+  - 08:56:53 `INSTALL_TIMEOUT`「超過 300 秒仍未結束,已結束安裝程式的行程樹;Windows Installer 仍在執行(安裝在 Windows Installer 服務內繼續進行,逾時前的變更不回復);同一台的下一筆 MSI 派送會先等它結束」;日誌 08:56:53「Windows Installer 等了 60 秒仍在執行,不再等待」(逾時後多看 60 秒,與設計相符)。
+  - 09:01:06 日誌「Windows Installer 仍在執行,等它結束再執行 msiexec(每 30 秒檢查,最多 15 分鐘)」;`Get-Process msiexec` 仍有 `msiserver` 的行程(Id 8088,啟動 08:49:15 起;SI 0)。
+  - 09:16 `INSTALL_BUSY`「Windows Installer 仍在執行(已等 15 分鐘),未啟動安裝程式;請稍後重新派送」(建立 09:01 → 結束 09:16);**沒有出現 1618,也沒有啟動 Notepad++ 的 msiexec**。SlowMSI 的自訂動作約 09:26 結束(09:26:04 `_MSIExecute` 不存在)。
+- 判定:通過。0.9.2 的錯誤(誤報「已沒有進行中的安裝」、之後 30 分鐘內任何 MSI 派送撞 1618)已不重現。
+
+**2. #9 TestInst-C 逾時**
+- 步驟:登錄 `RustIt-TestInst-C2 1.0.0`(`/reg /sleep=400`,exe,`timeout_sec` 300,判斷值 `RustIt Test Installer`,與撤回的 C 同一安裝檔),msiserver 空閒時派送。
+- 預期:`INSTALL_TIMEOUT`,訊息與 0.9.2 相同。
+- 實際:09:27 → 09:32 `INSTALL_TIMEOUT`「超過 300 秒仍未結束,已結束安裝程式的行程樹;Windows Installer 已沒有進行中的安裝」(requestId `1d8a17802cb4`),與 0.9.2 的訊息一致。
+- 觀察:第一次派送(09:18,cmd `da20062d…`,requestId `87d94564b5dc`)當時 SlowMSI 的 msiserver 仍占用,結果訊息變成「…;Windows Installer 仍在執行(…);同一台的下一筆 MSI 派送會先等它結束」,且多等 60 秒(09:18 → 09:24)。exe 類型逾時後同樣檢查 msiserver,是 0.9.3 的設計行為,不算缺陷;但驗收 #9 時 msiserver 必須空閒才能比對 0.9.2 訊息,因此重做一次(上列通過的一筆)。
+
+**3. #11 延後**
+- 步驟:VM 系統環境變數 `RUSTIT_TEST_POWER=battery`、重啟 `GigaNexusAgent`(09:34),派 `RustIt-TestInst-D2 1.0.0`(`/reg`,不勾「略過電池延後」,cmd `530aabc7…`,requestId `2760b30f3805`);之後改 `metered`、重啟(09:49),再派一次(cmd `60753fb3…`,requestId `c465882196fb`)。
+- 預期:畫面顯示「延後中(原因)」;Agent 日誌每 5 分鐘一行。
+- 實際:
+  - battery:畫面「延後中(電池供電)」,說明「電腦目前電池供電,Agent 延後下載(每 5 分鐘重新檢查,最多 4 小時;計量網路不因『略過電池延後』而略過);下次檢查 09:46」。日誌 `09:36:03.180`、`09:41:03.198`、`09:46:03.210` 各一行「RustIt-TestInst-D2 1.0.0:電池供電,延後下載,下次檢查 …(已延後 0 / 5 / 10 分鐘,最多 240 分鐘)」,間隔 5 分鐘整。
+  - metered:畫面「延後中(計量網路)」,下次檢查 09:59(09:55 看到)。
+  - 重啟 Agent 會終止延後中的指令(battery 那筆在 09:49 重啟後結束,與 0.9.2 §5-3 相同,預期行為);**「恢復後繼續」仍無法以環境旗標驗證**。
+- 觀察(不影響通過):派送後頭幾分鐘畫面仍是「執行中」,到第二次檢查前後才變成「延後中」(battery:09:36 派、09:37 仍「執行中」、09:41 後看到「延後中」;metered:09:49 派、約 09:55 已是「延後中」)。日誌在派送當下(09:36:03)就有延後行,所以 Agent 端立即進入延後,畫面落後的原因未查明。可能原因:`RustAgent/crates/agent/src/command.rs` `report_deferred` 以 `running` 回報,與先前的 `running` 狀態相同,主機或前端可能只在 `result.deferred` 變動(`next_check_at` 更新)時才反映;可往 endpoint-server 暫存 `result.deferred` 與 GigaItApp 指令列表輪詢間隔查。
+- 清理:09:57 已清除 `RUSTIT_TEST_POWER`(`GetEnvironmentVariable(...,'Machine') -eq $null` → True)並重啟 Agent。
+
+**4. 撤回後重新登錄同一安裝檔**
+- 步驟:開「登錄套件」,查安裝檔下拉清單;用同一檔案登錄。
+- 預期:撤回套件的安裝檔重新出現在清單,可登錄,從 draft 開始。
+- 實際:清單列出已撤回套件的安裝檔(SlowMSI、TestInst 1.0.1~1.0.3、A、B、C、D;0.9.2 時這些檔不在清單內,見 §5-2)。三次登錄都成功且為「草稿」:`RustIt-SlowMSI2 1.0.0`(id `95b05420-55bb-4b06-aec8-ab714c73be90`)、`RustIt-TestInst-C2 1.0.0`(id `b4ef52e7-c5c9-4ae2-a731-394feb80fe5d`)、`RustIt-TestInst-D2 1.0.0`(id `4d56a1cd-e5f1-4bbb-94b8-32d60c622d87`)。migration 0010 生效。
+- 附註:以原名稱 `RustIt-SlowMSI 1.0.0` 重新登錄回 409「同名同版本或同一檔案已登錄過」,符合設計(已撤回的版本號不可重用);改名後成功。
+
+**5. 事件詳情 `detect` 以 JSON 顯示**
+- 實際:指令詳情的參數行為 `…detect = {"type":"display_name","value":"Notepad++%"},timeout_sec = 1800,reboot_policy = never`(INSTALL_BUSY 那筆);電腦詳情「事件」Tab 的 `upgrade_succeeded` 內容為 JSON 文字。不再出現 `[object Object]`。
+
+**6. 回歸**
+- Notepad++ 單台派送:09:58(VM 剛重啟 Agent、顯示離線,指令排隊後送出)成功,「安裝完成,結束代碼 0,耗時 3 秒。偵測到已安裝」「偵測到版本 8.9.8」「簽章者 `1e8e0d13…`(NOTEPAD++)」(cmd `b08eaedb…`,requestId `6dbbcae676d8`);事件「安裝軟體 Notepad++ (x64) · 8.9.8」。
+- 同版本重派:09:59 成功「已經安裝(偵測到 8.9.8),未重複執行。偵測到已安裝」(cmd `5ecf6b52…`,requestId `eea979841817`),沒有下載。
+
+### 10.3 未涵蓋與觀察
+
+- 延後「恢復後繼續」、`DEFERRED_TIMEOUT`(4 小時)、#12、下載 429、#3 第 3 台、Watchdog 延後升級:同 §3、§4,未驗證。
+- GigaItApp 移除名稱含「rustit」的軟體回 `UNINSTALL_NOT_SUPPORTED`(`RustIt Test Installer` 屬保護規則,requestId `5527cb74e548`),測試用 TestInst 套件每次都要在 VM 手動清登錄(`HKLM\...\Uninstall\RustItTestInst`);重新派 `/reg` 前不清會變 `already_installed`。
+- 事件列表「安裝軟體 / 移除軟體」依登錄檔差異產生:`RustIt Test Slow MSI` 的 ARP 項目被手動刪除後(見 §10.4),列表沒有對應的「移除軟體」事件。
+
+### 10.4 本次在測試區留下的痕跡
+
+| 位置 | 內容 | 建議處理 |
+| --- | --- | --- |
+| GigaItApp 軟體目錄 | 新登錄 3 個**草稿**:`RustIt-SlowMSI2 1.0.0`、`RustIt-TestInst-C2 1.0.0`、`RustIt-TestInst-D2 1.0.0`(id 見 §10.2-4) | 驗收後撤回(不刪檔;NAS 檔案撤回後才可刪) |
+| 指令紀錄 | VM 上本次的安裝 / 移除軟體指令(2026-10-28 08:49 起) | 保留 |
+| VM `RUSTIT-P34` | Notepad++ 8.9.8 已安裝(重驗後);7-Zip 26.05 仍在;`RustIt Test Installer` 登錄項目已清;**`RustIt Test Slow MSI` 的「新增或移除程式」項目被需求方在 09:26 誤刪**(本應只刪 `RustIt Test Installer`;Windows Installer 的產品註冊 `{20ADC0A9-4C08-412D-82B4-222694115B82}` 仍在,可用 `msiexec /x {20ADC0A9-4C08-412D-82B4-222694115B82}` 移除);SlowMSI 的 msiserver 工作 09:26 已結束 | 驗收後還原檢查點,或手動移除產品代碼上列項目 |
+| VM 環境變數 | `RUSTIT_TEST_POWER` 已清 | 無 |
+| `agent.toml`、`ita.env`、NAS、migration、發佈環 | 本次未動 | 無 |
+| 0.9.3 發佈狀態 | 仍為草稿,`pilot` 環目標 0.9.3、`all` 0.9.2、`it` 0.9.1,未動 | 通過後由主討論串安排發佈 |
