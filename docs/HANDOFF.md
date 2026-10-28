@@ -19,6 +19,17 @@
 
 ## 2. 下一步
 
+**S1 簽章上架優化(ADR 0005、[S1-SIGNING-DESIGN.md](S1-SIGNING-DESIGN.md),甘特圖 W6-25,2026-10-28 開工;明天從這裡接手)**
+- **已合併 develop**:ADR 0005(!73)、S1 設計 + S1-2 簽章工作站 `release` 模式 + **S1-1** 版本號查重改 API Key(!74:ItAgentBack `GET /v1/releases/registry`、`publish-release.ps1 -GatewayUrl -ApiKeyFile`);Gateway !10(OpenAPI `x-auth-mode: api_key`)、!11(Nginx 安裝檔上傳直送 4 GB);根目錄 !12(甘特圖 W6-25 ~ W6-27)。
+- **待合併**:RustIt **!75** S1-3(上傳 / 核可 / 送簽後端、migration 0011、`sign-status` API Key 路由、工作站 `software` 模式 `sign-software-queue.ps1`、`gateway-api.ps1`、`deploy/host2-set-nas-upload.sh`);根目錄 `docs/arch-s1-1-registry`(架構 JSON:上架改 API Key,MR 未開)。
+- **下一步(依序)**
+  1. **S1-1 測試區實測**:endpoint-server 部署後 IT 發佈自動註冊的 `endpoint.release.registry` 路由(api_key)、建立 API Key `rustit-publish-test`(只授此權限、限定來源 IP);確認測試區 Gateway 主機名稱與 HTTPS 憑證,必要時改 `installer/gateway-api.ps1` `$GatewayHosts`(暫定 `10.10.130.124`);以 `publish-release.ps1 -GatewayUrl -ApiKeyFile -DryRun` 後實跑。
+  2. **S1-3 上測試區**(!75 合併後):SQL 套用 migration 0011;NAS 管理員建立上傳帳號(只能寫 `RustIT\test\incoming\`、`sign-queue\`;`sign-queue\` 不開給 IT 群組);本人在主機 2 執行 `host2-set-nas-upload.sh` 並改 `ita.env`;Gateway 發佈 `endpoint.software.upload.*` 路由、建立工作站 API Key(只授 `endpoint.software.sign-check`)。之後照 RUNBOOK §3.1 實跑一筆(上傳 → 第二人核可 → 工作站簽 → signed → P7 登錄)。
+  3. **S1-4 GigaItApp「上傳與簽章」Tab**(設計 §5,跨 repo 已同意):上傳 / 登錄 incoming 檔案、清單、核可 / 駁回(上傳者本人的核可按鈕停用);工作站回報欄位標「工作站回報(未驗證)」,`reject_reason` / `notes` 不用 `v-html`。
+  4. S1-3 待做:P7 登錄時檢查安裝檔對應的上傳紀錄(不是 `signed` 就擋或警示,資安審查 M1);`incoming\` 的 `.part-*` 暫存檔與過期原始檔清理(保留期限待決)。
+  5. VM 驗證重簽後實際安裝(Notepad++ NSIS、7-Zip MSI;ADR 0005「先做」第 2 項),失敗改附加簽章或改設計。
+  6. 完成後甘特圖 W6-25 進度(目前 60%)、架構 JSON 加上傳與送簽流程、Gateway `ENDPOINT-AGENT-GUIDE`(新路由與 API Key,需同意)。
+
 0. **目前階段:P7 軟體派送測試區完成(2026-10-28)。新討論串從這裡接手。**
    - **已完成(2026-10-28)**
      - **0.9.3 VM 重驗 7 項全部通過**(報告 [test-reports/2026-10-27-p7-vm-acceptance.md](test-reports/2026-10-27-p7-vm-acceptance.md) §10,RustIt !67):L3(SlowMSI 逾時後「Windows Installer 仍在執行」,緊接的 Notepad++ MSI 等 15 分鐘回 `INSTALL_BUSY`、無 1618)、#9、#11(電池 / 計量網路畫面「延後中(原因)」,日誌每 5 分鐘一行)、撤回後重新登錄同一安裝檔、事件詳情 `detect` 以 JSON 顯示、Notepad++ 單台派送與同版本重派 `already_installed`、VM 升級事件 `upgrade_succeeded`。
