@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-28 S1 簽章上架優化:設計與簽章工作站 release 模式
+- 內容:新增 S1 設計(ADR 0005 第一階段,甘特圖 W6-25):S1-1 版本查重改走 API Key 唯讀路由(需 Gateway 支援 OpenAPI 宣告 `api_key` 路由)、S1-2 簽章工作站、S1-3 套件上傳與送簽(`ita.software_upload`、NAS `incoming\` / `sign-queue\`、上傳者 ≠ 核可人)、S1-4 GigaItApp 畫面、S1-5 NAS 權限;待確認 7 項(§9)。先實作不受待決事項影響的 S1-2 `release` 模式:`signing-workstation.ps1 release` 串接 `sign-release.ps1` 與 `publish-release.ps1`,CI 產物 zip 解壓到新的暫存目錄後簽章、上架,參數照原樣轉交;`software` 模式待 S1-3。
+- 檔案:`docs/S1-SIGNING-DESIGN.md`(新)、`RustAgent/installer/signing-workstation.ps1`(新)、`docs/PROJECT-MAP.md`
+- 驗證:PowerShell 5.1 語法解析通過;錯誤路徑實測:zip 內沒有 SHA256SUMS.txt → 停止並清掉暫存、`-Artifact` 不是 zip 或目錄 → 停止、正式區加 `-Test` → 停止、目錄沒有 SHA256SUMS.txt → 由 sign-release.ps1 擋下。**未實測**完整簽章與上架(要用測試憑證與 CI 產物,需求方操作)
+
 ## 2026-10-28 ADR 0005 簽章與上架流程改善(建議中)
 - 內容:評估目前依賴簽章人員電腦的發版與軟體上架流程,提出:GigaItApp 上傳套件;所有派送套件以公司「軟體發佈憑證」重簽、端點只信任公司指紋(不採主機下發信任清單);Agent 發版與軟體重簽共用「簽章工作站」程式(經 NAS 佇列、不開連入 port,先在簽章人員電腦手動、再搬專用簽章機);登錄改走 GigaItApp 取代 ssh + SQL;分 S1~S3 階段與待決事項。
 - 檔案:`docs/decisions/0005-signing-and-publishing-pipeline.md`(新)、`docs/PROJECT-MAP.md`、`AGENT.md`
