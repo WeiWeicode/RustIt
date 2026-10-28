@@ -2,6 +2,12 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。本檔自 P7-1 起記錄 `ItAgentBack/` 的修改,先前的後端變更記在 `NewFeatures.md` / `BugFix.md`。
 
+## 2026-10-28 重啟 Agent 後第一筆派送偶發下載 404(重連 hello 退回新連線已送出的指令)
+- 內容:0.9.4 VM 重驗(報告 §11.4)重啟 Agent 後第一筆派送回 `DOWNLOAD_FAILED` 404 `ITA_PACKAGE_NOT_FOUND`。指令紀錄 send_count 1、sent_at .269、推送 .297、下載 .324、acked / started .328。根因:Agent 要等第一次蒐集(約 30 秒)才連 WebSocket;`connected()` 登記後就算在線,此時派送的指令由 `trySend()` 直接推送到新連線,接著 hello 處理完的 `onHello()` 以 `requeueSent(deviceRef)` 把該裝置**所有** sent 改回 queued,連剛推送到新連線的也一起改;Agent 立刻下載時 `download()` 的 `activeInstallPackages()`(sent / acked / running)查不到 → 404;Agent 的 running 又能從 queued 直接跳過去,所以 onHello 的重送沒送出、send_count 仍是 1。修正:`requeueSent(deviceRef, sentBefore?)` 只退回 `sent_at < sentBefore`;`onHello(ctx, deviceRef, connectedAt?)` 傳這條連線的登記時間(`DeviceService.connectedAt()`);連線已被取代或已關閉時不做 hello 補送(新連線的 hello / 斷線處理會處理)。斷線處理不變(全部退回)。Agent 不用改,無 migration。
+- 已知限制(code-reviewer、security-auditor Low):以牆鐘比先後。① `trySend` 的 sent_at 取在 claim(SQL)之前,派送在途時新連線剛好登記,sent_at 早於 connectedAt 仍會被退回(極窄窗口,同樣的 404 仍可能發生,重派即可);② 舊連線上的指令與新連線登記同一毫秒,或主機時鐘被往後撥,舊連線上的指令不會被退回,卡在 sent 到逾期(佔並行名額,不越權、不重複執行)。根治要每條連線給序號並記在指令上(需加欄位 / migration),這次不做。
+- 檔案:`ItAgentBack/src/{agent-app.ts,services/command-dispatcher.ts,services/device-service.ts,stores/types.ts,stores/sql-command-store.ts}`;測試 `test/{commands.test.ts,helpers.ts,int/stores.int.test.ts}`。
+- 驗證:`npm run typecheck` 通過;`npm test` 226/226(新增:新連線已送出的維持 sent 不重送、舊連線的退回重送;`connectedAt` 取代 / 關閉回 null);`test:int` 14/14(本機 Docker Desktop + `giganexus_It_Agent_poc_test`,含 `requeueSent` 的 sentBefore 正反向)。
+
 ## 2026-10-27 P7 驗收後修正:延後回報、撤回釋放安裝檔路徑(migration 0010)
 - 內容:需求方 2026-10-27 決定(設計 §8.1.5)。分支 `feature/p7-0.9.3`。(1)`command-dispatcher.ts` `deferredOf`:`software.install` 的 running 帶 `result.deferred`(只收 `battery` / `metered` 與可解析時間)時暫存為 result 並重設執行逾時(`CommandPatch.resetTimeout`,`sql-command-store.ts`);不帶時清除。(2)migration 0010:`uq_software_package_file` 改篩選唯一索引(只限未撤回),`unregisteredFiles` 不算已撤回;**只寫未套用**。
 - 檔案:`src/services/command-dispatcher.ts`、`src/stores/types.ts`、`src/stores/sql-command-store.ts`、`src/services/software-service.ts`、`db/migrations/0010_software_file_release.sql`、`docs/DB_SCHEMA.md`;測試 `test/software.test.ts`、`test/software-helpers.ts`、`test/helpers.ts`、`test/int/stores.int.test.ts`。

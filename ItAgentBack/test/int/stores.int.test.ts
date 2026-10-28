@@ -199,6 +199,17 @@ describe('SQL Server + Mongo + Redis', () => {
     assert.equal(conn.sent.filter((m) => m.type === 'command').length, 1);
     const shown = await commands.create(ctx, who, 'basic', device.deviceId, { kind: 'message.show', params: { text: '整合測試' } });
     assert.equal(shown.state, 'sent');
+    // 重連 hello 只退回 sentBefore 之前送出的(sent_at 比較)
+    const store = new SqlCommandStore(() => sql.connection());
+    assert.equal(await store.requeueSent(device.id, new Date(Date.now() - 60_000)), 0);
+    assert.equal((await commands.get(ctx, shown.commandId)).state, 'sent');
+    // 反向:sentBefore 晚於送出時間 → 退回(另一台,不影響下面的狀態斷言)
+    const peer = await service.identify(ctx, 'O=GigaNexus Dev,CN=PC-EXAMPLE-REQUEUE', 'f'.repeat(40));
+    await service.connected(ctx, peer, new FakeConnection());
+    const peerCmd = await commands.create(ctx, who, 'basic', peer.deviceId, { kind: 'inventory.collect', expiresInSec: 86400 });
+    assert.equal(peerCmd.state, 'sent');
+    assert.equal(await store.requeueSent(peer.id, new Date(Date.now() + 60_000)), 1);
+    assert.equal((await commands.get(ctx, peerCmd.commandId)).state, 'queued');
 
     assert.deepEqual(await commands.onUpdate(ctx, device.id, { command_id: queued.commandId, state: 'acked' }), { command_id: queued.commandId, accepted: true, state: 'acked' });
     await commands.onUpdate(ctx, device.id, { command_id: queued.commandId, state: 'running', progress: 30 });
