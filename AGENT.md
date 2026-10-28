@@ -259,7 +259,7 @@ Agent 與 Server 之間只透過 **資料契約**(`docs/contracts/`,JSON Schema 
 | **交接文件** | `docs/HANDOFF.md` | 目前做到哪、下一步、已決定事項、需使用者親自執行的事、開工前必讀清單 |
 | **專案地圖** | `docs/PROJECT-MAP.md` | 目錄與檔案職責、分層、跨專案對應;**開發新功能後必須更新**(§8.1) |
 | 產品需求 | `docs/PRD.md` | 功能需求、非功能需求、里程碑 |
-| 架構決策 | `docs/decisions/` | 0001 Nginx 與通訊(Agent 改 HTTPS + WebSocket)、0002 軟體派送、0003 程式碼簽章與 PKI、0004 Endpoint Server 改 Node.js |
+| 架構決策 | `docs/decisions/` | 0001 Nginx 與通訊(Agent 改 HTTPS + WebSocket)、0002 軟體派送、0003 程式碼簽章與 PKI、0004 Endpoint Server 改 Node.js、0005 簽章與上架流程改善(建議中) |
 | 資料契約 | `docs/contracts/` | Agent ↔ Server 的 JSON Schema 與範例(M0 建立) |
 | Gateway 開發手冊 | `../giga-api-gateway-bff/AGENT.md` | 通用準則來源;§10 多專案工作區、§10.7 設計原則、§10.8 AI 分工 |
 | 端點規格 | `../giga-api-gateway-bff/docs/ENDPOINT-AGENT-GUIDE.md` | **上位規範**:憑證、`:9443`、Agent / Server 規範、§8 管理 API 與指令、§10 待辦、§11 上線檢查 |
