@@ -10,9 +10,13 @@
        test:測試區主機(預設 host2);測試憑證與正式憑證都可
        prod:**拒絕**測試 / 自簽憑證(憑證本身判定)、要求簽章狀態 Valid 且有時間戳記;不可指向 host2(測試區主機)
      -Environment test 不可指向 host3(正式區主機)
-  2a. 版本號查重(P7 VM 驗收 B-3,需求方 2026-10-27):經 ssh 到 -HostAlias,在目標區 endpoint-server 容器(-ServerContainer)內以唯讀查詢
-     ita.agent_release(含已撤回);同一元件同一版本號已登錄過就停止(換新版本號重建)。查不到(連不上、容器不在、正式區尚未部署)也停止,
-     除非加 -SkipRegistryCheck(印警告;只在確定該版本沒登錄過時用)。-DryRun 不查。
+  2a. 版本號查重(P7 VM 驗收 B-3,需求方 2026-10-27):同一元件同一版本號已登錄過(含已撤回)就停止(換新版本號重建)。
+     查不到(連不上、API Key 無效、正式區尚未部署)也停止,除非加 -SkipRegistryCheck(印警告;只在確定該版本沒登錄過時用)。-DryRun 不查。
+     - 建議(S1-1,S1-SIGNING-DESIGN §2):-GatewayUrl + -ApiKeyFile,以 X-Api-Key 呼叫 GET /api/endpoint/releases/registry;
+       回應的 environment 必須等於 -Environment。API Key 只授 endpoint.release.registry,由 Gateway 負責人建立(限定來源 IP);
+       金鑰檔只放金鑰一行,其他使用者(Everyone / Users / Authenticated Users)不可讀,不接受命令列明文。不需要主機帳號。
+     - 未給 -ApiKeyFile(舊方式,過渡期保留):經 ssh 到 -HostAlias,在目標區 endpoint-server 容器(-ServerContainer)內以唯讀查詢
+       ita.agent_release;簽章人員要有主機 root 權限
   3. 放進版本檔目錄 {元件}/{版本}/{檔名}:先複製到同目錄的暫存檔、重算 SHA-256 比對,再不覆蓋地放置;**絕不覆蓋既有版本檔**
      (已存在且相同 → 略過;內容不同、連結、或放置時被別人搶先 → 中止)。中途中止時已放好的項目不會回滾。
      同一版本號重新建置的檔案內容會不同(例如只改 Agent,CI 又建了一次未改版本的 Watchdog)而被拒絕:只放有新版本號的元件目錄
@@ -45,6 +49,9 @@ param(
     # 版本號查重:目標區 endpoint-server 容器(test 預設測試區;prod 必填)與主機上執行 docker 的方式
     [ValidatePattern('^$|^[A-Za-z0-9][A-Za-z0-9_.-]*$')][string]$ServerContainer = '',
     [ValidateSet('wsl -u root -e docker', 'docker')][string]$DockerCmd = 'wsl -u root -e docker',
+    # 版本號查重改走 Gateway API(S1-1):Gateway 網址(https://主機,不含路徑)與 API Key 檔;給了 -ApiKeyFile 就不經 ssh 查詢
+    [ValidatePattern('^$|^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?$')][string]$GatewayUrl = '',
+    [string]$ApiKeyFile = '',
     [switch]$SkipRegistryCheck,
     # 舊方式:放進主機本機目錄 -ReleasesDir
     [switch]$HostDir,
@@ -62,6 +69,8 @@ if ($ReleasesDir -notmatch '^/[A-Za-z0-9/_.-]+$' -or $ReleasesDir -match '\.\.')
 if ($HostStage -notmatch '^[A-Za-z]:/[A-Za-z0-9/_.-]+$' -or $HostStage -match '\.\.') { throw "HostStage 要是 Windows 路徑(正斜線):$HostStage" }
 if ($Environment -eq 'prod' -and $HostAlias -eq 'host2') { throw 'host2 是測試區主機:正式區請指定正式區主機(-HostAlias / -HostStage / -ReleasesDir)' }
 if ($Environment -eq 'test' -and $HostAlias -eq 'host3') { throw 'host3 是正式區主機:-Environment test 不可指向它' }
+if ($ApiKeyFile -and -not $GatewayUrl) { throw '-ApiKeyFile 要搭配 -GatewayUrl(https://Gateway 主機)' }
+if ($GatewayUrl -and -not $ApiKeyFile) { throw '-GatewayUrl 要搭配 -ApiKeyFile' }
 # 同一台 NAS、兩區路徑分開(B-3):目的地必須與環境一致
 $NasReleaseDirs = @{
     test = '\\10.10.130.31\docker-folder\RustIT\test\releases'
@@ -147,11 +156,59 @@ await pool.close();console.log('REGISTRY-OK '+e.ITA_DB_NAME);for(const l of out)
     }
     [pscustomobject]@{ Ok = $true; Why = $ok; Rows = @($out | Where-Object { $_ -match '^REGISTERED ' }) }
 }
+# S1-1:以 API Key 呼叫 Gateway 的版本號查重(唯讀、只回元件 / 版本 / 狀態 / 部署區),不需要主機帳號
+function Read-ApiKey {
+    $f = (Resolve-Path -LiteralPath $ApiKeyFile).Path
+    # 其他使用者可讀的金鑰檔視同外洩風險:拒絕(請以 icacls 只留本人)
+    # 以 SID 比對(中文版 Windows 的群組名稱會在地化):Everyone、Users、Authenticated Users
+    $wideSids = @('S-1-1-0', 'S-1-5-32-545', 'S-1-5-11')
+    $wide = @((Get-Acl -LiteralPath $f).GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | Where-Object {
+            $_.AccessControlType -eq 'Allow' -and ($_.FileSystemRights.ToString() -match 'Read|FullControl|Modify') -and
+            ($wideSids -contains $_.IdentityReference.Value)
+        })
+    if ($wide.Count) { throw "API Key 檔其他使用者也能讀(SID $($wide[0].IdentityReference.Value)):$f;以 icacls 移除繼承、只授本人後再執行" }
+    $k = (Get-Content -LiteralPath $f -Raw -Encoding UTF8).Trim()
+    if ($k -notmatch '^[!-~]{16,512}$') { throw "API Key 檔格式不對(只放金鑰一行):$f" }
+    $k
+}
+function Get-RegisteredReleasesApi {
+    $key = Read-ApiKey
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $base = $GatewayUrl.TrimEnd('/')
+    $rows = @()
+    $envSeen = $null
+    foreach ($it in $items) {
+        # 元件 / 版本已由上面的路徑規則驗過(英數與 . -),仍以 EscapeDataString 組查詢字串
+        $u = '{0}/api/endpoint/releases/registry?component={1}&version={2}' -f $base, [uri]::EscapeDataString($it.Component), [uri]::EscapeDataString($it.Version)
+        try {
+            $r = Invoke-RestMethod -Uri $u -Headers @{ 'X-Api-Key' = $key } -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+        } catch {
+            $code = $null
+            if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
+            return [pscustomobject]@{ Ok = $false; Why = $(if ($code) { "HTTP $code(401 / 403:API Key 無效、權限不足或來源 IP 不在允許清單)" } else { $_.Exception.Message }); Rows = @(); Env = $null }
+        }
+        if (-not $r -or -not $r.environment) { return [pscustomobject]@{ Ok = $false; Why = '回應格式不對(缺 environment)'; Rows = @(); Env = $null } }
+        $envSeen = [string]$r.environment
+        foreach ($x in @($r.items)) { if ($x) { $rows += ('REGISTERED {0} {1} {2}' -f $x.component, $x.version, $x.status) } }
+    }
+    [pscustomobject]@{ Ok = $true; Why = "Gateway $base(environment=$envSeen)"; Rows = $rows; Env = $envSeen }
+}
 if ($DryRun) {
     Write-Host '[DryRun] 未查版本表(上架時會查目標區是否已登錄過同一版本)。'
 } elseif ($SkipRegistryCheck) {
     Write-Warning "-SkipRegistryCheck:未查 $Environment 區的版本表;同一版本號已登錄(含已撤回)時,放好的檔案將無法登錄(409 ITA_RELEASE_EXISTS)"
+} elseif ($ApiKeyFile) {
+    $reg = Get-RegisteredReleasesApi
+    if (-not $reg.Ok) { throw "查不到 $Environment 區的版本表($GatewayUrl):$($reg.Why)。確定版本沒登錄過時才加 -SkipRegistryCheck" }
+    # 查到的必須是目標區(避免 -GatewayUrl 指到另一區而照樣通過;資安稽核 M1)
+    if ($reg.Env -cne $Environment) { throw "$GatewayUrl 回應的部署區是 $($reg.Env),不是 ${Environment}:檢查 -GatewayUrl" }
+    if ($reg.Rows.Count) {
+        $reg.Rows | ForEach-Object { Write-Host $_ }
+        throw "$Environment 區已登錄過上面的版本(含已撤回的也不能重用):改用新的版本號重新建置,不上架"
+    }
+    Write-Host "版本表確認:$($reg.Why) 沒有登錄過這些版本"
 } else {
+    Write-Warning '版本號查重經 ssh 以 root 進主機(舊方式);建議改用 -GatewayUrl + -ApiKeyFile(S1-SIGNING-DESIGN §2)'
     if (-not $ServerContainer) { throw '正式區要指定 -ServerContainer(endpoint-server 容器名稱)才能查版本表;或確定版本沒登錄過時加 -SkipRegistryCheck' }
     $reg = Get-RegisteredReleases
     if (-not $reg.Ok) { throw "查不到 $Environment 區的版本表(${HostAlias} / $ServerContainer):$($reg.Why)。確定版本沒登錄過時才加 -SkipRegistryCheck" }

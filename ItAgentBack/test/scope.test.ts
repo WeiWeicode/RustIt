@@ -398,6 +398,8 @@ describe('管理 API 的資料範圍(:51240)', () => {
     );
     assert.equal((await call(tokens.none!, 'GET', '/v1/releases')).statusCode, 200);
     assert.equal((await call(tokens.none!, 'GET', '/v1/releases/files')).statusCode, 200);
+    // 版本號查重(S1-1):API Key 身分沒有公司範圍(cos 空),版本不屬於任何公司,照樣回登錄紀錄
+    assert.equal((await call(tokens.none!, 'GET', '/v1/releases/registry?component=agent&version=0.7.1')).statusCode, 200);
   });
 
   it('軟體派送(P7):目錄維護只有全部公司角色;已安裝台數只計範圍內;派送與核可範圍外與不存在相同', async () => {
@@ -491,6 +493,7 @@ describe('管理 API 的資料範圍(:51240)', () => {
       'endpoint.release.list',
       'endpoint.release.publish',
       'endpoint.release.register',
+      'endpoint.release.registry',
       'endpoint.release.revoke',
       'endpoint.software.deploy',
       'endpoint.software.files',

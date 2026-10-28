@@ -1,7 +1,7 @@
 # S1 簽章上架優化:設計(ADR 0005 第一階段)
 
 > 草案 2026-10-28,分支 `docs/s1-signing-design`(疊在 `docs/adr-0005-signing-pipeline` 上,MR !73 合併後改以 develop 為基底)。依據:[ADR 0005](decisions/0005-signing-and-publishing-pipeline.md) §分階段 S1、[ADR 0003](decisions/0003-code-signing-pki.md)、[RUNBOOK](RUNBOOK.md) §1、[P7-SOFTWARE-DESIGN](P7-SOFTWARE-DESIGN.md) §3、§4、§8.2-13、§8.2-14;甘特圖 W6-25。
-> **狀態**:待需求方確認 §9。**未開工**:S1-1 需要 Gateway 修改、S1-3 上傳方式要先決定,這兩項都動到其他 repo,依 AGENT.md §3 須先同意。
+> **狀態**:需求方 2026-10-28 確認 §9 全部照建議(A),並同意 Gateway、GigaItApp 跨 repo 修改。S1-2 `release` 模式完成;**S1-1 程式完成**(分支 `feature/s1-1-release-registry`、Gateway `feature/openapi-api-key-auth`),待 Gateway 合併部署、IT 建立 API Key 後實測;S1-3 起未開工。
 
 ## 0. 範圍
 
@@ -175,6 +175,8 @@ endpoint-server 每分鐘掃 `sign-queue\*.result.json`:`signed` 時**重算** `
 - `PROJECT-MAP.md`、`contracts/README.md`、Gateway `ENDPOINT-AGENT-GUIDE`(新路由與 API Key,需同意)、架構 JSON(新目錄與流程)。
 
 ## 9. 待確認
+
+> 需求方 2026-10-28:全部照建議(粗體選項),同意跨 repo 修改。
 
 | # | 問題 | 選項(建議在前) |
 | --- | --- | --- |

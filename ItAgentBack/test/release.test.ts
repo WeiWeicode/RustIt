@@ -448,6 +448,20 @@ describe('DeviceService.watchdogReport 與下載 API、管理 API', () => {
     );
   });
 
+  it('版本號查重(上架腳本):回部署區與同版本的登錄紀錄(含已撤回);OpenAPI 宣告 api_key', async () => {
+    const q = (v: string) => mgmt.inject(`/v1/releases/registry?component=agent&version=${v}`);
+    assert.deepEqual((await q('0.7.1')).json(), { environment: 'dev', items: [] });
+    await setupPilot();
+    assert.deepEqual((await q('0.7.1')).json(), { environment: 'dev', items: [{ component: 'agent', version: '0.7.1', status: 'draft' }] });
+    assert.deepEqual((await q('0.7.10')).json().items, []);
+    assert.deepEqual((await mgmt.inject('/v1/releases/registry?component=watchdog&version=0.7.1')).json().items, []);
+    for (const url of ['/v1/releases/registry?component=agent', '/v1/releases/registry?component=x&version=0.7.1', '/v1/releases/registry?component=agent&version=../1'])
+      assert.equal((await mgmt.inject(url)).statusCode, 400, url);
+    const op = (await mgmt.inject('/openapi.json')).json().paths['/v1/releases/registry'].get;
+    assert.equal(op['x-auth-mode'], 'api_key');
+    assert.equal(op['x-permission'], 'endpoint.release.registry');
+  });
+
   it('Watchdog 上報回應帶 target;Watchdog 上報的 upgrade_failed(component = agent)寫入,component = watchdog 略過', async () => {
     await setupPilot();
     const res = await agent.inject({ method: 'POST', url: '/agent/v1/watchdog/report', headers: certHeaders(), payload: report() as object });

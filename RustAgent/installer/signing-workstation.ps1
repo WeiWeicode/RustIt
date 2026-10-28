@@ -15,7 +15,7 @@
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File RustAgent\installer\signing-workstation.ps1 release -Artifact C:\Users\me\Downloads\artifacts.zip -Environment test -Thumbprint <測試憑證指紋> -Test -NoTimestamp
-  powershell -ExecutionPolicy Bypass -File RustAgent\installer\signing-workstation.ps1 release -Artifact C:\release-out -Environment prod -Thumbprint <正式憑證指紋> -ExpectedCommit <tag 的 commit> -HostAlias host3 -ServerContainer <容器>
+  powershell -ExecutionPolicy Bypass -File RustAgent\installer\signing-workstation.ps1 release -Artifact C:\release-out -Environment prod -Thumbprint <正式憑證指紋> -ExpectedCommit <tag 的 commit> -HostAlias host3 -GatewayUrl https://<正式區 Gateway> -ApiKeyFile $env:USERPROFILE\.rustit\publish-prod.key
 #>
 param(
     [Parameter(Mandatory, Position = 0)][ValidateSet('release')][string]$Mode,
@@ -32,6 +32,8 @@ param(
     [string]$NasReleasesDir,
     [string]$MountCheckDir,
     [string]$ServerContainer,
+    [string]$GatewayUrl,
+    [string]$ApiKeyFile,
     [switch]$SkipRegistryCheck,
     [switch]$DryRun
 )
@@ -65,7 +67,7 @@ if ($ExpectedCommit) { $signArgs.ExpectedCommit = $ExpectedCommit }
 
 # 3. 上架
 $pubArgs = @{ Dir = $dir; Environment = $Environment }
-foreach ($k in 'HostAlias', 'NasReleasesDir', 'MountCheckDir', 'ServerContainer') {
+foreach ($k in 'HostAlias', 'NasReleasesDir', 'MountCheckDir', 'ServerContainer', 'GatewayUrl', 'ApiKeyFile') {
     if ($PSBoundParameters.ContainsKey($k)) { $pubArgs[$k] = $PSBoundParameters[$k] }
 }
 if ($SkipRegistryCheck) { $pubArgs.SkipRegistryCheck = $true }
