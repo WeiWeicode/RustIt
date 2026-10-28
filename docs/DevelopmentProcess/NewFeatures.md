@@ -3,9 +3,9 @@
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
 ## 2026-10-28 S1-1 版本號查重改走 API Key
-- 內容:需求方確認 S1 §9 全部照建議。ItAgentBack 新增 `GET /v1/releases/registry?component=&version=`(operationId / 權限 `endpoint.release.registry`,OpenAPI `x-auth-mode: api_key`):回 `environment`(GW_ENV)與同元件同版本號的登錄紀錄(含已撤回),只有元件、版本、狀態。`publish-release.ps1` 新增 `-GatewayUrl`、`-ApiKeyFile`:以 `X-Api-Key` 查詢,回應部署區須等於 `-Environment`;金鑰檔其他使用者(Everyone / Users / Authenticated Users,以 SID 比對)可讀就拒絕;未給時沿用 ssh 舊方式並印警告。`signing-workstation.ps1` 轉交兩個參數。需要 Gateway `x-auth-mode` 支援(Gateway 分支 `feature/openapi-api-key-auth`)。
+- 內容:需求方確認 S1 §9 全部照建議。ItAgentBack 新增 `GET /v1/releases/registry?component=&version=`(operationId / 權限 `endpoint.release.registry`,OpenAPI `x-auth-mode: api_key`):回 `environment`(GW_ENV)與同元件同版本號的登錄紀錄(含已撤回),只有元件、版本、狀態。`publish-release.ps1` 新增 `-GatewayUrl`、`-ApiKeyFile`:以 `X-Api-Key` 查詢,回應部署區須等於 `-Environment`;金鑰檔只允許本人、SYSTEM、Administrators 有權限(SID 白名單)、擁有者須為本人、不可放網路分享;`-GatewayUrl` 主機限每區允許清單(test `10.10.130.124`、prod `giganexus.gigasolar.com.tw`)、不跟隨重新導向(避免 X-Api-Key 被帶到別台)、每筆回應部署區都比對(資安審查 M1、M2、L1、L2);未給時沿用 ssh 舊方式並印警告。`signing-workstation.ps1` 轉交兩個參數。需要 Gateway `x-auth-mode` 支援(Gateway 分支 `feature/openapi-api-key-auth`)。
 - 檔案:`ItAgentBack/src/routes/releases.ts`、`src/services/release-service.ts`、`src/mgmt-app.ts`、`src/openapi.ts`、`test/release.test.ts`;`RustAgent/installer/publish-release.ps1`、`signing-workstation.ps1`;`docs/RUNBOOK.md` §1、`docs/S1-SIGNING-DESIGN.md`
-- 驗證:`npm run typecheck`;`npm test`(新增版本號查重測試);兩支腳本 PowerShell 5.1 解析通過;金鑰檔 ACL / 格式檢查以暫存檔實測(Users 可讀拒絕、只有本人通過、過短拒絕)。**未實測**:對測試區 Gateway 呼叫(要等 Gateway 合併部署、IT 建立 API Key `rustit-publish-test`)
+- 驗證:`npm run typecheck`;`npm test`(新增版本號查重測試);兩支腳本 PowerShell 5.1 解析通過;金鑰檔 ACL / 格式檢查以暫存檔實測(預設繼承的 ACL 拒絕、只有本人通過、加 INTERACTIVE 拒絕、UNC 拒絕、過短拒絕);`security-auditor` 審查無 Critical / High,Medium 2 項已修。**未實測**:對測試區 Gateway 呼叫(要等 Gateway 合併部署、IT 建立 API Key `rustit-publish-test`)
 
 ## 2026-10-28 S1 簽章上架優化:設計與簽章工作站 release 模式
 - 內容:新增 S1 設計(ADR 0005 第一階段,甘特圖 W6-25):S1-1 版本查重改走 API Key 唯讀路由(需 Gateway 支援 OpenAPI 宣告 `api_key` 路由)、S1-2 簽章工作站、S1-3 套件上傳與送簽(`ita.software_upload`、NAS `incoming\` / `sign-queue\`、上傳者 ≠ 核可人)、S1-4 GigaItApp 畫面、S1-5 NAS 權限;待確認 7 項(§9)。先實作不受待決事項影響的 S1-2 `release` 模式:`signing-workstation.ps1 release` 串接 `sign-release.ps1` 與 `publish-release.ps1`,CI 產物 zip 解壓到新的暫存目錄後簽章、上架,參數照原樣轉交;`software` 模式待 S1-3。
