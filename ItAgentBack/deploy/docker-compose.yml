@@ -44,11 +44,39 @@ services:
       AGENT_USB_EVENTS: ${AGENT_USB_EVENTS:-1}
       AGENT_MAX_INFLIGHT: ${AGENT_MAX_INFLIGHT:-32}
       AGENT_BUSY_RETRY_AFTER_SEC: ${AGENT_BUSY_RETRY_AFTER_SEC:-30}
+      # 監測(P5,docs/P5-MONITOR-DESIGN.md §4):心跳附健康摘要開關與告警門檻
+      AGENT_HEALTH_ENABLED: ${AGENT_HEALTH_ENABLED:-1}
+      ALERT_OFFLINE_DAYS: ${ALERT_OFFLINE_DAYS:-7}
+      ALERT_DISK_FREE_PCT: ${ALERT_DISK_FREE_PCT:-10}
+      ALERT_DISK_CLEAR_PCT: ${ALERT_DISK_CLEAR_PCT:-15}
+      ALERT_RESTARTS_24H: ${ALERT_RESTARTS_24H:-3}
+      ALERT_CERT_DAYS: ${ALERT_CERT_DAYS:-30}
+      ALERT_SILENT_MIN: ${ALERT_SILENT_MIN:-15}
       # 監控(giga-observe,同一 Gateway 網路的 observe-api):管理 API 與 Agent 通道各一把 Key,架構圖上是兩個服務
       MONITOR_URL: ${MONITOR_URL:-http://observe-api:51202}
       MONITOR_API_KEY_FILE: /run/secrets/monitor_api_key
       AGENT_MONITOR_API_KEY_FILE: /run/secrets/agent_monitor_api_key
       RELEASE_SHA: ${RELEASE_SHA:-dev}
+      # 指令附檔(logs.collect 日誌 zip,P4-2):保存 14–30 天(PLATFORM-PLAN B5),到期自動刪除
+      COMMAND_FILES_DIR: /data/command-files
+      COMMAND_FILE_KEEP_DAYS: ${COMMAND_FILE_KEEP_DAYS:-14}
+      # 資料範圍(E6,docs/E6-COMPANY-SCOPE-DESIGN.md):可管理所有公司的角色代碼(必須設定,可為空字串)、網域 → 公司對應
+      ENDPOINT_SCOPE_ALL_ROLES: ${ENDPOINT_SCOPE_ALL_ROLES?ENDPOINT_SCOPE_ALL_ROLES 必須設定(可管理所有公司的角色代碼;沒有則設為空字串)}
+      ENDPOINT_COMPANY_DOMAINS: ${ENDPOINT_COMPANY_DOMAINS:-}
+      # 升級(P6,docs/P6-UPGRADE-DESIGN.md §4):版本檔目錄唯讀掛載;測試區在 NAS 帳密到位前用主機 2 本機目錄
+      RELEASES_DIR: /srv/releases
+      RELEASE_MAX_CONCURRENT: ${RELEASE_MAX_CONCURRENT:-20}
+      # 軟體派送(P7,docs/P7-SOFTWARE-DESIGN.md §4):軟體庫唯讀掛載;測試區在 NAS 帳密到位前用主機 2 本機目錄(P7-4 改 CIFS)。
+      # 需先套用 migration 0008(command_batch.state)再部署,否則指令查詢會失敗
+      SOFTWARE_DIR: /srv/software
+      SOFTWARE_MAX_BYTES: ${SOFTWARE_MAX_BYTES:-4294967296}
+      SOFTWARE_MAX_CONCURRENT: ${SOFTWARE_MAX_CONCURRENT:-20}
+      BATCH_APPROVAL_THRESHOLD: ${BATCH_APPROVAL_THRESHOLD:-20}
+    volumes:
+      - ita_command_files:/data/command-files
+      # 預設:主機 2 的 NAS 唯讀掛載(RustIT\test\releases、RustIT\test\software;B-3 兩區分開,RUNBOOK §1.1);ita.env 有設定時以 ita.env 為準
+      - ${ITA_RELEASES_HOST_DIR:-/srv/giganexus/nas-rustit/test/releases}:/srv/releases:ro
+      - ${ITA_SOFTWARE_HOST_DIR:-/srv/giganexus/nas-rustit/test/software}:/srv/software:ro
     secrets: [gw_api_key, ita_db_password, mongo_url, redis_url, endpoint_server_crt, endpoint_server_key, monitor_api_key, agent_monitor_api_key]
     depends_on: [ita-mongo, ita-redis]
     networks:
@@ -104,6 +132,7 @@ secrets:
 volumes:
   ita_mongo:
   ita_redis:
+  ita_command_files:
 
 networks:
   gateway:

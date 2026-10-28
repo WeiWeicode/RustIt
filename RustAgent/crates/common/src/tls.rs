@@ -135,6 +135,40 @@ pub fn pick_device_cert<D: AsRef<[u8]>>(candidates: &[D], now_unix: i64) -> Opti
         .map(|(i, _)| i)
 }
 
+/// 目前會使用的裝置憑證到期時間(Unix 秒;遠端診斷 agent.diagnose,PLATFORM-PLAN A4)。只讀憑證,不碰私鑰
+pub fn device_cert_not_after(client: &ClientCert) -> Result<i64, String> {
+    let not_after = |der: &[u8]| {
+        x509_parser::parse_x509_certificate(der)
+            .map(|(_, c)| c.validity().not_after.timestamp())
+            .map_err(|e| format!("無法解析裝置憑證:{e}"))
+    };
+    match client {
+        ClientCert::Pem { cert_file, .. } => {
+            let first = CertificateDer::pem_file_iter(cert_file)
+                .and_then(|mut it| it.next().transpose())
+                .map_err(|e| format!("無法讀取裝置憑證 {}:{e}", cert_file.display()))?
+                .ok_or_else(|| format!("裝置憑證檔沒有憑證:{}", cert_file.display()))?;
+            not_after(first.as_ref())
+        }
+        #[cfg(windows)]
+        ClientCert::Store { issuer } => {
+            use rustls_cng::store::{CertStore, CertStoreType};
+            let store = CertStore::open(CertStoreType::LocalMachine, "My")
+                .map_err(|e| format!("無法開啟憑證存放區 LocalMachine\\My:{e}"))?;
+            let contexts = store
+                .find_by_issuer_str(issuer)
+                .map_err(|e| format!("查詢 LocalMachine\\My 失敗:{e}"))?;
+            let ders: Vec<&[u8]> = contexts.iter().map(|c| c.as_der()).collect();
+            let i = pick_device_cert(&ders, chrono::Utc::now().timestamp()).ok_or_else(|| {
+                format!("LocalMachine\\My 沒有在效期內的裝置憑證(簽發者含「{issuer}」)")
+            })?;
+            not_after(ders[i])
+        }
+        #[cfg(not(windows))]
+        ClientCert::Store { .. } => Err("store_issuer(Windows 憑證存放區)只支援 Windows".into()),
+    }
+}
+
 /// Windows `LocalMachine\My` 的裝置憑證(正式區;需以 LocalSystem 執行才能使用私鑰,指南 §6.1)
 #[cfg(windows)]
 pub struct WindowsStore {

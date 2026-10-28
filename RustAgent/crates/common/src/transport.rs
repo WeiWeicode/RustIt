@@ -2,7 +2,7 @@
 //! 失敗分三類(指南 §4.2、PLATFORM-PLAN A3):被拒(憑證、身分、停用、契約不符)每 10 分鐘重試;
 //! 主機忙碌(429)照 Retry-After 等待再加 0–30% 隨機,不計入指數退避;其他(網路、5xx)指數退避。
 
-use crate::backoff::{Backoff, CERT_RETRY};
+use crate::backoff::{Backoff, CERT_RETRY, DISABLED_RETRY, jitter};
 use crate::config::Settings;
 use crate::tls;
 use rustls::ClientConfig;
@@ -38,6 +38,10 @@ impl SendError {
     /// 下一次重試前的等待
     pub fn wait(&self, backoff: &mut Backoff) -> Duration {
         match self {
+            // 停用可能隨時被 IT 恢復:1 分鐘 ±20%;close 4403 也可能是退役,下一次會收到 403 ITA_DEVICE_RETIRED 改回 10 分鐘
+            SendError::Rejected(_) if self.is_device_disabled() && !self.is_device_retired() => {
+                jitter(DISABLED_RETRY)
+            }
             SendError::Rejected(_) => CERT_RETRY,
             SendError::Retry(_) => backoff.next_delay(),
             SendError::Busy(after, _) => after.mul_f64(1.0 + fastrand::f64() * 0.3),
@@ -70,6 +74,11 @@ impl SendError {
     /// 裝置被主機停用(HTTP 403 ITA_DEVICE_DISABLED / ITA_DEVICE_RETIRED、WebSocket close 4403)
     pub fn is_device_disabled(&self) -> bool {
         matches!(self, SendError::Rejected(m) if m.contains("ITA_DEVICE_DISABLED") || m.contains("ITA_DEVICE_RETIRED") || m.contains("close 4403"))
+    }
+
+    /// 裝置已被主機退役(HTTP 403 ITA_DEVICE_RETIRED):不會恢復,維持 10 分鐘重試
+    pub fn is_device_retired(&self) -> bool {
+        matches!(self, SendError::Rejected(m) if m.contains("ITA_DEVICE_RETIRED"))
     }
 
     /// 主機收到但內容不符契約(HTTP 400):連線正常,問題在這筆資料
@@ -112,6 +121,40 @@ pub fn classify(status: u16, body: &str, retry_after: Option<&str>) -> SendError
     }
 }
 
+/// [`Transport::download`] 失敗:主機有回應時帶 HTTP 狀態與錯誤代碼(回應的 `code`),
+/// 呼叫端依此判斷是否重試,不比對訊息字串(P7-2 code-reviewer 建議 1)
+#[derive(Debug)]
+pub struct DownloadError {
+    pub status: Option<u16>,
+    pub code: Option<String>,
+    pub error: SendError,
+}
+
+impl DownloadError {
+    fn local(error: SendError) -> Self {
+        Self {
+            status: None,
+            code: None,
+            error,
+        }
+    }
+}
+
+impl fmt::Display for DownloadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+/// [`Transport::download`] 的結果
+#[derive(Debug, PartialEq, Eq)]
+pub enum Download {
+    /// 下載結束,檔案總長(含續傳前已有的部分)
+    Done(u64),
+    /// 416:續傳位置超出檔案(續傳檔有問題,刪除後重來)
+    RangeNotSatisfiable,
+}
+
 pub struct Transport {
     http: reqwest::Client,
     server: Url,
@@ -134,7 +177,9 @@ impl Transport {
             .user_agent(user_agent)
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(60))
-            .pool_idle_timeout(Duration::from_secs(90));
+            .pool_idle_timeout(Duration::from_secs(90))
+            // 只連 agent.toml 的 Gateway 位址,不跟隨重新導向(升級檔下載,P6-UPGRADE-DESIGN §8.2;其他 API 也沒有重新導向)
+            .redirect(reqwest::redirect::Policy::none());
         if let Some(cfg) = &tls {
             builder = builder.tls_backend_preconfigured(ClientConfig::clone(cfg));
         }
@@ -177,20 +222,151 @@ impl Transport {
             .send()
             .await
             .map_err(|e| SendError::Retry(format!("回報連線失敗:{}", error_chain(&e))))?;
-        let status = res.status();
-        if status.is_success() {
-            return res
-                .json::<Res>()
-                .await
-                .map_err(|e| SendError::Retry(format!("回應格式錯誤:{e}")));
+        read_json(res).await
+    }
+
+    /// `POST <server><path>`,本體為原始位元組(指令附檔,P4-2;`docs/contracts/command-file.schema.json`)
+    pub async fn post_bytes<Res: DeserializeOwned>(
+        &self,
+        path: &str,
+        content_type: &str,
+        headers: &[(&str, String)],
+        body: Vec<u8>,
+    ) -> Result<Res, SendError> {
+        let url = self
+            .server
+            .join(path)
+            .map_err(|e| SendError::Rejected(format!("路徑錯誤 {path}:{e}")))?;
+        let mut rb = self
+            .http
+            .post(url)
+            .header("content-type", content_type)
+            // 大檔在慢速網路(VPN、Wi-Fi)以每秒 100 KB 估算,至少 60 秒
+            .timeout(Duration::from_secs((body.len() as u64 / 100_000).max(60)))
+            .body(body);
+        for (k, v) in self
+            .extra_headers
+            .iter()
+            .map(|(k, v)| (*k, v))
+            .chain(headers.iter().map(|(k, v)| (*k, v)))
+        {
+            rb = rb.header(k, v);
         }
-        let retry_after = res
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string);
-        let body = res.text().await.unwrap_or_default();
-        Err(classify(status.as_u16(), &body, retry_after.as_deref()))
+        let res = rb
+            .send()
+            .await
+            .map_err(|e| SendError::Retry(format!("上傳連線失敗:{}", error_chain(&e))))?;
+        read_json(res).await
+    }
+
+    /// `GET <server><path>`,只回傳 HTTP 狀態(遠端診斷 agent.diagnose 的 Gateway 檢查)
+    pub async fn get_status(&self, path: &str) -> Result<u16, SendError> {
+        let url = self
+            .server
+            .join(path)
+            .map_err(|e| SendError::Rejected(format!("路徑錯誤 {path}:{e}")))?;
+        let mut rb = self.http.get(url);
+        for (k, v) in &self.extra_headers {
+            rb = rb.header(*k, v);
+        }
+        let res = rb
+            .send()
+            .await
+            .map_err(|e| SendError::Retry(format!("連線失敗:{}", error_chain(&e))))?;
+        Ok(res.status().as_u16())
+    }
+
+    /// 下載 `GET <server><path>` 到 `file`(P6-2 升級檔,支援續傳):`offset > 0` 時帶 `Range: bytes=<offset>-`。
+    /// - 206 且 `Content-Range` 從 `offset` 開始:接在後面寫;200(主機不支援 Range):從頭寫
+    /// - 416:回 [`Download::RangeNotSatisfiable`](呼叫端刪除續傳檔重來)
+    /// - 檔案總長超過 `limit` 立即中止(不信任主機宣告的大小);回應標頭的雜湊不採信,由呼叫端以目標 SHA-256 驗整個檔案
+    pub async fn download(
+        &self,
+        path: &str,
+        file: &mut std::fs::File,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Download, DownloadError> {
+        use std::io::{Seek, SeekFrom, Write};
+        let url = self.server.join(path).map_err(|e| {
+            DownloadError::local(SendError::Rejected(format!("路徑錯誤 {path}:{e}")))
+        })?;
+        // 慢速網路以每秒 100 KB 估算,至少 60 秒
+        let secs = (limit.saturating_sub(offset) / 100_000).max(60);
+        let mut rb = self.http.get(url).timeout(Duration::from_secs(secs));
+        if offset > 0 {
+            rb = rb.header("range", format!("bytes={offset}-"));
+        }
+        for (k, v) in &self.extra_headers {
+            rb = rb.header(*k, v);
+        }
+        let mut res = rb.send().await.map_err(|e| {
+            DownloadError::local(SendError::Retry(format!(
+                "下載連線失敗:{}",
+                error_chain(&e)
+            )))
+        })?;
+        let status = res.status().as_u16();
+        let start = match status {
+            200 => 0,
+            206 => {
+                let range = res
+                    .headers()
+                    .get("content-range")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default();
+                if !range.starts_with(&format!("bytes {offset}-")) {
+                    return Err(DownloadError::local(SendError::Retry(format!(
+                        "下載續傳位置不符(要求 {offset},回應 {range})"
+                    ))));
+                }
+                offset
+            }
+            416 => return Ok(Download::RangeNotSatisfiable),
+            _ => {
+                let retry_after = res
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
+                // 錯誤內容最多讀 8 KB(主機回超大錯誤內容也不會吃光記憶體,資安 M4)
+                let mut body = Vec::new();
+                while body.len() < 8192 {
+                    match res.chunk().await {
+                        Ok(Some(c)) => body.extend_from_slice(&c[..c.len().min(8192 - body.len())]),
+                        _ => break,
+                    }
+                }
+                let body = String::from_utf8_lossy(&body);
+                let code = serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|v| v["code"].as_str().map(|c| c.chars().take(64).collect()));
+                return Err(DownloadError {
+                    status: Some(status),
+                    code,
+                    error: classify(status, &body, retry_after.as_deref()),
+                });
+            }
+        };
+        let io = |e: std::io::Error| {
+            DownloadError::local(SendError::Retry(format!("寫入下載檔失敗:{e}")))
+        };
+        file.set_len(start).map_err(io)?;
+        file.seek(SeekFrom::Start(start)).map_err(io)?;
+        let mut total = start;
+        while let Some(chunk) = res.chunk().await.map_err(|e| {
+            DownloadError::local(SendError::Retry(format!("下載中斷:{}", error_chain(&e))))
+        })? {
+            total += chunk.len() as u64;
+            if total > limit {
+                return Err(DownloadError::local(SendError::Rejected(format!(
+                    "下載內容超過預期大小 {limit} bytes"
+                ))));
+            }
+            file.write_all(&chunk).map_err(io)?;
+        }
+        file.flush().map_err(io)?;
+        Ok(Download::Done(total))
     }
 
     /// WebSocket 位址:`<server><path>`,https → wss、http → ws
@@ -254,6 +430,24 @@ impl Transport {
     }
 }
 
+/// 成功回傳解析後的 JSON,失敗依 §4.2 分類
+async fn read_json<Res: DeserializeOwned>(res: reqwest::Response) -> Result<Res, SendError> {
+    let status = res.status();
+    if status.is_success() {
+        return res
+            .json::<Res>()
+            .await
+            .map_err(|e| SendError::Retry(format!("回應格式錯誤:{e}")));
+    }
+    let retry_after = res
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let body = res.text().await.unwrap_or_default();
+    Err(classify(status.as_u16(), &body, retry_after.as_deref()))
+}
+
 /// 錯誤連同底層原因(例 reqwest 的「error sending request」之下的 DNS / 連線 / TLS 錯誤),供日誌與離線原因分類
 fn error_chain(e: &dyn std::error::Error) -> String {
     let mut text = e.to_string();
@@ -277,8 +471,20 @@ mod tests {
     fn cert_errors_are_not_retried_quickly() {
         let mut b = Backoff::new();
         assert_eq!(classify(400, "", None).wait(&mut b), CERT_RETRY);
+        // 停用:1 分鐘 ±20%(含 close 4403);退役與其他 403 維持 10 分鐘
+        for e in [
+            classify(403, r#"{"code":"ITA_DEVICE_DISABLED"}"#, None),
+            SendError::Rejected("裝置已被 IT 停用(close 4403)".into()),
+        ] {
+            let d = e.wait(&mut b).as_secs_f64();
+            assert!((48.0..=72.0).contains(&d), "{d} 不在 60 秒 ±20% 內");
+        }
         assert_eq!(
-            classify(403, r#"{"code":"ITA_DEVICE_DISABLED"}"#, None).wait(&mut b),
+            classify(403, r#"{"code":"ITA_DEVICE_RETIRED"}"#, None).wait(&mut b),
+            CERT_RETRY
+        );
+        assert_eq!(
+            classify(403, r#"{"code":"DEVICE_UNAUTHORIZED"}"#, None).wait(&mut b),
             CERT_RETRY
         );
         assert!(classify(503, "", None).wait(&mut b) <= Duration::from_millis(1200));

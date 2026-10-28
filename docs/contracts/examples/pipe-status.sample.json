@@ -1,0 +1,18 @@
+{
+  "v": 1,
+  "type": "status",
+  "id": "2a7c9e1f-3b5d-4f60-8a2b-4c6d8e0f1a23",
+  "body": {
+    "version": "0.6.0",
+    "pid": 4321,
+    "started_at": "2026-10-20T01:02:10.000Z",
+    "ws_connected": true,
+    "last_heartbeat_ack": "2026-10-20T01:04:29.000Z",
+    "cert_not_after": "2027-10-14T08:00:00Z",
+    "device_status": "active",
+    "outbox_pending": 0,
+    "events_pending": 0,
+    "previous_exit": "unexpected",
+    "upgrade_requested": { "id": "9f8e7d6c-5b4a-4c3d-8e2f-1a0b9c8d7e61", "component": "agent", "version": "0.7.1" }
+  }
+}

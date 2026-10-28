@@ -12,6 +12,12 @@
 //! key_file = "pki/agent.key"
 //! # store_issuer = "GigaNexus Agent CA"       # (二)Windows LocalMachine\My:簽發者名稱含此字串,每次握手重新挑選(指南 §3.4)
 //!
+//! [upgrade]                                   # 選用(P6-2):升級檔簽章者 SHA-1 指紋的本機信任清單,MSI 寫入;沒有設定 = 不接受任何升級檔
+//! trusted_signers = ["a1b2…"]                 # 必須同時在主機下發的 signer_thumbprints 內(P6-UPGRADE-DESIGN §9-2)
+//!
+//! [software]                                  # 選用(P7-3):軟體派送安裝檔簽章者的本機信任清單,與升級分開(廠商憑證不可用來升級 Agent,資安 M3);
+//! trusted_signers = ["c3d4…"]                 # 沒有設定 = 不接受任何派送的套件(含 draft)
+//!
 //! [dev]                                       # 只允許 http://127.0.0.1 / localhost:直連 ItAgentBack(DEV_TRUST_CLIENT_HEADERS)
 //! simulate_client_cert = true                 # 自行帶 x-client-cert-* 標頭,模擬 Nginx
 //! client_cert_dn = "O=GigaNexus Dev,CN=PC-001" # 選用,預設 O=GigaNexus Dev,CN=<電腦名稱>
@@ -34,8 +40,29 @@ pub struct AgentConfig {
     pub startup_jitter_sec: u64,
     pub log_level: Option<String>,
     pub tls: Option<TlsConfig>,
+    pub upgrade: Option<UpgradeConfig>,
+    pub software: Option<SoftwareConfig>,
     pub dev: Option<DevConfig>,
 }
+
+/// `[software]`(P7-3):軟體派送安裝檔簽章者的本機信任清單(與 `[upgrade]` 分開,資安 M3)
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SoftwareConfig {
+    #[serde(default)]
+    pub trusted_signers: Vec<String>,
+}
+
+/// `[upgrade]`(P6-2):升級檔簽章者的本機信任清單
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpgradeConfig {
+    #[serde(default)]
+    pub trusted_signers: Vec<String>,
+}
+
+/// 本機信任清單上限(與主機 signer_thumbprints 相同)
+const MAX_TRUSTED_SIGNERS: usize = 8;
 
 /// `[tls]`:裝置憑證二選一 — PEM 檔(`cert_file` + `key_file`)或 Windows 憑證存放區(`store_issuer`)
 #[derive(Debug, Clone, Deserialize)]
@@ -94,6 +121,10 @@ pub struct Settings {
     pub tls: Option<TlsSettings>,
     /// dev 模擬 Nginx 的憑證標頭(DN, 指紋)
     pub dev_cert_headers: Option<(String, String)>,
+    /// 升級檔簽章者 SHA-1 指紋的本機信任清單(小寫;空白 = 不接受任何升級檔)
+    pub trusted_signers: Vec<String>,
+    /// 軟體派送安裝檔簽章者的本機信任清單(小寫;空白 = 不接受任何派送的套件)
+    pub software_signers: Vec<String>,
     /// 本機持久化目錄(store.db、金鑰):設定檔所在目錄下的 `state`(服務模式為 `%ProgramData%\GigaNexus\Agent\state`,PLATFORM-PLAN §4.2)
     pub state_dir: PathBuf,
 }
@@ -172,6 +203,14 @@ impl AgentConfig {
                 })
             }
         };
+        let trusted_signers = signer_list(
+            "upgrade",
+            self.upgrade.map(|u| u.trusted_signers).unwrap_or_default(),
+        )?;
+        let software_signers = signer_list(
+            "software",
+            self.software.map(|s| s.trusted_signers).unwrap_or_default(),
+        )?;
         Ok(Settings {
             server,
             inventory_interval: Duration::from_secs(self.inventory_interval_sec),
@@ -179,9 +218,33 @@ impl AgentConfig {
             log_level,
             tls,
             dev_cert_headers,
+            trusted_signers,
+            software_signers,
             state_dir: base_dir.join("state"),
         })
     }
+}
+
+/// 簽章者清單:SHA-1 指紋(40 個十六進位字元)轉小寫、去重,最多 [`MAX_TRUSTED_SIGNERS`] 個;格式不符拒絕
+fn signer_list(section: &str, list: Vec<String>) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for t in list {
+        let t = t.trim().to_ascii_lowercase();
+        if t.len() != 40 || !t.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(format!(
+                "[{section}] trusted_signers 必須是 40 個十六進位字元的 SHA-1 指紋:{t}"
+            ));
+        }
+        if !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    if out.len() > MAX_TRUSTED_SIGNERS {
+        return Err(format!(
+            "[{section}] trusted_signers 最多 {MAX_TRUSTED_SIGNERS} 個"
+        ));
+    }
+    Ok(out)
 }
 
 /// dev 用的假指紋:DN 的 SHA-256 取前 40 個十六進位字元(格式同 Nginx 的 SHA-1 指紋);同一個 DN 固定不變
@@ -284,6 +347,66 @@ mod tests {
         assert!(parse("server_url = \"http://127.0.0.1:1\"\nunknown_key = 1").is_err());
         assert!(parse("server_url = \"http://127.0.0.1:1\"\nlog_level = \"off\"").is_err());
         assert!(parse("server_url = \"http://127.0.0.1:1\"\nlog_level = \"verbose\"").is_err());
+    }
+
+    /// [software] 與 [upgrade] 分開(資安 M3)
+    #[test]
+    fn software_signers_are_separate() {
+        let a = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+        let b = "c3d4e5f60718293a4b5c6d7e8f9012345678a1b2";
+        let s = parse(&format!(
+            "server_url = \"http://127.0.0.1:1\"\n[upgrade]\ntrusted_signers = [\"{a}\"]\n[software]\ntrusted_signers = [\"{}\"]\n",
+            b.to_uppercase()
+        ))
+        .unwrap();
+        assert_eq!(
+            (s.trusted_signers, s.software_signers),
+            (vec![a.to_string()], vec![b.to_string()])
+        );
+        let s = parse("server_url = \"http://127.0.0.1:1\"\n").unwrap();
+        assert!(s.software_signers.is_empty(), "沒有設定 = 不接受任何套件");
+        assert!(
+            parse("server_url = \"http://127.0.0.1:1\"\n[software]\ntrusted_signers = [\"xyz\"]\n")
+                .unwrap_err()
+                .contains("[software]")
+        );
+    }
+
+    /// [upgrade] trusted_signers:轉小寫、去重;格式不符拒絕
+    #[test]
+    fn trusted_signers_are_validated() {
+        let base = "server_url = \"http://127.0.0.1:1\"
+";
+        assert!(parse(base).unwrap().trusted_signers.is_empty());
+        let a = "A1B2C3D4E5F60718293A4B5C6D7E8F9012345678";
+        let s = parse(&format!(
+            "{base}[upgrade]
+trusted_signers = [\"{a}\", \" {} \"]
+",
+            a.to_lowercase()
+        ))
+        .unwrap();
+        assert_eq!(s.trusted_signers, [a.to_lowercase()]);
+        for bad in ["\"abc\"", "\"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\""] {
+            assert!(
+                parse(&format!(
+                    "{base}[upgrade]
+trusted_signers = [{bad}]
+"
+                ))
+                .unwrap_err()
+                .contains("trusted_signers"),
+                "{bad}"
+            );
+        }
+        assert!(
+            parse(&format!(
+                "{base}[upgrade]
+other = 1
+"
+            ))
+            .is_err()
+        );
     }
 
     /// 服務模式日誌等級:選用,預設不設定(info)

@@ -41,6 +41,8 @@ const testEnv = {
   AGENT_TLS_CERT_FILE: file('crt'),
   AGENT_TLS_KEY_FILE: file('key'),
   AGENT_TRUSTED_PROXIES: '172.16.0.0/12',
+  COMMAND_FILES_DIR: '/data/command-files',
+  ENDPOINT_SCOPE_ALL_ROLES: 'it-admin',
 };
 
 const clean = (e: Record<string, string | undefined>) => Object.fromEntries(Object.entries(e).filter(([, v]) => v !== undefined)) as NodeJS.ProcessEnv;
@@ -55,6 +57,7 @@ describe('部署區設定', () => {
     assert.equal(c.mongoDb, 'ita_dev');
     assert.equal(c.gateway.project, 'RustIt');
     assert.deepEqual([c.host, c.port, c.agentPort], ['127.0.0.1', 51240, 51241]);
+    assert.deepEqual([c.commandFilesDir, c.commandFileKeepDays], ['data/dev/command-files', 14]);
   });
 
   it('test:機密從 _FILE 讀取,TLS 與信任來源必填', () => {
@@ -82,5 +85,52 @@ describe('部署區設定', () => {
     assert.throws(() => loadConfig(clean({ ...devEnv, DEV_TRUST_CLIENT_HEADERS: undefined })), /AGENT_TRUSTED_PROXIES/);
     assert.throws(() => loadConfig(clean({ ...devEnv, ITA_DB_HOST: undefined })), /ITA_DB_HOST/);
     assert.throws(() => loadConfig(clean({ ...devEnv, PORT: '8080' })), /51200–51300/);
+    assert.throws(() => loadConfig(clean({ ...testEnv, COMMAND_FILES_DIR: undefined })), /COMMAND_FILES_DIR/);
+  });
+
+  it('指令附檔保存天數只能 14–30(PLATFORM-PLAN B5)', () => {
+    assert.equal(loadConfig(clean({ ...testEnv, COMMAND_FILE_KEEP_DAYS: '30' })).commandFileKeepDays, 30);
+    assert.throws(() => loadConfig(clean({ ...testEnv, COMMAND_FILE_KEEP_DAYS: '7' })), /COMMAND_FILE_KEEP_DAYS/);
+    assert.throws(() => loadConfig(clean({ ...testEnv, COMMAND_FILE_KEEP_DAYS: '31' })), /COMMAND_FILE_KEEP_DAYS/);
+  });
+
+  it('軟體派送(P7):SOFTWARE_DIR 省略不啟用;上限預設值與範圍', () => {
+    const c = loadConfig(clean(testEnv));
+    assert.deepEqual([c.softwareDir, c.softwareMaxBytes, c.softwareMaxConcurrent, c.batchApprovalThreshold], [null, 4 * 1024 ** 3, 20, 20]);
+    const s = loadConfig(clean({ ...testEnv, SOFTWARE_DIR: '/srv/software', SOFTWARE_MAX_CONCURRENT: '5', BATCH_APPROVAL_THRESHOLD: '10' }));
+    assert.deepEqual([s.softwareDir, s.softwareMaxConcurrent, s.batchApprovalThreshold], ['/srv/software', 5, 10]);
+    assert.throws(() => loadConfig(clean({ ...testEnv, SOFTWARE_MAX_CONCURRENT: '0' })), /SOFTWARE_MAX_CONCURRENT/);
+    assert.throws(() => loadConfig(clean({ ...testEnv, BATCH_APPROVAL_THRESHOLD: '201' })), /BATCH_APPROVAL_THRESHOLD/);
+    assert.throws(() => loadConfig(clean({ ...testEnv, SOFTWARE_MAX_BYTES: '1x' })), /SOFTWARE_MAX_BYTES/);
+  });
+
+  it('監測(P5):健康摘要預設開、告警門檻預設值;磁碟關閉門檻不可低於開啟門檻', () => {
+    const c = loadConfig(clean(testEnv));
+    assert.equal(c.agentSettings.health_enabled, true);
+    assert.deepEqual(c.alertThresholds, { offlineDays: 7, diskFreePct: 10, diskClearPct: 15, restarts24h: 3, certDays: 30, silentMin: 15 });
+    assert.equal(loadConfig(clean({ ...testEnv, AGENT_HEALTH_ENABLED: '0' })).agentSettings.health_enabled, false);
+    // 只調高開啟門檻時,關閉門檻至少等於開啟門檻
+    assert.equal(loadConfig(clean({ ...testEnv, ALERT_DISK_FREE_PCT: '20' })).alertThresholds.diskClearPct, 20);
+    assert.throws(() => loadConfig(clean({ ...testEnv, ALERT_DISK_FREE_PCT: '20', ALERT_DISK_CLEAR_PCT: '10' })), /ALERT_DISK_CLEAR_PCT/);
+    assert.throws(() => loadConfig(clean({ ...testEnv, ALERT_OFFLINE_DAYS: '0' })), /ALERT_OFFLINE_DAYS/);
+  });
+
+  it('資料範圍(E6):test / prod 必須設定全部公司角色(可為空字串),dev 預設空', () => {
+    assert.throws(() => loadConfig(clean({ ...testEnv, ENDPOINT_SCOPE_ALL_ROLES: undefined })), /ENDPOINT_SCOPE_ALL_ROLES 未設定/);
+    assert.deepEqual(loadConfig(clean({ ...testEnv, ENDPOINT_SCOPE_ALL_ROLES: '' })).scopeAllRoles, []);
+    assert.deepEqual(loadConfig(clean({ ...testEnv, ENDPOINT_SCOPE_ALL_ROLES: ' it-admin , endpoint-all,it-admin' })).scopeAllRoles, ['it-admin', 'endpoint-all']);
+    assert.deepEqual(loadConfig(clean(devEnv)).scopeAllRoles, []);
+  });
+
+  it('網域 → 公司對應(E6):格式錯誤、名稱過長、同一網域兩家公司即啟動失敗', () => {
+    const c = loadConfig(clean({ ...testEnv, ENDPOINT_COMPANY_DOMAINS: '碩禾=gsc.com.tw, GSMC.com.tw;鹽城碩禾=ygdmc.gsc.com.tw;' }));
+    assert.deepEqual([...c.companyDomains], [
+      ['gsc.com.tw', '碩禾'],
+      ['gsmc.com.tw', '碩禾'],
+      ['ygdmc.gsc.com.tw', '鹽城碩禾'],
+    ]);
+    assert.equal(loadConfig(clean(testEnv)).companyDomains.size, 0);
+    for (const bad of ['碩禾', '=gsc.com.tw', '碩禾=gsc', '碩禾=a..b', `${'公'.repeat(21)}=gsc.com.tw`, '碩禾=gsc.com.tw;禾迅=GSC.com.tw'])
+      assert.throws(() => loadConfig(clean({ ...testEnv, ENDPOINT_COMPANY_DOMAINS: bad })), /ENDPOINT_COMPANY_DOMAINS 格式錯誤/, bad);
   });
 });

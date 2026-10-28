@@ -3,31 +3,59 @@
  * 真實的 SQL Server / Mongo / Redis 由整合測試(test/int/,npm run test:int)涵蓋。
  */
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { primaryIpv4, type InventoryRequest } from '../src/contracts.js';
+import { AppError } from '../src/errors.js';
+import { AlertService, DEFAULT_THRESHOLDS } from '../src/services/alert-service.js';
 import { CommandDispatcher } from '../src/services/command-dispatcher.js';
+import { CommandFileService } from '../src/services/command-files.js';
 import { DeviceService } from '../src/services/device-service.js';
+import { SCOPE_ALL, type Scope } from '../src/services/scope.js';
 import type {
+  Actor,
   AgentEvent,
+  AlertFilter,
+  AlertOpen,
+  AlertRecord,
+  AlertRule,
   BatchRecord,
+  BatchFilter,
+  BatchState,
+  CompanyChange,
+  CompanySource,
+  CommandFileRecord,
+  CommandFileStore,
   CommandFilter,
   CommandPatch,
   CommandRecord,
   CommandState,
   CommandStore,
   CurrentInventory,
+  DeviceEventRecord,
   DeviceEventType,
+  DeviceFilter,
+  DeviceHealthRecord,
   DeviceRecord,
   DeviceRow,
+  DeviceStatus,
   DeviceStore,
+  HealthSample,
+  HostEventInput,
   InventorySnapshot,
+  MergeResult,
+  MonitorStore,
+  MonitorTarget,
   NewBatch,
   NewCommand,
+  NewCommandFile,
   OnlineInfo,
+  SavedHostEvent,
   SnapshotStore,
   StateStore,
   TouchPatch,
+  WatchdogState,
 } from '../src/stores/types.js';
 
 export const CONTRACTS_DIR = path.resolve(import.meta.dirname, '../../docs/contracts');
@@ -48,11 +76,22 @@ class Failable {
   }
 }
 
+/** 資料範圍:全部公司 / 指定公司(E6 測試用) */
+export const ALL: Scope = SCOPE_ALL;
+export const only = (...companies: string[]): Scope => ({ all: false, companies });
+
+/** 清單不篩選、第一頁(測試用) */
+export const LIST_ALL = { statuses: [], page: 1, pageSize: 50 };
+
 export class MemoryDeviceStore extends Failable implements DeviceStore {
-  devices: DeviceRecord[] = [];
+  devices: (DeviceRecord & { mergedInto?: number | null; retiredAt?: Date | null })[] = [];
   inventories = new Map<number, InventorySnapshot>();
-  events: { deviceRef: number | null; type: DeviceEventType; detail: string }[] = [];
-  agentEvents: (AgentEvent & { deviceRef: number; receivedAt: Date })[] = [];
+  events: { id?: number; deviceRef: number | null; type: DeviceEventType; detail: string }[] = [];
+  agentEvents: (AgentEvent & { id?: number; deviceRef: number; receivedAt: Date })[] = [];
+  /** 主機比對產生的事件(P5,軟硬體變更) */
+  hostEvents: (SavedHostEvent & { deviceRef: number; occurredAt: Date })[] = [];
+  /** 主機稽核與端點事件共用的寫入順序(對應 device_event.id) */
+  private eventSeq = 0;
 
   async ping() {
     this.hit('ping');
@@ -62,7 +101,15 @@ export class MemoryDeviceStore extends Failable implements DeviceStore {
     const d = this.devices.find((x) => x.certDn === certDn);
     return d ? { ...d } : null;
   }
-  async register(input: { certDn: string; certFp: string; computerName: string; requestId: string; at: Date }) {
+  async register(input: {
+    certDn: string;
+    certFp: string;
+    computerName: string;
+    requestId: string;
+    at: Date;
+    company?: string | null;
+    companySource?: CompanySource | null;
+  }) {
     this.hit('register');
     const d: DeviceRecord = {
       id: this.devices.length + 1,
@@ -77,24 +124,31 @@ export class MemoryDeviceStore extends Failable implements DeviceStore {
       lastInventoryAt: null,
       hwFingerprint: null,
       clockSkewMs: null,
+      company: input.company ?? null,
+      companySource: input.company ? (input.companySource ?? null) : null,
     };
     this.devices.push(d);
-    this.events.push({ deviceRef: d.id, type: 'registered', detail: '' });
+    this.events.push({ id: ++this.eventSeq, deviceRef: d.id, type: 'registered', detail: '' });
     return { ...d };
   }
   async updateFingerprint(device: DeviceRecord, certFp: string) {
     this.hit('updateFingerprint');
     this.byId(device.id).certFp = certFp;
-    this.events.push({ deviceRef: device.id, type: 'fingerprint_changed', detail: device.certFp });
+    this.events.push({ id: ++this.eventSeq, deviceRef: device.id, type: 'fingerprint_changed', detail: device.certFp });
   }
   async addEvent(device: DeviceRecord | null, type: DeviceEventType, detail: string) {
     this.hit('addEvent');
-    this.events.push({ deviceRef: device?.id ?? null, type, detail });
+    this.events.push({ id: ++this.eventSeq, deviceRef: device?.id ?? null, type, detail });
   }
   async addAgentEvents(device: DeviceRecord, events: AgentEvent[], receivedAt: Date) {
     this.hit('addAgentEvents');
+    const added: string[] = [];
     for (const e of events)
-      if (!this.agentEvents.some((x) => x.deviceRef === device.id && x.eventUid === e.eventUid)) this.agentEvents.push({ ...e, deviceRef: device.id, receivedAt });
+      if (!this.agentEvents.some((x) => x.deviceRef === device.id && x.eventUid === e.eventUid)) {
+        this.agentEvents.push({ ...e, id: ++this.eventSeq, deviceRef: device.id, receivedAt });
+        added.push(e.eventUid);
+      }
+    return added;
   }
   async touch(deviceRef: number, at: Date, patch: TouchPatch = {}) {
     this.hit('touch');
@@ -107,21 +161,25 @@ export class MemoryDeviceStore extends Failable implements DeviceStore {
   }
   async findByHwFingerprint(hwFingerprint: string, excludeRef: number) {
     this.hit('findByHwFingerprint');
-    return this.devices.filter((d) => d.hwFingerprint === hwFingerprint && d.id !== excludeRef).map((d) => ({ ...d }));
+    return this.devices.filter((d) => d.hwFingerprint === hwFingerprint && d.id !== excludeRef && !d.mergedInto).map((d) => ({ ...d }));
   }
   async currentInventory(deviceRef: number): Promise<CurrentInventory | null> {
     this.hit('currentInventory');
     const s = this.inventories.get(deviceRef);
     return s ? { agentSeq: s.agentSeq, contentHash: s.contentHash, collectedAt: s.collectedAt } : null;
   }
-  async saveInventory(device: DeviceRecord, s: InventorySnapshot) {
+  async saveInventory(device: DeviceRecord, s: InventorySnapshot, diff?: (prevPayload: string | null) => HostEventInput[]) {
     this.hit('saveInventory');
+    const changes = diff ? diff(this.inventories.get(device.id)?.payload ?? null) : [];
+    const saved = changes.map((e) => ({ ...e, id: ++this.eventSeq }));
+    this.hostEvents.push(...saved.map((e) => ({ ...e, deviceRef: device.id, occurredAt: s.collectedAt })));
     this.inventories.set(device.id, s);
     const d = this.byId(device.id);
     d.computerName = s.inventory.system.host_name;
     d.agentVersion = s.agentVersion;
     d.lastSeenAt = s.receivedAt;
     d.lastInventoryAt = s.receivedAt;
+    return saved;
   }
   async markInventoryUnchanged(deviceRef: number, at: Date) {
     this.hit('markInventoryUnchanged');
@@ -129,13 +187,14 @@ export class MemoryDeviceStore extends Failable implements DeviceStore {
     d.lastSeenAt = at;
     d.lastInventoryAt = at;
   }
-  private row(d: DeviceRecord): DeviceRow {
+  private row(d: MemoryDeviceStore["devices"][number]): DeviceRow {
     const s = this.inventories.get(d.id)?.inventory;
     const ip = s ? primaryIpv4(s.network) : null;
     return {
       ...d,
       userName: s?.system.user_name ?? null,
       domain: s?.system.domain ?? null,
+      partOfDomain: s?.system.part_of_domain ?? null,
       osName: s?.system.os_name ?? null,
       osVersion: s ? `${s.system.os_display_version} / ${s.system.os_build}` : null,
       manufacturer: s?.system.manufacturer ?? null,
@@ -143,11 +202,135 @@ export class MemoryDeviceStore extends Failable implements DeviceStore {
       cpuName: s?.cpu.name ?? null,
       memoryTotal: s?.memory_total ?? null,
       ips: ip ? [ip] : [],
+      suspectedDuplicate:
+        !!d.hwFingerprint && this.devices.some((o) => o.id !== d.id && o.hwFingerprint === d.hwFingerprint && !o.mergedInto && o.status !== 'retired'),
+      mergedIntoId: d.mergedInto ? this.byId(d.mergedInto).deviceId : null,
+      retiredAt: d.retiredAt ?? null,
     };
   }
-  async listDevices() {
+  async listDevices(f: DeviceFilter) {
     this.hit('listDevices');
-    return this.devices.map((d) => this.row(d));
+    const statuses: DeviceStatus[] = f.statuses.length ? f.statuses : ['active', 'disabled'];
+    const has = (v: string | null | undefined, q: string) => !!v && v.toLowerCase().includes(q.toLowerCase());
+    return this.devices
+      .filter((d) => statuses.includes(d.status))
+      .filter((d) => !f.companies || (d.company !== null && f.companies.includes(d.company)))
+      .filter((d) => f.company === undefined || d.company === f.company)
+      .filter((d) => {
+        const inv = this.inventories.get(d.id)?.inventory;
+        if (f.q) {
+          const q = f.q;
+          const nics = inv?.network ?? [];
+          const hit =
+            has(d.computerName, q) ||
+            has(inv?.system.user_name, q) ||
+            has(d.deviceId, q) ||
+            nics.some((n) => n.ips.some((ip) => has(ip, q)) || has(n.mac, q.replace(/-/g, ':')));
+          if (!hit) return false;
+        }
+        if (f.software && !(inv?.software ?? []).some((x) => has(x.name, f.software!))) return false;
+        if (f.os && !(has(inv?.system.os_name, f.os) || has(inv?.system.os_display_version, f.os))) return false;
+        return true;
+      })
+      .sort((a, b) => a.computerName.localeCompare(b.computerName) || a.id - b.id)
+      .map((d) => this.row(d));
+  }
+  async listEvents(deviceRef: number, beforeId: number | undefined, limit: number): Promise<DeviceEventRecord[]> {
+    this.hit('listEvents');
+    const all: DeviceEventRecord[] = [
+      ...this.events
+        .filter((e) => e.deviceRef === deviceRef)
+        .map((e) => ({ id: e.id ?? 0, type: e.type, occurredAt: new Date(0), receivedAt: null, detail: e.detail, data: null })),
+      ...this.agentEvents
+        .filter((e) => e.deviceRef === deviceRef)
+        .map((e) => ({ id: e.id ?? 0, type: e.type, occurredAt: e.occurredAt, receivedAt: e.receivedAt, detail: null, data: e.data })),
+      ...this.hostEvents
+        .filter((e) => e.deviceRef === deviceRef)
+        .map((e) => ({ id: e.id, type: e.type, occurredAt: e.occurredAt, receivedAt: null, detail: null, data: JSON.stringify(e.data) })),
+    ];
+    return all
+      .filter((e) => beforeId === undefined || e.id < beforeId)
+      .sort((a, b) => b.id - a.id)
+      .slice(0, limit);
+  }
+  async setStatus(deviceRef: number, status: DeviceStatus, detail: string, _requestId: string, actor: Actor) {
+    this.hit('setStatus');
+    const d = this.byId(deviceRef);
+    if (d.mergedInto) return false;
+    d.status = status;
+    d.retiredAt = status === 'retired' ? (d.retiredAt ?? new Date()) : status === 'active' ? null : (d.retiredAt ?? null);
+    this.events.push({ id: ++this.eventSeq, deviceRef, type: status === 'active' ? 'enabled' : status, detail: `${actor.emp};${detail}` });
+    return true;
+  }
+  async merge(targetRef: number, sourceRef: number, detail: string, _requestId: string, actor: Actor): Promise<MergeResult> {
+    this.hit('merge');
+    const t = this.byId(targetRef);
+    const src = this.byId(sourceRef);
+    if (t.mergedInto) throw new AppError(409, 'ITA_MERGE_INVALID', '目標裝置已併入其他裝置', { reason: 'target_merged' });
+    if (src.mergedInto === targetRef) throw new AppError(409, 'ITA_MERGE_INVALID', '來源裝置已併入此裝置', { reason: 'already_merged' });
+    if (src.mergedInto) throw new AppError(409, 'ITA_MERGE_INVALID', '來源裝置已合併過', { reason: 'source_merged' });
+    const tInv = this.inventories.get(targetRef);
+    const sInv = this.inventories.get(sourceRef);
+    const inventoryFrom: MergeResult['inventoryFrom'] = !tInv && !sInv ? 'none' : !tInv || (sInv && sInv.collectedAt > tInv.collectedAt) ? 'source' : 'target';
+    if (inventoryFrom === 'source') this.inventories.set(targetRef, sInv!);
+    this.inventories.delete(sourceRef);
+    let events = 0;
+    for (const e of [...this.events, ...this.agentEvents])
+      if (e.deviceRef === sourceRef) {
+        e.deviceRef = targetRef;
+        events++;
+      }
+    const oldDn = t.certDn;
+    if (t.company === null) Object.assign(t, { company: src.company, companySource: src.companySource });
+    Object.assign(t, {
+      certDn: src.certDn,
+      certFp: src.certFp,
+      computerName: src.computerName,
+      agentVersion: src.agentVersion ?? t.agentVersion,
+      hwFingerprint: src.hwFingerprint ?? t.hwFingerprint,
+    });
+    Object.assign(src, { certDn: `merged:${src.deviceId}`, status: 'retired', mergedInto: targetRef, retiredAt: new Date() });
+    this.events.push({ id: ++this.eventSeq, deviceRef: targetRef, type: 'merged', detail: `${actor.emp};${src.deviceId};${oldDn};${detail}` });
+    return { events, commands: this.mergedCommands?.(sourceRef, targetRef) ?? 0, canceledCommands: 0, inventoryFrom };
+  }
+  async setCompany(deviceRef: number, c: CompanyChange) {
+    this.hit('setCompany');
+    const d = this.byId(deviceRef);
+    if (d.mergedInto) return false;
+    if (c.mode === 'auto' && d.companySource !== null && d.companySource !== 'domain') return false;
+    const old = d.company;
+    d.company = c.company;
+    d.companySource = c.company === null ? null : c.source;
+    if (c.mode === 'manual' || old !== c.company)
+      this.events.push({ id: ++this.eventSeq, deviceRef, type: 'company_changed', detail: `${old ?? '-'}→${c.company ?? '-'};${c.detail}` });
+    return true;
+  }
+  async companyCandidates(afterRef: number, limit: number) {
+    this.hit('companyCandidates');
+    return this.devices
+      .filter((d) => d.id > afterRef && d.companySource === null && !d.mergedInto)
+      .sort((a, b) => a.id - b.id)
+      .slice(0, limit)
+      .map((d) => {
+        const sys = this.inventories.get(d.id)?.inventory.system;
+        return { id: d.id, deviceId: d.deviceId, certDn: d.certDn, domain: sys?.domain ?? null, partOfDomain: sys?.part_of_domain ?? null };
+      });
+  }
+  /** 模擬 migration 0005 前的版本或測試前置:直接改公司(不寫事件) */
+  setCompanyRaw(deviceRef: number, company: string | null, source: CompanySource | null = company ? 'manual' : null) {
+    Object.assign(this.byId(deviceRef), { company, companySource: source });
+  }
+  /** 指令儲存掛上時搬指令(MemoryCommandStore 設定) */
+  mergedCommands?: (from: number, to: number) => number;
+  softwareBackfilled: number[] = [];
+  async backfillSoftware(afterRef: number, limit: number) {
+    this.hit('backfillSoftware');
+    const todo = [...this.inventories.keys()]
+      .filter((ref) => ref > afterRef && !this.softwareBackfilled.includes(ref))
+      .sort((a, b) => a - b)
+      .slice(0, limit);
+    this.softwareBackfilled.push(...todo);
+    return { lastRef: todo.length === limit ? todo[todo.length - 1]! : null, done: todo.length, failed: [] };
   }
   async getDevice(deviceId: string) {
     this.hit('getDevice');
@@ -157,7 +340,7 @@ export class MemoryDeviceStore extends Failable implements DeviceStore {
     return { row: this.row(d), payload: s?.payload ?? null, collectedAt: s?.collectedAt ?? null };
   }
   async close() {}
-  byId(id: number): DeviceRecord {
+  byId(id: number): MemoryDeviceStore["devices"][number] {
     const d = this.devices.find((x) => x.id === id);
     if (!d) throw new Error(`no device ${id}`);
     return d;
@@ -166,7 +349,7 @@ export class MemoryDeviceStore extends Failable implements DeviceStore {
 
 export class MemorySnapshotStore extends Failable implements SnapshotStore {
   snapshots: { deviceId: string; agentSeq: number; contentHash: string }[] = [];
-  heartbeats: { deviceId: string; at: Date }[] = [];
+  heartbeats: { deviceId: string; at: Date; body?: Record<string, unknown> }[] = [];
   async ping() {
     this.hit('ping');
   }
@@ -175,9 +358,22 @@ export class MemorySnapshotStore extends Failable implements SnapshotStore {
     if (!this.snapshots.some((s) => s.deviceId === deviceId && s.agentSeq === snapshot.agentSeq && s.contentHash === snapshot.contentHash))
       this.snapshots.push({ deviceId, agentSeq: snapshot.agentSeq, contentHash: snapshot.contentHash });
   }
-  async recordHeartbeat({ deviceId, at }: { deviceId: string; at: Date }) {
+  async recordHeartbeat({ deviceId, at, body }: { deviceId: string; at: Date; body: Record<string, unknown> }) {
     this.hit('recordHeartbeat');
-    this.heartbeats.push({ deviceId, at });
+    this.heartbeats.push({ deviceId, at, body });
+  }
+  async healthSince(deviceId: string, since: Date, limit: number) {
+    this.hit('healthSince');
+    return this.heartbeats
+      .filter((h) => h.deviceId === deviceId && h.at >= since && h.body?.health)
+      .sort((a, b) => a.at.getTime() - b.at.getTime())
+      .slice(-limit)
+      .map((h) => ({ at: h.at, health: h.body!.health as Record<string, unknown> }));
+  }
+  async reassign(fromDeviceId: string, toDeviceId: string) {
+    this.hit('reassign');
+    for (const x of this.snapshots) if (x.deviceId === fromDeviceId) x.deviceId = toDeviceId;
+    for (const x of this.heartbeats) if (x.deviceId === fromDeviceId) x.deviceId = toDeviceId;
   }
   async seenSnapshots(deviceId: string, items: { seq: number; hash: string }[]) {
     this.hit('seenSnapshots');
@@ -213,6 +409,10 @@ export class MemoryStateStore extends Failable implements StateStore {
     this.hit('setHash');
     this.hashes.set(deviceId, hash);
   }
+  async clearHash(deviceId: string) {
+    this.hit('clearHash');
+    this.hashes.delete(deviceId);
+  }
   async close() {}
 }
 
@@ -225,13 +425,206 @@ export class Clock {
   }
 }
 
-export function setup() {
+export function setup(opts: { companyDomains?: Map<string, string> } = {}) {
   const sql = new MemoryDeviceStore();
   const mongo = new MemorySnapshotStore();
   const redis = new MemoryStateStore();
   const clock = new Clock();
-  const service = new DeviceService(sql, mongo, redis, { heartbeatIntervalSec: 30, now: clock.now });
-  return { sql, mongo, redis, clock, service };
+  const monitor = new MemoryMonitorStore(sql);
+  let alerts: AlertService | undefined;
+  const service = new DeviceService(sql, mongo, redis, {
+    heartbeatIntervalSec: 30,
+    now: clock.now,
+    companyDomains: opts.companyDomains,
+    monitor,
+    onHostEvents: (ctx, ref, events) => alerts!.onHostEvents(ctx, ref, events),
+    onAgentEvents: (ctx, ref, events) => alerts!.onAgentEvents(ctx, ref, events),
+  });
+  alerts = new AlertService(monitor, (id) => service.lookup(id), DEFAULT_THRESHOLDS, clock.now);
+  return { sql, mongo, redis, clock, service, monitor, alerts };
+}
+
+type MemoryAlert = AlertOpen & {
+  id: number;
+  alertId: string;
+  state: 'open' | 'resolved';
+  openedAt: Date;
+  lastSeenAt: Date;
+  resolvedAt: Date | null;
+  resolvedBy: 'auto' | 'manual' | null;
+  resolvedByEmp: string | null;
+  resolvedByName: string | null;
+  resolveNote: string | null;
+};
+
+/** 監測儲存(記憶體版;與 SqlMonitorStore 相同的「同一台同一規則只有一筆未結束」語意) */
+export class MemoryMonitorStore extends Failable implements MonitorStore {
+  health = new Map<number, DeviceHealthRecord>();
+  alerts: MemoryAlert[] = [];
+  /** P7 reboot_pending 測試用:裝置 → 需要重新開機的起始時間 */
+  rebootRequired = new Map<number, Date>();
+  constructor(private readonly devices: MemoryDeviceStore) {
+    super();
+  }
+  row(ref: number): DeviceHealthRecord {
+    let h = this.health.get(ref);
+    if (!h) {
+      h = {
+        deviceRef: ref,
+        healthAt: null,
+        certNotAfter: null,
+        watchdogVersion: null,
+        watchdogReportAt: null,
+        agentServiceState: null,
+        agentStartType: null,
+        agentStatusOk: null,
+        agentLastError: null,
+        agentRestarts24h: null,
+      };
+      this.health.set(ref, h);
+    }
+    return h;
+  }
+  async saveHealth(ref: number, at: Date, s: HealthSample) {
+    this.hit('saveHealth');
+    const h = this.row(ref);
+    // 與 SQL 相同:這一則沒有的欄位保留上一次的值
+    Object.assign(h, s, { healthAt: at });
+  }
+  async saveWatchdog(ref: number, w: WatchdogState) {
+    this.hit('saveWatchdog');
+    Object.assign(this.row(ref), {
+      watchdogVersion: w.version,
+      watchdogReportAt: w.reportAt,
+      agentServiceState: w.agentServiceState,
+      agentStartType: w.agentStartType,
+      agentStatusOk: w.agentStatusOk,
+      agentLastError: w.agentLastError,
+      agentRestarts24h: w.agentRestarts24h,
+    });
+  }
+  async saveCertNotAfter(ref: number, notAfter: Date) {
+    this.hit('saveCertNotAfter');
+    this.row(ref).certNotAfter = notAfter;
+  }
+  async healthOf(refs: number[]) {
+    this.hit('healthOf');
+    return new Map(refs.filter((r) => this.health.has(r)).map((r) => [r, { ...this.health.get(r)! }]));
+  }
+  async monitorTargets(since: Date): Promise<MonitorTarget[]> {
+    this.hit('monitorTargets');
+    return this.devices.devices
+      .filter((d) => d.status === 'active' && !d.mergedInto)
+      .map((d) => ({
+        deviceRef: d.id,
+        lastSeenAt: d.lastSeenAt,
+        clockSkewMs: d.clockSkewMs,
+        health: this.health.get(d.id) ? { ...this.health.get(d.id)! } : null,
+        unexpectedRestarts24h: this.devices.agentEvents.filter(
+          (e) => e.deviceRef === d.id && e.type === 'agent_started' && e.occurredAt >= since && e.data.includes('"previous_exit":"unexpected"'),
+        ).length,
+        openRules: this.alerts.filter((a) => a.deviceRef === d.id && a.state === 'open').map((a) => a.rule),
+        rebootRequiredSince: this.rebootRequired.get(d.id) ?? null,
+      }));
+  }
+  async openAlert(a: AlertOpen) {
+    this.hit('openAlert');
+    const open = this.alerts.find((x) => x.deviceRef === a.deviceRef && x.rule === a.rule && x.state === 'open');
+    if (open) {
+      Object.assign(open, { lastSeenAt: a.at, severity: a.severity, detail: a.keepDetail ? open.detail : a.detail, eventRef: open.eventRef ?? a.eventRef ?? null });
+      return { alertId: open.alertId, created: false };
+    }
+    const alertId = randomUUID();
+    this.alerts.push({
+      ...a,
+      eventRef: a.eventRef ?? null,
+      id: this.alerts.length + 1,
+      alertId,
+      state: 'open',
+      openedAt: a.at,
+      lastSeenAt: a.at,
+      resolvedAt: null,
+      resolvedBy: null,
+      resolvedByEmp: null,
+      resolvedByName: null,
+      resolveNote: null,
+    });
+    return { alertId, created: true };
+  }
+  async resolveAuto(ref: number, rule: AlertRule, at: Date, note: string) {
+    this.hit('resolveAuto');
+    const open = this.alerts.find((x) => x.deviceRef === ref && x.rule === rule && x.state === 'open');
+    if (!open) return false;
+    Object.assign(open, { state: 'resolved', resolvedAt: at, resolvedBy: 'auto', resolveNote: note });
+    return true;
+  }
+  async resolveInactive(at: Date) {
+    this.hit('resolveInactive');
+    let n = 0;
+    for (const a of this.alerts) {
+      const d = this.devices.byId(a.deviceRef);
+      if (a.state === 'open' && (d.status !== 'active' || d.mergedInto)) {
+        Object.assign(a, { state: 'resolved', resolvedAt: at, resolvedBy: 'auto', resolveNote: '裝置已停用' });
+        n++;
+      }
+    }
+    return n;
+  }
+  async resolveManual(alertId: string, at: Date, actor: Actor, note: string) {
+    this.hit('resolveManual');
+    const a = this.alerts.find((x) => x.alertId === alertId && x.state === 'open');
+    if (!a) return false;
+    Object.assign(a, { state: 'resolved', resolvedAt: at, resolvedBy: 'manual', resolvedByEmp: actor.emp, resolvedByName: actor.name, resolveNote: note });
+    return true;
+  }
+  private rec(a: MemoryAlert): AlertRecord {
+    const d = this.devices.byId(a.deviceRef);
+    return {
+      id: a.id,
+      alertId: a.alertId,
+      deviceRef: a.deviceRef,
+      deviceId: d.deviceId,
+      computerName: d.computerName,
+      deviceCompany: d.company,
+      rule: a.rule,
+      severity: a.severity,
+      state: a.state,
+      openedAt: a.openedAt,
+      lastSeenAt: a.lastSeenAt,
+      resolvedAt: a.resolvedAt,
+      resolvedBy: a.resolvedBy,
+      resolvedByEmp: a.resolvedByEmp,
+      resolvedByName: a.resolvedByName,
+      resolveNote: a.resolveNote,
+      detail: a.detail,
+      eventRef: a.eventRef ?? null,
+    };
+  }
+  async getAlert(alertId: string) {
+    this.hit('getAlert');
+    const a = this.alerts.find((x) => x.alertId === alertId);
+    return a ? this.rec(a) : null;
+  }
+  async listAlerts(f: AlertFilter) {
+    this.hit('listAlerts');
+    return this.alerts
+      .filter((a) => (!f.state || a.state === f.state) && (!f.rule || a.rule === f.rule) && (!f.severity || a.severity === f.severity))
+      .filter((a) => f.deviceRef === undefined || a.deviceRef === f.deviceRef)
+      .filter((a) => f.beforeId === undefined || a.id < f.beforeId)
+      .filter((a) => {
+        const c = this.devices.byId(a.deviceRef).company;
+        return !f.companies || (c !== null && f.companies.includes(c));
+      })
+      .sort((a, b) => b.id - a.id)
+      .slice(0, f.limit)
+      .map((a) => this.rec(a));
+  }
+  async openAlertCounts(refs: number[]) {
+    this.hit('openAlertCounts');
+    const m = new Map<number, number>();
+    for (const a of this.alerts) if (a.state === 'open' && refs.includes(a.deviceRef)) m.set(a.deviceRef, (m.get(a.deviceRef) ?? 0) + 1);
+    return m;
+  }
 }
 
 /** 範例回報,可覆寫序號、時間、hash */
@@ -242,9 +635,21 @@ export function inventoryRequest(patch: Partial<InventoryRequest> = {}): Invento
 export const certHeaders = (fp = FP) => ({ 'x-client-cert-dn': DN, 'x-client-cert-fp': fp, 'x-client-verify': 'SUCCESS', 'x-request-id': 'req-agent-1' });
 
 /** 指令儲存(記憶體版,與 SqlCommandStore 相同的條件更新語意) */
-export class MemoryCommandStore extends Failable implements CommandStore {
+export class MemoryCommandStore extends Failable implements CommandStore, CommandFileStore {
   commands: (NewCommand & { id: number; batchRef: number | null; state: CommandState } & Partial<CommandRecord>)[] = [];
-  batches: (NewBatch & { id: number; targetCount: number })[] = [];
+  batches: (NewBatch & {
+    id: number;
+    targetCount: number;
+    state: BatchState;
+    approvedByEmp: string | null;
+    approvedByName: string | null;
+    approvedAt: Date | null;
+    rejectedByEmp: string | null;
+    rejectedByName: string | null;
+    rejectedAt: Date | null;
+    rejectReason: string | null;
+  })[] = [];
+  files: (NewCommandFile & { id: number })[] = [];
   constructor(private readonly devices: MemoryDeviceStore) {
     super();
   }
@@ -265,8 +670,10 @@ export class MemoryCommandStore extends Failable implements CommandStore {
       ...c,
       batchId: b?.batchId ?? null,
       batchMaxConcurrent: b?.maxConcurrent ?? null,
+      batchState: b?.state ?? null,
       deviceId: d.deviceId,
       computerName: d.computerName,
+      deviceCompany: d.company,
       requestId: c.requestId,
     } as CommandRecord;
   }
@@ -274,6 +681,10 @@ export class MemoryCommandStore extends Failable implements CommandStore {
     const counts: BatchRecord['counts'] = {};
     for (const c of this.commands.filter((x) => x.batchRef === b.id)) counts[c.state] = (counts[c.state] ?? 0) + 1;
     return { ...b, counts };
+  }
+  private cancelQueued(batchRef: number, at: Date, code: string) {
+    for (const c of this.commands)
+      if (c.batchRef === batchRef && c.state === 'queued') Object.assign(c, { state: 'canceled', errorCode: code, finishedAt: at });
   }
   async createCommands(batch: NewBatch | null, commands: NewCommand[]) {
     this.hit('createCommands');
@@ -283,7 +694,19 @@ export class MemoryCommandStore extends Failable implements CommandStore {
     let batchRef: number | null = null;
     if (batch) {
       batchRef = this.batches.length + 1;
-      this.batches.push({ ...batch, id: batchRef, targetCount: commands.length });
+      this.batches.push({
+        ...batch,
+        id: batchRef,
+        targetCount: commands.length,
+        state: batch.requiresApproval ? 'pending_approval' : 'running',
+        approvedByEmp: null,
+        approvedByName: null,
+        approvedAt: null,
+        rejectedByEmp: null,
+        rejectedByName: null,
+        rejectedAt: null,
+        rejectReason: null,
+      });
     }
     for (const c of commands) this.commands.push({ ...c, id: this.commands.length + 1, batchRef, state: 'queued' });
   }
@@ -307,9 +730,30 @@ export class MemoryCommandStore extends Failable implements CommandStore {
     const b = this.batches.find((x) => x.batchId === batchId);
     return b ? this.batchRec(b) : null;
   }
+  async listBatches(f: BatchFilter) {
+    this.hit('listBatches');
+    return this.batches
+      .filter(
+        (b) =>
+          (!f.state || b.state === f.state) &&
+          (!f.createdAfter || b.createdAt > f.createdAfter) &&
+          (f.beforeId === undefined || b.id < f.beforeId),
+      )
+      .sort((a, b) => b.id - a.id)
+      .slice(0, f.limit)
+      .map((b) => this.batchRec(b));
+  }
+  async batchCompanies(batchRef: number) {
+    this.hit('batchCompanies');
+    return [...new Set(this.commands.filter((c) => c.batchRef === batchRef).map((c) => this.devices.byId(c.deviceRef).company))];
+  }
   async listCommands(f: CommandFilter) {
     this.hit('listCommands');
     return this.commands
+      .filter((c) => {
+        const co = this.devices.byId(c.deviceRef).company;
+        return !f.companies || (co !== null && f.companies.includes(co));
+      })
       .filter(
         (c) =>
           (f.deviceRef === undefined || c.deviceRef === f.deviceRef) &&
@@ -331,13 +775,15 @@ export class MemoryCommandStore extends Failable implements CommandStore {
     if (p.resultSummary !== undefined) c.resultSummary = p.resultSummary;
     if (p.errorCode) c.errorCode = p.errorCode;
     if (p.errorMessage) c.errorMessage = p.errorMessage;
-    c.timeoutAt ??= p.timeoutAt ?? null;
+    if (p.resetTimeout && p.timeoutAt) c.timeoutAt = p.timeoutAt;
+    else c.timeoutAt ??= p.timeoutAt ?? null;
     if (p.state === 'sent') {
       c.sendCount = (c.sendCount ?? 0) + 1;
       c.sentAt = p.at;
     }
     if (['acked', 'running', 'succeeded', 'failed'].includes(p.state) && !c.ackedAt && c.sentAt) c.ackedAt = p.at;
     if (p.state === 'running') c.startedAt ??= p.at;
+    if (p.markStarted) c.startedAt ??= c.ackedAt ?? p.at;
     if (['succeeded', 'failed', 'canceled', 'expired'].includes(p.state)) c.finishedAt = p.at;
     return true;
   }
@@ -377,6 +823,102 @@ export class MemoryCommandStore extends Failable implements CommandStore {
       .slice(0, limit)
       .map((c) => this.rec(c));
   }
+  async approveBatch(batchRef: number, actor: Actor, at: Date, expiresAt: Date) {
+    this.hit('approveBatch');
+    const b = this.batches.find((x) => x.id === batchRef);
+    if (!b || b.state !== 'pending_approval' || b.createdByEmp === actor.emp || at.getTime() - b.createdAt.getTime() >= 24 * 3_600_000) return false;
+    Object.assign(b, { state: 'running', approvedByEmp: actor.emp, approvedByName: actor.name, approvedAt: at });
+    for (const c of this.commands) if (c.batchRef === batchRef && c.state === 'queued') c.expiresAt = expiresAt;
+    return true;
+  }
+  async rejectBatch(batchRef: number, actor: Actor, at: Date, reason: string) {
+    this.hit('rejectBatch');
+    const b = this.batches.find((x) => x.id === batchRef);
+    if (!b || b.state !== 'pending_approval') return false;
+    Object.assign(b, { state: 'rejected', rejectedByEmp: actor.emp, rejectedByName: actor.name, rejectedAt: at, rejectReason: reason });
+    this.cancelQueued(batchRef, at, 'BATCH_REJECTED');
+    return true;
+  }
+  async expirePendingBatches(createdBefore: Date, at: Date) {
+    this.hit('expirePendingBatches');
+    let n = 0;
+    for (const b of this.batches)
+      if (b.state === 'pending_approval' && b.createdAt <= createdBefore) {
+        b.state = 'expired';
+        this.cancelQueued(b.id, at, 'APPROVAL_EXPIRED');
+        n++;
+      }
+    return n;
+  }
+  async finishBatchIfDone(batchRef: number) {
+    this.hit('finishBatchIfDone');
+    const b = this.batches.find((x) => x.id === batchRef);
+    if (b?.state === 'running' && !this.commands.some((c) => c.batchRef === batchRef && ['queued', 'sent', 'acked', 'running'].includes(c.state))) b.state = 'done';
+  }
+  async finishIdleBatches(createdAfter: Date) {
+    this.hit('finishIdleBatches');
+    let n = 0;
+    const active = (b: { id: number }) => this.commands.some((c) => c.batchRef === b.id && ['queued', 'sent', 'acked', 'running'].includes(c.state));
+    for (const b of this.batches)
+      if (b.state === 'running' && b.createdAt >= createdAfter && !active(b)) {
+        b.state = 'done';
+        n++;
+      }
+    return n;
+  }
+  async recentGatedTargets(emp: string, kinds: readonly string[], since: Date) {
+    this.hit('recentGatedTargets');
+    const refs = new Set<number>();
+    for (const c of this.commands) {
+      if (c.createdByEmp !== emp || c.createdAt < since || !kinds.includes(c.kind)) continue;
+      const b = this.batches.find((x) => x.id === c.batchRef);
+      if (b && (b.approvedByEmp !== null || !['running', 'done'].includes(b.state))) continue;
+      refs.add(c.deviceRef);
+    }
+    return refs.size;
+  }
+  async activeOfKinds(kinds: readonly string[]) {
+    this.hit('activeOfKinds');
+    return this.commands.filter((c) => kinds.includes(c.kind) && ['sent', 'acked', 'running'].includes(c.state)).length;
+  }
+  async queuedOfKinds(kinds: readonly string[], now: Date, limit: number, afterId = 0) {
+    this.hit('queuedOfKinds');
+    return this.commands
+      .filter((c) => kinds.includes(c.kind) && c.state === 'queued' && c.expiresAt > now && c.id > afterId)
+      .filter((c) => {
+        const b = this.batches.find((x) => x.id === c.batchRef);
+        return !b || b.state === 'running' || b.state === 'done';
+      })
+      .slice(0, limit)
+      .map((c) => this.rec(c));
+  }
+  private fileRec(f: MemoryCommandStore['files'][number]): CommandFileRecord {
+    return { ...f, commandId: this.commands.find((c) => c.id === f.commandRef)!.commandId };
+  }
+  async addFile(f: NewCommandFile) {
+    this.hit('addFile');
+    this.files.push({ ...f, id: this.files.length + 1 });
+  }
+  async listFiles(commandRef: number) {
+    this.hit('listFiles');
+    return this.files.filter((f) => f.commandRef === commandRef).map((f) => this.fileRec(f));
+  }
+  async getFile(fileId: string) {
+    this.hit('getFile');
+    const f = this.files.find((x) => x.fileId === fileId);
+    return f ? this.fileRec(f) : null;
+  }
+  async expiredFiles(now: Date, limit: number) {
+    this.hit('expiredFiles');
+    return this.files
+      .filter((f) => f.expiresAt <= now)
+      .slice(0, limit)
+      .map((f) => this.fileRec(f));
+  }
+  async deleteFile(id: number) {
+    this.hit('deleteFile');
+    this.files = this.files.filter((f) => f.id !== id);
+  }
 }
 
 /** 假的 WebSocket 連線:記錄送出的信封 */
@@ -396,9 +938,12 @@ export class FakeConnection {
   }
 }
 
-export function setupCommands(opts: { batchMaxConcurrent?: number } = {}) {
-  const base = setup();
+export function setupCommands(opts: { batchMaxConcurrent?: number; companyDomains?: Map<string, string> } = {}) {
+  const base = setup({ companyDomains: opts.companyDomains });
   const store = new MemoryCommandStore(base.sql);
   const commands = new CommandDispatcher(store, base.sql, base.service, { now: base.clock.now, ...opts });
-  return { ...base, store, commands };
+  // 指令附檔放在每次測試各自的暫存目錄
+  const filesDir = mkdtempSync(path.join(tmpdir(), 'ita-files-'));
+  const files = new CommandFileService(store, filesDir, { keepDays: 14, now: base.clock.now });
+  return { ...base, store, commands, files, filesDir };
 }

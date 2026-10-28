@@ -13,10 +13,10 @@ import { buildAgentApp } from '../src/agent-app.js';
 import { compileWsEnvelope } from '../src/contracts.js';
 import { buildMgmtApp } from '../src/mgmt-app.js';
 import type { DeviceRecord } from '../src/stores/types.js';
-import { CONTRACTS_DIR, DN, FP, FakeConnection, certHeaders, setupCommands } from './helpers.js';
+import { ALL, CONTRACTS_DIR, DN, FP, FakeConnection, certHeaders, setupCommands } from './helpers.js';
 
 const log = Fastify({ logger: { level: 'silent' } }).log;
-const ctx = { log, requestId: 'req-cmd-1' };
+const ctx = { log, requestId: 'req-cmd-1', scope: ALL };
 const IT: GatewayIdentity = { sub: '1', emp: 'S000001', name: '測試人員' };
 const OTHER: GatewayIdentity = { sub: '2', emp: 'S000002', name: '另一位' };
 const validateEnvelope = compileWsEnvelope(CONTRACTS_DIR);
@@ -72,7 +72,7 @@ describe('指令派送器', () => {
 
   it('等級與路徑不符 400 ENDPOINT_COMMAND_LEVEL_MISMATCH;不認得的類型、參數錯誤、有效期限超出範圍 400', async () => {
     await assert.rejects(env.commands.create(ctx, IT, 'admin', device.deviceId, { kind: 'inventory.collect' }), { code: 'ENDPOINT_COMMAND_LEVEL_MISMATCH' });
-    await assert.rejects(env.commands.create(ctx, IT, 'basic', device.deviceId, { kind: 'system.reboot' }), { code: 'ITA_COMMAND_KIND_UNKNOWN' });
+    await assert.rejects(env.commands.create(ctx, IT, 'basic', device.deviceId, { kind: 'system.format' }), { code: 'ITA_COMMAND_KIND_UNKNOWN' });
     await assert.rejects(env.commands.create(ctx, IT, 'basic', device.deviceId, { kind: 'message.show', params: {} }), { code: 'VALIDATION_FAILED' });
     await assert.rejects(env.commands.create(ctx, IT, 'basic', device.deviceId, { kind: 'inventory.collect', params: { cmd: 'whoami' } }), {
       code: 'VALIDATION_FAILED',
@@ -127,6 +127,22 @@ describe('指令派送器', () => {
     await env.commands.onUpdate(ctx, device.id, { command_id: v.commandId, state: 'failed', error_code: 'UNSUPPORTED_COMMAND', error_message: 'x' });
     const got = await env.commands.get(ctx, v.commandId);
     assert.deepEqual([got.state, got.errorCode], ['failed', 'UNSUPPORTED_COMMAND']);
+  });
+
+  it('瞬間完成(沒收到 running)時 started_at 以 acked_at 補上;未開始執行的失敗不補', async () => {
+    await online(device);
+    const a = await env.commands.create(ctx, IT, 'basic', device.deviceId, { kind: 'agent.diagnose' });
+    env.clock.advance(1);
+    await env.commands.onUpdate(ctx, device.id, { command_id: a.commandId, state: 'acked' });
+    env.clock.advance(1);
+    await env.commands.onUpdate(ctx, device.id, { command_id: a.commandId, state: 'succeeded', result: {} });
+    const done = await env.commands.get(ctx, a.commandId);
+    assert.ok(done.startedAt);
+    assert.equal(done.startedAt, done.ackedAt);
+    assert.ok(done.startedAt < done.finishedAt!);
+    const b = await env.commands.create(ctx, IT, 'basic', device.deviceId, { kind: 'inventory.collect' });
+    await env.commands.onUpdate(ctx, device.id, { command_id: b.commandId, state: 'failed', error_code: 'UNSUPPORTED_COMMAND' });
+    assert.equal((await env.commands.get(ctx, b.commandId)).startedAt, null);
   });
 
   it('WebSocket 斷線:sent 改回 queued 並於重連後重送;acked 不動', async () => {
@@ -279,7 +295,7 @@ describe('指令管理 API(:51240)', () => {
     device = await addDevice(DN);
     const gateway = loadGatewayEnv({ GW_ENV: 'dev', SERVICE_CODE: 'endpoint-api', GW_JWKS_URL: 'http://127.0.0.1:1/jwks.json' });
     mgmt = await buildMgmtApp({
-      config: { gateway, monitor: loadMonitorEnv('dev', {}), logLevel: 'silent', devSkipToken: true },
+      config: { gateway, monitor: loadMonitorEnv('dev', {}), logLevel: 'silent', devSkipToken: true, scopeAllRoles: [] },
       service: env.service,
       commands: env.commands,
     });
@@ -309,7 +325,7 @@ describe('指令管理 API(:51240)', () => {
   it('basic 路徑送管理指令 400;參數錯誤 400;找不到 404', async () => {
     const reboot = await create('system.reboot');
     assert.equal(reboot.statusCode, 400);
-    assert.equal(reboot.json().code, 'ITA_COMMAND_KIND_UNKNOWN');
+    assert.equal(reboot.json().code, 'ENDPOINT_COMMAND_LEVEL_MISMATCH');
     const bad = await create('message.show', { params: { text: '' } });
     assert.equal(bad.statusCode, 400);
     assert.equal(bad.json().code, 'VALIDATION_FAILED');
@@ -324,6 +340,20 @@ describe('指令管理 API(:51240)', () => {
     assert.equal(post['x-audit-level'], 'meta');
     assert.equal(doc.paths['/v1/commands/{commandId}']!.get!['x-permission'], 'endpoint.device.read');
     assert.equal(doc.paths['/v1/batches/basic-commands']!.post!['x-permission'], 'endpoint.command.basic');
+    const admin = doc.paths['/v1/devices/{deviceId}/admin-commands']!.post!;
+    assert.deepEqual([admin['x-permission'], admin['x-audit-level']], ['endpoint.command.admin', 'meta']);
+  });
+
+  it('admin 路徑(P6):agent.upgrade 202;一般指令 400 ENDPOINT_COMMAND_LEVEL_MISMATCH', async () => {
+    const admin = (kind: string, params: Record<string, unknown>) =>
+      mgmt.inject({ method: 'POST', url: `/v1/devices/${device.deviceId}/admin-commands`, payload: { kind, params } });
+    const ok = await admin('agent.upgrade', { component: 'agent' });
+    assert.equal(ok.statusCode, 202, ok.body);
+    assert.deepEqual([ok.json().kind, ok.json().level], ['agent.upgrade', 'admin']);
+    const wrong = await admin('inventory.collect', {});
+    assert.deepEqual([wrong.statusCode, wrong.json().code], [400, 'ENDPOINT_COMMAND_LEVEL_MISMATCH']);
+    const fromBasic = await create('agent.upgrade', { params: { component: 'agent' } });
+    assert.deepEqual([fromBasic.statusCode, fromBasic.json().code], [400, 'ENDPOINT_COMMAND_LEVEL_MISMATCH']);
   });
 });
 

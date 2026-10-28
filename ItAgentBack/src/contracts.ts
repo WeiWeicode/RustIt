@@ -13,13 +13,14 @@ export const CONTRACT_IDS = {
   wsEnvelope: 'https://giganexus.local/rustit/contracts/ws-envelope.schema.json',
   sync: 'https://giganexus.local/rustit/contracts/sync.schema.json',
   event: 'https://giganexus.local/rustit/contracts/event.schema.json',
+  watchdog: 'https://giganexus.local/rustit/contracts/watchdog.schema.json',
 } as const;
 
 export function contractsDir(env: NodeJS.ProcessEnv = process.env): string {
   return env.CONTRACTS_DIR ?? path.resolve(process.cwd(), '../docs/contracts');
 }
 
-export function loadContract(name: 'inventory' | 'ws-envelope' | 'sync' | 'event', dir = contractsDir()): Record<string, unknown> {
+export function loadContract(name: 'inventory' | 'ws-envelope' | 'sync' | 'event' | 'watchdog', dir = contractsDir()): Record<string, unknown> {
   const file = path.join(dir, `${name}.schema.json`);
   try {
     return JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
@@ -55,12 +56,26 @@ export interface HelloBody {
   agent_time?: string;
   /** 硬體指紋,空字串 = 無法取得(A1) */
   hw_fingerprint?: string;
+  /** 裝置憑證到期日(P5 告警 cert_expiring) */
+  cert_not_after?: string;
+}
+
+/** heartbeat.body.health(P5,PLATFORM-PLAN §4.3);取不到的欄位省略 */
+export interface HeartbeatHealth {
+  cpu_pct?: number;
+  mem_used_pct?: number;
+  disk_min_free_pct?: number;
+  disk_min_free_drive?: string;
+  uptime_s?: number;
+  agent_rss_mb?: number;
 }
 
 /** 主機下發設定(ws-envelope AgentSettings;PLATFORM-PLAN §4.2) */
 export interface AgentSettings {
   inventory_interval_sec: number;
   usb_events: boolean;
+  /** 心跳是否附健康摘要(P5;舊版 Agent 忽略) */
+  health_enabled?: boolean;
 }
 
 export interface HelloAckBody {
@@ -89,6 +104,69 @@ export interface SyncResponse {
 /** POST /agent/v1/events(event.schema.json) */
 export interface EventsRequest {
   events: { event_id: string; type: string; occurred_at: string; data?: Record<string, unknown> }[];
+}
+
+/** POST /agent/v1/watchdog/report(watchdog.schema.json;P5-2) */
+export interface WatchdogReportRequest {
+  watchdog_version: string;
+  reported_at: string;
+  agent: {
+    service_state: string;
+    start_type: string;
+    pid?: number;
+    exe_present?: boolean;
+    status_ok?: boolean;
+    status_at?: string;
+    version?: string;
+    ws_connected?: boolean;
+    last_heartbeat_ack?: string;
+    last_error?: string;
+  };
+  agent_restarts_24h?: number;
+  cert_not_after?: string;
+  events?: EventsRequest['events'];
+  /** 進行中或剛結束的升級(P6) */
+  upgrade?: {
+    component: 'agent' | 'watchdog';
+    target_version: string;
+    from_version?: string;
+    state: 'downloading' | 'verifying' | 'installing' | 'succeeded' | 'failed' | 'rolled_back';
+    attempts?: number;
+    error_code?:
+      | 'DOWNLOAD_FAILED'
+      | 'HASH_MISMATCH'
+      | 'SIGNATURE_INVALID'
+      | 'SIGNER_NOT_TRUSTED'
+      | 'PREPARE_TIMEOUT'
+      | 'STOP_TIMEOUT'
+      | 'REPLACE_FAILED'
+      | 'HEALTH_CHECK_FAILED'
+      | 'ROLLBACK_FAILED'
+      | 'DISK_FULL';
+    error_message?: string;
+  };
+}
+
+/** 一個元件的目標版本(watchdog.schema.json UpgradeTarget;P6) */
+export interface UpgradeTarget {
+  version: string;
+  url: string;
+  sha256: string;
+  size_bytes: number;
+  signer_thumbprints: string[];
+}
+
+export interface WatchdogTargets {
+  agent: UpgradeTarget | null;
+  watchdog: UpgradeTarget | null;
+}
+
+export interface WatchdogReportResponse {
+  server_time: string;
+  accepted: string[];
+  report_interval_sec: number;
+  /** 未啟用升級(RELEASES_DIR 未設定)時為 null */
+  target: WatchdogTargets | null;
 }
 
 export interface EventsResponse {

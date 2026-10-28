@@ -1,0 +1,9 @@
+{
+  "v": 1,
+  "type": "prepare_shutdown",
+  "id": "6c2e8a1f-4b3d-4e5f-9a0b-1c2d3e4f5a61",
+  "body": {
+    "reason": "upgrade",
+    "timeout_sec": 90
+  }
+}

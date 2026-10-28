@@ -1,0 +1,23 @@
+{
+  "v": 1,
+  "type": "command_update",
+  "id": "8d4e0f3a-6b5c-4d7e-9f8a-3c4d5e6f7a21",
+  "body": {
+    "command_id": "6c1d9e2f-3a4b-4c5d-8e6f-7a8b9c0d1e21",
+    "state": "succeeded",
+    "progress": 100,
+    "result": {
+      "exit_code": 0,
+      "reboot_required": false,
+      "signer": "b1c2d3e4f5a60718293a4b5c6d7e8f9012345678",
+      "signer_subject": "CN=Example Software Ltd.",
+      "duration_ms": 41200,
+      "detected": true,
+      "already_installed": false,
+      "installed_version": "24.09.00.0",
+      "previous_version": "21.07",
+      "log_tail": "MSI (s) (A0:B4) [08:01:40:120]: Product: 7-Zip 24.09 (x64 edition) -- Installation completed successfully."
+    },
+    "occurred_at": "2026-10-20T08:01:41.000Z"
+  }
+}

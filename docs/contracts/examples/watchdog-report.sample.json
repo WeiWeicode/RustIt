@@ -1,0 +1,39 @@
+{
+  "watchdog_version": "0.1.0",
+  "reported_at": "2026-10-20T01:05:00.000Z",
+  "agent": {
+    "service_state": "running",
+    "start_type": "auto",
+    "pid": 4321,
+    "exe_present": true,
+    "status_ok": true,
+    "status_at": "2026-10-20T01:04:30.000Z",
+    "version": "0.6.0",
+    "ws_connected": true,
+    "last_heartbeat_ack": "2026-10-20T01:04:29.000Z"
+  },
+  "agent_restarts_24h": 1,
+  "cert_not_after": "2027-10-14T08:00:00Z",
+  "events": [
+    {
+      "event_id": "8d2f4a6b-1c3e-4f5a-9b7c-0d1e2f3a4b51",
+      "type": "agent_restarted",
+      "occurred_at": "2026-10-20T01:02:10.000Z",
+      "data": {
+        "cause": "crashed",
+        "previous_pid": 4100,
+        "pid": 4321
+      }
+    },
+    {
+      "event_id": "8d2f4a6b-1c3e-4f5a-9b7c-0d1e2f3a4b52",
+      "type": "agent_service_stopped",
+      "occurred_at": "2026-10-20T01:03:00.000Z",
+      "data": {
+        "state": "stopped",
+        "start_type": "auto",
+        "restarted": true
+      }
+    }
+  ]
+}
