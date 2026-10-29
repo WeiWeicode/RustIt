@@ -14,7 +14,8 @@ name: giganexus-ita-${GW_ENV:?GW_ENV 必須設定(test / prod)}
 
 services:
   endpoint-server:
-    image: giganexus/it-agent-back:${IMAGE_TAG:-dev}
+    # 測試區在主機上建置(本機名稱);正式區 ITA_IMAGE_PREFIX=<GitLab Registry>/giganexus/rustit,拉取 main 建置的映像檔
+    image: ${ITA_IMAGE_PREFIX:-giganexus}/it-agent-back:${IMAGE_TAG:-dev}
     build:
       context: ../..
       dockerfile: ItAgentBack/Dockerfile
