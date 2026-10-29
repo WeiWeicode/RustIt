@@ -8,7 +8,8 @@
 #>
 
 $GatewayHosts = @{
-    test = @('10.10.130.124')
+    # :443 用公司 *.gigasolar.com.tw 憑證,以 DNS 名稱連線(IP 連線憑證名稱不符;2026-10-29 S1-1 實測)
+    test = @('giganexus-test.gigasolar.com.tw')
     prod = @('giganexus.gigasolar.com.tw')
 }
 
@@ -25,7 +26,10 @@ function Read-GatewayApiKey([string]$ApiKeyFile) {
     # 以 SID 比對(中文版 Windows 名稱會在地化);Domain Users、其他同仁等任何其他身分有權限就拒絕
     $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $okSids = @($me, 'S-1-5-18', 'S-1-5-32-544')
-    $acl = Get-Acl -LiteralPath $f
+    # 本人連讀取權限都沒有時(例如 icacls 以帳號名稱授權,被解析成其他網域的同名帳號),Get-Acl 會丟 UnauthorizedAccess
+    try { $acl = Get-Acl -LiteralPath $f } catch [UnauthorizedAccessException] {
+        throw "讀不到 API Key 檔的權限設定(本人沒有權限):$f;以系統管理員執行 icacls `"$f`" /setowner `"*${me}`",再 icacls `"$f`" /inheritance:r /grant:r `"*${me}:(R)`" `"*S-1-5-18:(F)`" `"*S-1-5-32-544:(F)`""
+    }
     $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
     if ($owner -ne $me -and $owner -ne 'S-1-5-32-544') { throw "API Key 檔的擁有者不是本人(SID $owner):$f" }
     $other = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | Where-Object {
