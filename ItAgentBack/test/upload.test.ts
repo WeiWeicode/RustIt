@@ -13,11 +13,12 @@ import Fastify from 'fastify';
 import { AppError } from '../src/errors.js';
 import { buildMgmtApp } from '../src/mgmt-app.js';
 import { SoftwareFiles } from '../src/services/software-files.js';
+import { SoftwareService } from '../src/services/software-service.js';
 import { parseSignResult, SignQueue } from '../src/services/upload-files.js';
 import { UploadService } from '../src/services/upload-service.js';
 import type { Actor, NewUpload, UploadRecord, UploadSignedPatch, UploadState, UploadStore } from '../src/stores/types.js';
-import { ALL, CONTRACTS_DIR, only, setup } from './helpers.js';
-import { softwareDir } from './software-helpers.js';
+import { ALL, CONTRACTS_DIR, MemoryCommandStore, only, setup } from './helpers.js';
+import { MemorySoftwareStore, softwareDir } from './software-helpers.js';
 
 const log = Fastify({ logger: { level: 'silent' } }).log;
 const ctx = { log, requestId: 'req-up-1', scope: ALL };
@@ -31,6 +32,9 @@ class MemoryUploadStore implements UploadStore {
   rows: UploadRecord[] = [];
   async listUploads(f: { state?: UploadState }) {
     return this.rows.filter((r) => !f.state || r.state === f.state).toReversed();
+  }
+  async uploadsForFile(fileName: string) {
+    return this.rows.filter((r) => r.fileName.toLowerCase() === fileName.toLowerCase()).toReversed().slice(0, 20).map((r) => ({ ...r }));
   }
   async getUpload(uploadId: string) {
     const r = this.rows.find((x) => x.uploadId === uploadId);
@@ -132,7 +136,14 @@ function setupUploads(opts: { maxConcurrentUploads?: number; idleMs?: number } =
     writeFileSync(path.join(queueRoot, `${uploadId}.result.json`), JSON.stringify(result));
     return sha;
   };
-  return { ...base, store, incoming, software, queueRoot, queue, uploads, workstation };
+  // P7 目錄共用同一個軟體庫與上傳紀錄(登錄時檢查上傳紀錄,資安審查 M1)
+  const catalog = new SoftwareService(new MemorySoftwareStore(base.sql, new MemoryCommandStore(base.sql)), new SoftwareFiles(software.root), base.sql, {
+    now: base.clock.now,
+    uploads: store,
+  });
+  const register = (fileName: string, who = IT) =>
+    catalog.register(ctx, who, { name: fileName.split('/')[0]!, version: fileName.split('/')[1]!, fileName, installerType: 'nsis', detectType: 'display_name', detectValue: 'Setup%' });
+  return { ...base, store, incoming, software, queueRoot, queue, uploads, workstation, catalog, register };
 }
 
 describe('上傳與送簽(UploadService)', () => {
@@ -298,6 +309,48 @@ describe('上傳與送簽(UploadService)', () => {
     assert.deepEqual(await env.uploads.scanResults(ctx), { signed: 0, rejected: 1 });
     const r = await env.uploads.get(ctx, u.uploadId);
     assert.deepEqual([r.state, r.rejectCode, r.rejectReason, r.rejectedByEmp], ['rejected', 'VENDOR_NOT_ALLOWED', '原廠簽章者不在白名單', null]);
+  });
+
+  it('P7 登錄對照上傳紀錄(M1):signed 且雜湊相符才可登錄;送簽中 / 已駁回 / 簽章後被換檔 409;沒有紀錄(過渡期)可登錄', async () => {
+    // 送簽中:簽章人員提早把檔案放進軟體庫也不能登錄
+    const q = await send(env, IT, FILE, Buffer.from('MZ-npp'));
+    await env.uploads.approve(ctx, IT2, q.uploadId);
+    env.software.put(FILE, 'MZ-early');
+    await assert.rejects(env.register(FILE), { code: 'ITA_UPLOAD_NOT_SIGNED' });
+    // 未登錄清單帶最新一筆上傳紀錄
+    let files = await env.catalog.unregisteredFiles(ctx);
+    assert.deepEqual(files.items.map((f) => [f.fileName, f.upload?.state]), [[FILE, 'queued']]);
+    // 工作站拒絕:仍不能登錄
+    writeFileSync(path.join(env.queueRoot, `${q.uploadId}.result.json`), JSON.stringify({ schema: 'sign-result/1', upload_id: q.uploadId, state: 'rejected', reject_code: 'VENDOR_NOT_ALLOWED' }));
+    await env.uploads.scanResults(ctx);
+    await assert.rejects(env.register(FILE), { code: 'ITA_UPLOAD_NOT_SIGNED' });
+
+    // signed:可登錄,詳情帶上傳者、核可人、工作站回報的原廠簽章者
+    const other = 'Other/2.0/setup.exe';
+    const u = await send(env, IT, other, Buffer.from('MZ-other'));
+    await env.uploads.approve(ctx, IT2, u.uploadId);
+    env.workstation(u.uploadId);
+    await env.uploads.scanResults(ctx);
+    files = await env.catalog.unregisteredFiles(ctx);
+    const ref = files.items.find((f) => f.fileName === other)!.upload!;
+    assert.deepEqual([ref.state, ref.uploadedBy.emp, ref.approvedBy?.emp, ref.signedSigner], ['signed', IT.emp, IT2.emp, SIGNER]);
+    const pkg = await env.register(other);
+    const detail = await env.catalog.get(ctx, pkg.packageId);
+    assert.deepEqual([detail.upload?.uploadId, detail.upload?.vendorSignerSubject], [u.uploadId, 'CN=Don HO']);
+
+    // signed 之後軟體庫檔案被換掉:409
+    const third = 'Third/3.0/setup.exe';
+    const t = await send(env, IT, third, Buffer.from('MZ-third'));
+    await env.uploads.approve(ctx, IT2, t.uploadId);
+    env.workstation(t.uploadId);
+    await env.uploads.scanResults(ctx);
+    env.software.put(third, 'MZ-swapped');
+    await assert.rejects(env.register(third), { code: 'ITA_UPLOAD_NOT_SIGNED' });
+
+    // 沒有上傳紀錄(簽章人員直接放進軟體庫,S1 過渡期):可登錄,詳情 upload 為 null
+    env.software.put('Direct/1.0/setup.exe', 'MZ-direct');
+    const d = await env.register('Direct/1.0/setup.exe');
+    assert.equal((await env.catalog.get(ctx, d.packageId)).upload, null);
   });
 
   it('parseSignResult:upload_id 必須一致、指紋與雜湊格式、reject_code 格式', () => {

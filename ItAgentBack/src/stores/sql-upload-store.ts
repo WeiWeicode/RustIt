@@ -68,6 +68,13 @@ export class SqlUploadStore implements UploadStore {
     return row ? toUpload(row) : null;
   }
 
+  async uploadsForFile(fileName: string): Promise<UploadRecord[]> {
+    const r = await (await this.request())
+      .input('file', sql.NVarChar(260), fileName)
+      .query(`SELECT TOP (20) ${COLS} FROM ita.software_upload WHERE file_name = @file ORDER BY uploaded_at DESC, id DESC`);
+    return (r.recordset as Row[]).map(toUpload);
+  }
+
   async addUpload(n: NewUpload): Promise<UploadRecord> {
     const uploadId = randomUUID();
     try {

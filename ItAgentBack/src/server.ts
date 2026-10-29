@@ -62,17 +62,20 @@ if (config.releasesDir)
   );
 // 軟體派送(P7):SOFTWARE_DIR 未設定時不啟用(軟體 API 與套件下載不註冊;software.* 指令沒有 kindHook 會被拒絕)
 let commands: CommandDispatcher | undefined;
+// 上傳與送簽(S1-3):INCOMING_DIR、SIGN_QUEUE_DIR 都設定且已啟用軟體派送才啟用(才需要 migration 0011);登錄時也據此檢查上傳紀錄(M1)
+const uploadStore = config.softwareDir && config.incomingDir && config.signQueueDir ? new SqlUploadStore(() => sql.connection()) : undefined;
 const software = config.softwareDir
   ? new SoftwareService(new SqlSoftwareStore(() => sql.connection()), new SoftwareFiles(config.softwareDir, config.softwareMaxBytes), sql, {
       commands: () => commands,
       onPackageTampered: (ctx, deviceRef, detail) => alerts!.onPackageTampered(ctx, deviceRef, detail),
+      uploads: uploadStore,
     })
   : undefined;
-// 上傳與送簽(S1-3):INCOMING_DIR、SIGN_QUEUE_DIR 都設定且已啟用軟體派送才啟用;incoming\ 讀取規則與軟體庫相同
+// incoming\ 讀取規則與軟體庫相同
 const uploads =
-  config.softwareDir && config.incomingDir && config.signQueueDir
+  uploadStore && config.softwareDir && config.incomingDir && config.signQueueDir
     ? new UploadService(
-        new SqlUploadStore(() => sql.connection()),
+        uploadStore,
         new SoftwareFiles(config.incomingDir, config.softwareMaxBytes),
         new SignQueue(config.signQueueDir),
         new SoftwareFiles(config.softwareDir, config.softwareMaxBytes),
