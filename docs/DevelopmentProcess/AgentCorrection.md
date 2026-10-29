@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。本檔自 P7-2 起記錄 `RustAgent/` 的修改,先前的 Agent 變更記在 `NewFeatures.md` / `BugFix.md`。
 
+## 2026-10-29 S1-1 實測修正:Gateway 允許清單改 DNS 名稱、金鑰檔權限錯誤訊息
+- 內容:測試區 S1-1 實測時 `https://10.10.130.124` 的 TLS 驗證失敗(`:443` 是公司 `*.gigasolar.com.tw` 憑證,以 IP 連線名稱不符),`installer/gateway-api.ps1` `$GatewayHosts` 測試區改為 `giganexus-test.gigasolar.com.tw`(DNS 已解析到 10.10.130.124;正式區原本就是 DNS 名稱)。另外,以帳號名稱 `icacls` 授權時,被解析成其他網域的同名帳號(`GSC\S112009` ≠ `GSMCTW\s112009`),本人沒有權限,`Get-Acl` 只丟 UnauthorizedAccess:改為捕捉後提示以 SID 重設擁有者與權限。RUNBOOK §1 上架步驟補 SID 設定指令與 DNS 名稱。
+- 檔案:`RustAgent/installer/gateway-api.ps1`;`docs/RUNBOOK.md`、`docs/HANDOFF.md`。
+- 驗證:開發機(10.10.112.13)`publish-release.ps1 -Dir C:\release-out -Environment test -GatewayUrl https://giganexus-test.gigasolar.com.tw -ApiKeyFile <金鑰檔>`:印出 `REGISTERED agent 0.9.4 published` 並在複製前停止(S1-1 通過)。
+
 ## 2026-10-28 P7 重驗觀察:延後狀態在畫面上落後一次檢查(Agent 0.9.4)
 - 內容:需求方 2026-10-28 決定查修(驗收報告 §10.2-3:派送當下日誌已有延後行,畫面要到下一次檢查前後才顯示「延後中」)。分支 `feature/p7-deferred-report`。根因在 Agent 的 command_update 送出 / ack(endpoint-server 與 GigaItApp 不需修改):派送時先存 `running`、幾毫秒後存 `running + result.deferred`(本機每個指令只保留最新一則)。(1)`ws.rs` `flush_updates` 以「同一 state 在 60 秒內不重送」略過,第二則與第一則同為 `running` 而沒送出;(2)接著主機回第一則 `running` 的 ack,`store.rs` `command_reported` 只比 state,把尚未送出的延後那則一起標成已回報,之後不再重送;要等 5 分鐘後下一次檢查保存新的 `next_check_at` 才送出。修正:ack 只有在本機最新的 update 仍是被確認的那則(整則比對,在同一把 store 鎖內)才標記;重送節流改比 state 與 result,result 不同(延後開始 / 下次檢查時間 / 解除)一定立即送,只有進度不同的 running 仍 60 秒節流(下載中進度不逐次送,與先前相同;被略過的最新進度不再被舊 ack 標掉,下個心跳補送);同一指令只留最新一則等 ack 的信封(資安稽核 L1:主機一直不回 ack 時不在記憶體累積)。版本 0.9.3 → **0.9.4**;Watchdog 不改。
 - 檔案:`RustAgent/crates/agent/src/ws.rs`、`src/store.rs`、`agent/Cargo.toml`、`Cargo.lock`。
