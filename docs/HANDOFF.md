@@ -25,7 +25,7 @@
 - **待合併**:RustIt **!76** `feature/s1-3-register-check`(M1 登錄檢查 + 本段 HANDOFF;10-28 的 HANDOFF 提交在 !75 合併後才推,一併帶入)。
 - **下一步(依序)**
   1. ~~**S1-1 測試區實測**~~ ✅ 2026-10-29:batch 181 已發佈、API Key `rustit-publish-test`(只授 `endpoint.release.registry`、限 10.10.112.13/32)、`publish-release.ps1 -GatewayUrl https://giganexus-test.gigasolar.com.tw -ApiKeyFile …` 查到 `agent 0.9.4 published` 並在複製前停止。`$GatewayHosts` 測試區改為 DNS 名稱(IP 連線與公司 `*.gigasolar.com.tw` 憑證名稱不符,`fix/s1-gateway-hosts`)。另已建 `rustit-sign-test`(只授 `endpoint.software.sign-check`、限 10.10.130.124/32,金鑰檔在主機 2 `C:\Users\user\rustit-sign-test.key`;若從主機 2 呼叫被 IP 擋下,依 BFF 日誌的來源 IP 調整)。主機 2 上傳區已掛載(`rustit-upload`)、`ita.env` 已改、`uploads: true`;**`/etc/fstab` 尚未加 `nas-rustit-rw` 兩行**
-  2. **S1-3 上測試區**(!75 合併後):SQL 套用 migration 0011;NAS 管理員建立上傳帳號(只能寫 `RustIT\test\incoming\`、`sign-queue\`;`sign-queue\` 不開給 IT 群組);本人在主機 2 執行 `host2-set-nas-upload.sh` 並改 `ita.env`;Gateway 發佈 `endpoint.software.upload.*` 路由、建立工作站 API Key(只授 `endpoint.software.sign-check`)。之後照 RUNBOOK §3.1 實跑一筆(上傳 → 第二人核可 → 工作站簽 → signed → P7 登錄)。
+  2. **S1-3 上測試區**(!75 合併後):SQL 套用 migration 0011;NAS 管理員建立上傳帳號(兩區共用 `rustit-upload`,只能寫兩區的 `incoming\`、`sign-queue\`,讀兩區 `releases\`、`software\`;`sign-queue\` 不開給 IT 群組;2026-10-29 放寬,設計 §1);本人在主機 2 執行 `host2-set-nas-upload.sh` 並改 `ita.env`;Gateway 發佈 `endpoint.software.upload.*` 路由、建立工作站 API Key(只授 `endpoint.software.sign-check`)。之後照 RUNBOOK §3.1 實跑一筆(上傳 → 第二人核可 → 工作站簽 → signed → P7 登錄)。
   3. **S1-4 GigaItApp「上傳與簽章」Tab**(2026-10-29 程式完成,GigaItApp **!13** 待合併;合併後 CI 登記節點 `it.endpoint-software.upload`,照 GigaItApp Gherkin「上傳與簽章」以兩個 IT 帳號實測)(設計 §5,跨 repo 已同意):上傳 / 登錄 incoming 檔案、清單、核可 / 駁回(上傳者本人的核可按鈕停用);工作站回報欄位標「工作站回報(未驗證)」,`reject_reason` / `notes` 不用 `v-html`。
   4. S1-3 待做:~~P7 登錄時檢查上傳紀錄(M1)~~ 已做(2026-10-29:有上傳紀錄但非 `signed`、或簽章後被換檔回 409 `ITA_UPLOAD_NOT_SIGNED`;沒有紀錄在 S1 過渡期仍可登錄;`GET /v1/software/files` 與套件詳情帶 `upload`);`incoming\` 的 `.part-*` 暫存檔與過期原始檔清理(保留期限待決)。
   5. VM 驗證重簽後實際安裝(Notepad++ NSIS、7-Zip MSI;ADR 0005「先做」第 2 項),失敗改附加簽章或改設計。
@@ -42,11 +42,11 @@
      2. 0.9.3 草稿是否撤回由需求方決定(撤回後版本號不可重用)。
      3. **查「重啟 Agent 後第一筆派送偶發 `DOWNLOAD_FAILED` HTTP 404 `ITA_PACKAGE_NOT_FOUND`」**(報告 §11.4,未查明):下載請求在指令推送後約 27 毫秒到,`software-service.ts` `download()` 以 `activeInstallPackages()`(`state IN ('sent','acked','running')`)判斷「被指派」,回 `assigned:false`;重派 2 分鐘後成功。理論上 `trySend()` 先改 `sent` 再推送,看不出競爭條件在哪;可在重啟 Agent 後連派數次重現。
      4. 下次發 Watchdog **0.3.6**,一起修 Windows Installer 忙碌判斷的擁有者問題(設計 §8.2-16)。
-     5. **上線前準備**(正式區):migration 0009、0010 先套 `giganexus_It_Agent`、正式程式碼簽章憑證(IT AD CS)與 `-Environment prod` 演練、主機 3 掛 `RustIT\prod\...`、NAS 寫入群組分開與唯讀掛載帳號、上架腳本查重改用唯讀 API / 只能 SELECT 的帳號。
+     5. **上線前準備**(正式區):migration 0009、0010 先套 `giganexus_It_Agent`、正式程式碼簽章憑證(IT AD CS)與 `-Environment prod` 演練、主機 3 掛 `RustIT\prod\...`(2026-10-29 已唯讀掛上 `/srv/giganexus/nas-rustit`,`ita.env` 指向 `prod/releases`、`prod/software`;待 NAS 管理員開 `rustit-upload` 讀取權)、簽章人員的 NAS 寫入群組分開、上架腳本查重改用唯讀 API / 只能 SELECT 的帳號。
    - **上線前待辦 / 待驗**
      - Watchdog 的 Windows Installer 忙碌判斷有和 L3 同樣的擁有者問題(設計 §8.2-16):這次不修,下次發 Watchdog **0.3.6** 時一起修。
      - 驗收未涵蓋:#12 批次 > 20 台第二人核可、下載 429、Watchdog 在軟體派送中延後升級 Agent、#3 第 3 台電腦、#11「恢復後繼續」與 `DEFERRED_TIMEOUT`(需要實機電池或計量網路;`RUSTIT_TEST_POWER` 是 Agent 行程的環境變數,改了要重啟,重啟會終止延後中的指令,無法用旗標驗)。
-     - 上架腳本查重用的 SQL 帳號可以寫入,而且要以 root 執行 docker:正式區前改成唯讀 API 或只能 SELECT 的帳號。NAS `RustIT\test`、`RustIT\prod` 的寫入群組要分開(NAS 管理員);NAS 掛載帳號改成唯讀帳號。
+     - 上架腳本查重用的 SQL 帳號可以寫入,而且要以 root 執行 docker:正式區前改成唯讀 API 或只能 SELECT 的帳號。簽章人員的 NAS `RustIT\test`、`RustIT\prod` 寫入群組要分開(NAS 管理員);endpoint-server 的 NAS 帳號兩區共用、寫不到 `releases\`、`software\`(2026-10-29 放寬,S1 設計 §1)。
      - 正式程式碼簽章憑證(IT AD CS)與 `-Environment prod` 演練;主機 3 掛 `RustIT\prod\...`。
      - 已知限制(設計 §8):`REMOVE=` 逐一列出全部功能,效果等於 `REMOVE=ALL` 卻擋不到;複驗沒有排隊中的安裝時不發告警;`listPackages` 最多 500 筆;版本字串無法解析時當成已安裝;逾時前的半成品不回復;撤回後重新登錄等於重新認可目前內容;修改已發佈套件的逾時不需要第二人確認;名稱含「rustit」的軟體 GigaItApp 不能移除(`UNINSTALL_NOT_SUPPORTED`),測試用的 TestInst / SlowMSI 要在 VM 手動清理。
    - **需求方清理項目**
@@ -84,7 +84,7 @@
    - **上線前待辦 / 待驗**
      - Watchdog 的 Windows Installer 忙碌判斷有和 L3 同樣的擁有者問題(設計 §8.2-16):這次不修,下次發 Watchdog **0.3.6** 時一起修。
      - 驗收未涵蓋:#12 批次 > 20 台第二人核可、下載 429、Watchdog 在軟體派送中延後升級 Agent、#3 第 3 台電腦、#11「恢復後繼續」(需要實機電池或計量網路)。
-     - 上架腳本查重用的 SQL 帳號可以寫入,而且要以 root 執行 docker:正式區前改成唯讀 API 或只能 SELECT 的帳號。NAS `RustIT\test`、`RustIT\prod` 的寫入群組要分開(NAS 管理員);NAS 掛載帳號改成唯讀帳號。
+     - 上架腳本查重用的 SQL 帳號可以寫入,而且要以 root 執行 docker:正式區前改成唯讀 API 或只能 SELECT 的帳號。簽章人員的 NAS `RustIT\test`、`RustIT\prod` 寫入群組要分開(NAS 管理員);endpoint-server 的 NAS 帳號兩區共用、寫不到 `releases\`、`software\`(2026-10-29 放寬,S1 設計 §1)。
      - 正式程式碼簽章憑證(IT AD CS)與 `-Environment prod` 演練;主機 3 掛 `RustIT\prod\...`。
      - 已知限制(設計 §8):`REMOVE=` 逐一列出全部功能,效果等於 `REMOVE=ALL` 卻擋不到;複驗沒有排隊中的安裝時不發告警;`listPackages` 最多 500 筆;版本字串無法解析時當成已安裝;逾時前的半成品不回復;撤回後重新登錄等於重新認可目前內容;修改已發佈套件的逾時不需要第二人確認。
    - **驗收後清理(需求方)**:VM 與開發機上的測試軟體、開發機匯入的測試根憑證、開發機 `agent.toml` 還原(備份 `.bak-20261027`)、NAS 測試檔(套件撤回後再刪)、告警 `d28ac339-8cc2-44a6-8ae3-f4fe1c87e1cb`、VM 兩張測試根憑證(等正式憑證到位)。

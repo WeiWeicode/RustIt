@@ -5,7 +5,8 @@
 #   1. 寫入 /srv/giganexus/nas-secrets/rustit-nas.cred(root 擁有、0400;不放進 ita-secrets,因為該目錄會被 chown 給容器內的 node 使用者)
 #   2. 以 CIFS **唯讀**掛載 //10.10.130.31/docker-folder/RustIT 到 /srv/giganexus/nas-rustit(除非 --no-mount),並檢查 test/releases/、test/software/ 存在(B-3:兩區分開,測試區用 RustIT\test\)
 #   3. 印出 ita.env 要加的兩行與 /etc/fstab 建議行(不自動改 fstab、不自動改 ita.env)
-# NAS 帳號必須是唯讀帳號(IT 可寫、endpoint-server 帳號唯讀,ADR 0002)。Agent 不拿 NAS 帳密、不直接連 NAS。
+# NAS 帳號寫不到任何一區的 releases\、software\(IT / 簽章人員可寫、endpoint-server 只讀,ADR 0002);可與上傳帳號共用
+# (兩區 incoming\、sign-queue\ 可寫,需求方 2026-10-29,docs/S1-SIGNING-DESIGN.md §1),唯讀靠掛載選項 ro。Agent 不拿 NAS 帳密、不直接連 NAS。
 set -eu
 CRED_DIR=/srv/giganexus/nas-secrets
 CRED=$CRED_DIR/rustit-nas.cred
@@ -20,7 +21,7 @@ chown root:root "$CRED_DIR"; chmod 700 "$CRED_DIR"
 
 # ---------- 帳密檔(mount.cifs credentials 格式) ----------
 if [ ! -f "$CRED" ]; then
-  printf 'NAS 唯讀帳號(RustIT\\ 唯讀):'; read -r u
+  printf 'NAS 帳號(讀得到 RustIT\\<區>\\releases、software,寫不到):'; read -r u
   [ -n "$u" ] || { echo "帳號空白,中止" >&2; exit 1; }
   stty -echo; printf 'NAS 密碼:'; read -r p; stty echo; echo
   [ -n "$p" ] || { echo "密碼空白,中止" >&2; exit 1; }
