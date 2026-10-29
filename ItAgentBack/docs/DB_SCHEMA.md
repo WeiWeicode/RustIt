@@ -114,6 +114,7 @@ Agent 回報(0002,`POST /agent/v1/events`;`event.schema.json`):`offline_period`�
 - **兩人**:核可人不可是上傳者,程式、UPDATE 條件、CHECK `ck_software_upload_approver` 三道。
 - 工作站回報欄位(`vendor_signer`、`vendor_signer_subject`、`vendor_check`、`signed_signer`、`sign_operator`)只供覆核顯示,不作為安全判斷;`signed_sha256` 為主機重算值。
 - **部署順序:先套用 0011,再設定 `INCOMING_DIR` / `SIGN_QUEUE_DIR`**;未設定時上傳 API 不註冊、不讀寫此表。
+- `file_deleted_by_emp` / `file_deleted_at`(0012,2026-10-29):刪除 `incoming\` 原始檔的人與時間(紀錄保留);只有 `rejected` 可刪,程式條件更新(`state = 'rejected' AND file_deleted_at IS NULL`)與 CHECK `ck_software_upload_file_deleted`(`file_deleted_at IS NULL OR state = 'rejected'`)。**部署順序:先套用 0012,再部署新版 endpoint-server**(新版的上傳查詢都會讀這兩欄;未套用時上傳 API 回 503)。
 
 ### 離線補傳比對(`DeviceService.sync`,`POST /agent/v1/sync`)
 

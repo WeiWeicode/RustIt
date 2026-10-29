@@ -906,6 +906,9 @@ export interface UploadRecord {
   signOperator: string | null;
   signedSha256: string | null;
   signedAt: Date | null;
+  /** 刪除 incoming\ 原始檔的人與時間(0012;只有 rejected 可刪) */
+  fileDeletedByEmp: string | null;
+  fileDeletedAt: Date | null;
 }
 
 export interface NewUpload {
@@ -944,4 +947,8 @@ export interface UploadStore {
   rejectUpload(uploadId: string, expect: UploadState[], code: string, reason: string | null, actor: Actor | null, at: Date): Promise<boolean>;
   /** queued → signed */
   markSigned(uploadId: string, patch: UploadSignedPatch): Promise<boolean>;
+  /** 同一路徑(不分大小寫)所有紀錄的狀態(不限筆數,去重複):刪除 incoming\ 原始檔前檢查 */
+  fileStates(fileName: string): Promise<UploadState[]>;
+  /** 同一路徑(不分大小寫)rejected 且尚未記錄刪除的紀錄寫入刪除人與時間(條件更新);回傳筆數 */
+  markFilesDeleted(fileName: string, emp: string, at: Date): Promise<number>;
 }

@@ -16,7 +16,8 @@ const isDuplicateKey = (err: unknown) => [2627, 2601].includes((err as { number?
 
 const COLS = `id, upload_id, file_name, sha256, size_bytes, state, source, notes, uploaded_by_emp, uploaded_by_name, uploaded_at,
   approved_by_emp, approved_by_name, approved_at, reject_code, reject_reason, rejected_by_emp, rejected_at,
-  vendor_signer, vendor_signer_subject, vendor_check, signed_signer, sign_operator, signed_sha256, signed_at`;
+  vendor_signer, vendor_signer_subject, vendor_check, signed_signer, sign_operator, signed_sha256, signed_at,
+  file_deleted_by_emp, file_deleted_at`;
 
 function toUpload(r: Row): UploadRecord {
   return {
@@ -45,6 +46,8 @@ function toUpload(r: Row): UploadRecord {
     signOperator: str(r.sign_operator),
     signedSha256: str(r.signed_sha256)?.toLowerCase() ?? null,
     signedAt: date(r.signed_at),
+    fileDeletedByEmp: str(r.file_deleted_by_emp),
+    fileDeletedAt: date(r.file_deleted_at),
   };
 }
 
@@ -145,5 +148,25 @@ export class SqlUploadStore implements UploadStore {
           signed_signer = @ss, sign_operator = @op, signed_sha256 = @sha, signed_at = @at
         WHERE upload_id = @uid AND state = 'queued'`);
     return r.rowsAffected[0] === 1;
+  }
+
+  // 不限筆數(資安審查 L1:只看最新 20 筆時,較舊的 signed 會被漏掉);比對方式同 uploadsForFile
+  async fileStates(fileName: string): Promise<UploadState[]> {
+    const r = await (await this.request())
+      .input('file', sql.NVarChar(260), fileName)
+      .query(`SELECT DISTINCT state FROM ita.software_upload WHERE LOWER(file_name) = LOWER(@file)`);
+    return (r.recordset as Row[]).map((x) => String(x.state) as UploadState);
+  }
+
+  async markFilesDeleted(fileName: string, emp: string, at: Date): Promise<number> {
+    const r = await (
+      await this.request()
+    )
+      .input('file', sql.NVarChar(260), fileName)
+      .input('emp', sql.NVarChar(64), cut(emp, 64))
+      .input('at', sql.DateTime2(3), at).query(`
+        UPDATE ita.software_upload SET file_deleted_by_emp = @emp, file_deleted_at = @at
+        WHERE LOWER(file_name) = LOWER(@file) AND state = 'rejected' AND file_deleted_at IS NULL`);
+    return r.rowsAffected[0] ?? 0;
   }
 }

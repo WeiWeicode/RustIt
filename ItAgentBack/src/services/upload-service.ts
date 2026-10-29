@@ -7,6 +7,8 @@
  *   - 核可寫送簽工作單到 sign-queue\;工作站結果檔只當通知:signed 時主機以軟體庫(software\,唯讀)實際檔案重算,
  *     路徑必須等於上傳的路徑、雜湊必須等於結果檔回報值,否則 rejected / RESULT_MISMATCH(不採信結果檔作安全判斷)
  *   - 簽章者是否為公司軟體發佈憑證,在 P7 登錄 / 標記 tested 時照現有規則由 IT 確認(Agent 回報實際簽章者),這裡只記錄
+ *   - 刪除 incoming\ 原始檔(§4.4):同一路徑的紀錄都是 rejected(或沒有紀錄)才可刪;紀錄保留,記刪除人與時間(0012)。
+ *     signed 的原始檔保留(保留期限待決,ADR 0005);uploaded / queued 的檔案在用
  * 之後的 P7 登錄(draft → tested → published)不變:signed 的檔案出現在「尚未登錄的安裝檔」。
  */
 import type { Readable } from 'node:stream';
@@ -16,7 +18,7 @@ import type { Actor, UploadRecord, UploadState, UploadStore } from '../stores/ty
 import type { Ctx } from './device-service.js';
 import type { MgmtCtx } from './scope.js';
 import { splitSoftwarePath, type SoftwareFileInfo, type SoftwareFiles } from './software-files.js';
-import { receiveIncoming, removeIncoming, type SignQueue } from './upload-files.js';
+import { deleteIncoming, receiveIncoming, removeIncoming, type SignQueue } from './upload-files.js';
 
 export const UPLOAD_STATES: readonly UploadState[] = ['uploaded', 'queued', 'signed', 'rejected'];
 /** 同時收檔的上限(資安審查 M3:塞滿 NAS) */
@@ -50,6 +52,8 @@ export interface UploadView {
   signOperator: string | null;
   signedSha256: string | null;
   signedAt: string | null;
+  fileDeletedByEmp: string | null;
+  fileDeletedAt: string | null;
 }
 
 export function uploadView(u: UploadRecord): UploadView {
@@ -76,6 +80,8 @@ export function uploadView(u: UploadRecord): UploadView {
     signOperator: u.signOperator,
     signedSha256: u.signedSha256,
     signedAt: iso(u.signedAt),
+    fileDeletedByEmp: u.fileDeletedByEmp,
+    fileDeletedAt: iso(u.fileDeletedAt),
   };
 }
 
@@ -273,6 +279,65 @@ export class UploadService {
     await this.queue.removeJob(u.uploadId);
     ctx.log.info({ uploadId: u.uploadId, emp: actorOf(who).emp }, '駁回上傳');
     return uploadView((await this.store.getUpload(u.uploadId))!);
+  }
+
+  /** 刪除已駁回上傳的 incoming\ 原始檔;檔案已不在(管理員先刪了)也記錄為已刪除 */
+  async deleteFile(ctx: MgmtCtx, who: GatewayIdentity, uploadId: string): Promise<UploadView> {
+    this.requireAll(ctx);
+    const u = await this.found(ctx, uploadId);
+    if (u.state !== 'rejected') throw new AppError(409, 'ITA_UPLOAD_STATE', `狀態為 ${u.state},只有已駁回的上傳可刪除原始檔`);
+    if (u.fileDeletedAt) throw new AppError(409, 'ITA_UPLOAD_FILE_DELETED', '原始檔已刪除');
+    await this.checkDeletable(ctx, u.fileName);
+    const r = await deleteIncoming(this.incoming.root, u.fileName, { expectSize: u.sizeBytes });
+    const emp = actorOf(who).emp;
+    await this.markDeleted(ctx, u.fileName, emp);
+    ctx.log.info(
+      { uploadId: u.uploadId, fileName: u.fileName, sha256: u.sha256, existed: r.deleted, sizeBytes: r.sizeBytes, partsRemoved: r.partsRemoved, emp },
+      '刪除上傳區原始檔',
+    );
+    return uploadView(await this.found(ctx, u.uploadId));
+  }
+
+  /**
+   * 刪除 incoming\ 內沒有進行中 / 已簽章紀錄的檔案(網路芳鄰放進來未登錄的、已駁回後仍在的);同路徑已駁回的紀錄一併記錄為已刪除。
+   * 檔案已不在但還有未記錄的已駁回紀錄時照樣記錄(前一次刪檔後寫紀錄失敗,資安審查 L5),沒有可記錄的才回 404
+   */
+  async deleteIncomingFile(
+    ctx: MgmtCtx,
+    who: GatewayIdentity,
+    input: { fileName: string },
+  ): Promise<{ fileName: string; partsRemoved: number; markedUploads: number }> {
+    this.requireAll(ctx);
+    const parts = splitSoftwarePath(input.fileName);
+    if (!parts) throw new AppError(400, 'VALIDATION_FAILED', '檔案路徑需為 {軟體}/{版本}/{檔名}.msi 或 .exe', [{ field: 'fileName', message: '格式不符' }]);
+    const fileName = parts.join('/');
+    await this.checkDeletable(ctx, fileName);
+    const r = await deleteIncoming(this.incoming.root, fileName);
+    const emp = actorOf(who).emp;
+    const markedUploads = await this.markDeleted(ctx, fileName, emp);
+    if (!r.deleted && !markedUploads) throw new AppError(404, 'ITA_UPLOAD_FILE_NOT_FOUND', `incoming 找不到 ${fileName}`);
+    ctx.log.info({ fileName, existed: r.deleted, sizeBytes: r.sizeBytes, partsRemoved: r.partsRemoved, markedUploads, emp }, '刪除上傳區檔案');
+    return { fileName, partsRemoved: r.partsRemoved, markedUploads };
+  }
+
+  /**
+   * 同一路徑(不分大小寫,不限筆數)的紀錄都是 rejected 才可刪;有 uploaded / queued(檔案在用)或 signed(原始檔保留)回 409 ITA_UPLOAD_FILE_IN_USE。
+   * 檢查與刪除之間另一人剛好登錄同一路徑時,該筆核可前重算雜湊找不到檔案 → rejected / INCOMING_CHANGED(不會送簽錯的檔案)
+   */
+  private async checkDeletable(ctx: Ctx, fileName: string): Promise<void> {
+    const states = await this.sqlDo(ctx, 'upload.file-states', () => this.store.fileStates(fileName));
+    if (states.includes('signed')) throw new AppError(409, 'ITA_UPLOAD_FILE_IN_USE', `${fileName} 已簽章,原始檔保留不可刪除`);
+    if (states.some((s) => s !== 'rejected')) throw new AppError(409, 'ITA_UPLOAD_FILE_IN_USE', `${fileName} 有進行中的上傳(待核可或送簽中),不可刪除`);
+  }
+
+  /** 檔案已刪:同路徑尚未記錄刪除的 rejected 紀錄寫入刪除人與時間;回傳筆數。SQL 失敗只記 error(檔案已刪,再呼叫一次會補記錄) */
+  private async markDeleted(ctx: Ctx, fileName: string, emp: string): Promise<number> {
+    try {
+      return await this.store.markFilesDeleted(fileName, emp, this.now());
+    } catch (err) {
+      ctx.log.error({ err, fileName }, '原始檔已刪除,但無法記錄刪除人與時間');
+      return 0;
+    }
   }
 
   /**
