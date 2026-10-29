@@ -5,10 +5,11 @@
  *   - sign-queue\:送簽工作單 {uploadId}.json(sign-job/1)與工作站結果 {uploadId}.result.json(sign-result/1);
  *     工作單先寫暫存檔再改名(工作站不會讀到寫一半的檔案),已存在就拒絕
  * 安全判斷不採信 sign-queue 的結果檔:主機以軟體庫實際檔案重算雜湊(upload-service.ts)。
+ * 刪除 incoming\ 的檔案(deleteIncoming,§4.4):只刪一般檔案,不跟隨符號連結;啟動時檢查兩個目錄可寫(assertWritableDir)。
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { constants, createWriteStream, type WriteStream } from 'node:fs';
-import { mkdir, open, realpath, rename, stat, unlink } from 'node:fs/promises';
+import { lstat, mkdir, open, readdir, realpath, rename, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import type { Readable } from 'node:stream';
 import { finished, pipeline } from 'node:stream/promises';
@@ -114,6 +115,81 @@ export async function removeIncoming(root: string, fileName: string): Promise<bo
     return true;
   } catch {
     return false;
+  }
+}
+
+/** 中斷的上傳留下的暫存檔閒置超過這個時間才刪(進行中的上傳每收到資料就更新修改時間,閒置 UPLOAD_IDLE_MS 就中止) */
+export const STALE_PART_MS = 10 * 60_000;
+
+/**
+ * 刪除 incoming\{軟體}/{版本}/{檔名}(S1-SIGNING-DESIGN §4.4):資料夾以 realpath 確認在根目錄內;檔案本身以 lstat 確認是一般檔案
+ * (符號連結、資料夾回 409 ITA_UPLOAD_NOT_FILE,不跟隨),刪除前再 realpath 一次確認路徑沒被換掉(資安審查 L2,縮小空窗);
+ * expectSize 指定時大小不同回 409 ITA_UPLOAD_FILE_MISMATCH(資安審查 L4:不是那筆上傳的檔案)。
+ * 同資料夾同檔名、閒置超過 STALE_PART_MS 的上傳暫存檔盡力刪除(失敗不影響結果,L5)。
+ * 檔案不存在回 deleted: false;不建立資料夾、不刪空資料夾(避免與同時進行的上傳互相影響)
+ */
+export async function deleteIncoming(
+  root: string,
+  fileName: string,
+  opts: { expectSize?: number; now?: number } = {},
+): Promise<{ fileName: string; deleted: boolean; sizeBytes: number | null; partsRemoved: number }> {
+  const now = opts.now ?? Date.now();
+  const parts = splitSoftwarePath(fileName);
+  if (!parts) throw new AppError(400, 'VALIDATION_FAILED', '路徑需為 {軟體}/{版本}/{安裝檔}(.msi / .exe),每段只接受英數與 . _ 空白 + -');
+  const normalized = parts.join('/');
+  let dir: string;
+  try {
+    const rootReal = await realpath(root);
+    dir = await realpath(path.join(rootReal, parts[0], parts[1]));
+    if (!dir.startsWith(rootReal + path.sep)) throw new AppError(400, 'VALIDATION_FAILED', '路徑不在上傳目錄內');
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return { fileName: normalized, deleted: false, sizeBytes: null, partsRemoved: 0 };
+    throw unavailable(err);
+  }
+  let deleted = false;
+  let sizeBytes: number | null = null;
+  const file = path.join(dir, parts[2]);
+  try {
+    const s = await lstat(file);
+    if (!s.isFile()) throw new AppError(409, 'ITA_UPLOAD_NOT_FILE', `incoming 的 ${normalized} 不是一般檔案(符號連結或資料夾),請由管理員處理`);
+    if (opts.expectSize !== undefined && s.size !== opts.expectSize)
+      throw new AppError(409, 'ITA_UPLOAD_FILE_MISMATCH', `incoming 的 ${normalized} 與這筆上傳的大小不同(可能是之後放進來的檔案),請從上傳區清單刪除`);
+    if ((await realpath(file)) !== file) throw new AppError(409, 'ITA_UPLOAD_NOT_FILE', `incoming 的 ${normalized} 路徑已改變,請重新整理後再試`);
+    await unlink(file);
+    deleted = true;
+    sizeBytes = s.size;
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw unavailable(err);
+  }
+  let partsRemoved = 0;
+  const prefix = `.${parts[2]}.part-`;
+  // 暫存檔清理是附帶的:讀不到資料夾不影響主檔結果(主檔已刪,回錯會讓刪除紀錄寫不進去,L5)
+  const names = await readdir(dir).catch(() => [] as string[]);
+  for (const name of names) {
+    if (!name.startsWith(prefix) || !UUID_RE.test(name.slice(prefix.length))) continue;
+    const part = path.join(dir, name);
+    // 單一暫存檔刪不掉(上傳剛好結束改名、權限)不影響主檔的結果
+    const s = await lstat(part).catch(() => null);
+    if (!s?.isFile() || now - s.mtimeMs <= STALE_PART_MS) continue;
+    if (await unlink(part).then(() => true).catch(() => false)) partsRemoved++;
+  }
+  return { fileName: normalized, deleted, sizeBytes, partsRemoved };
+}
+
+/** 啟動檢查(INCOMING_DIR、SIGN_QUEUE_DIR):存在、是資料夾、可建立與刪除檔案(.ita-write-check-{uuid});不符丟 Error,服務啟動失敗 */
+export async function assertWritableDir(name: string, dir: string): Promise<void> {
+  const probe = path.join(dir, `.ita-write-check-${randomUUID()}`);
+  try {
+    if (!(await stat(dir)).isDirectory()) throw Object.assign(new Error('不是資料夾'), { code: 'ENOTDIR' });
+    await (await open(probe, 'wx')).close();
+    await unlink(probe);
+  } catch (err) {
+    await unlink(probe).catch(() => undefined);
+    const why = (err as NodeJS.ErrnoException).code ?? (err as Error).message;
+    throw new Error(`${name}=${dir} 無法寫入(${why}):請檢查 NAS 掛載與 ita.env 的路徑`, { cause: err });
   }
 }
 

@@ -17,7 +17,7 @@ import { ReleaseFiles } from './services/release-files.js';
 import { ReleaseService } from './services/release-service.js';
 import { SoftwareFiles } from './services/software-files.js';
 import { SoftwareService } from './services/software-service.js';
-import { SignQueue } from './services/upload-files.js';
+import { assertWritableDir, SignQueue } from './services/upload-files.js';
 import { UploadService } from './services/upload-service.js';
 import { SOFTWARE_KINDS } from './commands/kinds.js';
 import { MongoSnapshotStore } from './stores/mongo-store.js';
@@ -71,6 +71,11 @@ const software = config.softwareDir
       uploads: uploadStore,
     })
   : undefined;
+// 啟用上傳送簽時兩個目錄要存在且可寫,否則啟動失敗(NAS 未掛載、路徑誤植時不要到核可才 ENOENT)
+if (uploadStore) {
+  await assertWritableDir('INCOMING_DIR', config.incomingDir!);
+  await assertWritableDir('SIGN_QUEUE_DIR', config.signQueueDir!);
+}
 // incoming\ 讀取規則與軟體庫相同
 const uploads =
   uploadStore && config.softwareDir && config.incomingDir && config.signQueueDir

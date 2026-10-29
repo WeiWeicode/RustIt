@@ -3,7 +3,7 @@
  */
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { PassThrough, Readable } from 'node:stream';
@@ -14,7 +14,7 @@ import { AppError } from '../src/errors.js';
 import { buildMgmtApp } from '../src/mgmt-app.js';
 import { SoftwareFiles } from '../src/services/software-files.js';
 import { SoftwareService } from '../src/services/software-service.js';
-import { parseSignResult, SignQueue } from '../src/services/upload-files.js';
+import { assertWritableDir, parseSignResult, SignQueue } from '../src/services/upload-files.js';
 import { UploadService } from '../src/services/upload-service.js';
 import type { Actor, NewUpload, UploadRecord, UploadSignedPatch, UploadState, UploadStore } from '../src/stores/types.js';
 import { ALL, CONTRACTS_DIR, MemoryCommandStore, only, setup } from './helpers.js';
@@ -69,6 +69,8 @@ class MemoryUploadStore implements UploadStore {
       signOperator: null,
       signedSha256: null,
       signedAt: null,
+      fileDeletedByEmp: null,
+      fileDeletedAt: null,
     };
     this.rows.push(r);
     return { ...r };
@@ -93,6 +95,17 @@ class MemoryUploadStore implements UploadStore {
     if (!r || r.state !== 'queued') return false;
     Object.assign(r, { ...p, state: 'signed', signedAt: p.at });
     return true;
+  }
+  private sameFile(fileName: string) {
+    return this.rows.filter((r) => r.fileName.toLowerCase() === fileName.toLowerCase());
+  }
+  async fileStates(fileName: string) {
+    return [...new Set(this.sameFile(fileName).map((r) => r.state))];
+  }
+  async markFilesDeleted(fileName: string, emp: string, at: Date) {
+    const rows = this.sameFile(fileName).filter((r) => r.state === 'rejected' && !r.fileDeletedAt);
+    for (const r of rows) Object.assign(r, { fileDeletedByEmp: emp, fileDeletedAt: at });
+    return rows.length;
   }
 }
 
@@ -268,6 +281,86 @@ describe('上傳與送簽(UploadService)', () => {
     await assert.rejects(env.uploads.reject(ctx, IT2, u.uploadId, 'x'), { code: 'ITA_UPLOAD_STATE' });
   });
 
+  it('刪除已駁回上傳的原始檔:紀錄保留並記錄刪除人;中斷上傳的舊暫存檔一併刪除;再刪 409;同路徑可重新上傳', async () => {
+    const u = await send(env, IT, FILE, Buffer.from('MZ-npp'));
+    await env.uploads.reject(ctx, IT2, u.uploadId, '版本錯誤');
+    const dir = path.join(env.incoming.root, 'Notepad++', '8.7.1');
+    const stale = `.npp.8.7.1.Installer.x64.exe.part-${randomUUID()}`;
+    const fresh = `.npp.8.7.1.Installer.x64.exe.part-${randomUUID()}`;
+    writeFileSync(path.join(dir, stale), 'x');
+    writeFileSync(path.join(dir, fresh), 'x');
+    const old = new Date(Date.now() - 11 * 60_000);
+    utimesSync(path.join(dir, stale), old, old);
+    const d = await env.uploads.deleteFile(ctx, IT2, u.uploadId);
+    assert.deepEqual([d.state, d.fileDeletedByEmp, d.fileDeletedAt], ['rejected', 'S000002', '2026-10-06T08:00:00.000Z']);
+    // 進行中的上傳(暫存檔剛寫入)不刪
+    assert.deepEqual(readdirSync(dir), [fresh]);
+    await assert.rejects(env.uploads.deleteFile(ctx, IT2, u.uploadId), { code: 'ITA_UPLOAD_FILE_DELETED' });
+    assert.equal((await send(env, IT, FILE, Buffer.from('MZ-npp-2'))).state, 'uploaded');
+  });
+
+  it('刪除原始檔:同路徑換成大小不同的檔案 409 ITA_UPLOAD_FILE_MISMATCH(改從上傳區清單刪);檔案已不在但紀錄未記錄時補記錄', async () => {
+    const u = await send(env, IT, FILE, Buffer.from('MZ-npp'));
+    await env.uploads.reject(ctx, IT2, u.uploadId, '版本錯誤');
+    env.incoming.put(FILE, 'MZ-another-file');
+    await assert.rejects(env.uploads.deleteFile(ctx, IT2, u.uploadId), { code: 'ITA_UPLOAD_FILE_MISMATCH' });
+    assert.ok(existsSync(path.join(env.incoming.root, ...FILE.split('/'))));
+    // 管理員已從主機刪掉檔案:從上傳區清單刪除時仍補記錄已駁回的紀錄;沒有可記錄的才 404
+    unlinkSync(path.join(env.incoming.root, ...FILE.split('/')));
+    assert.equal((await env.uploads.deleteIncomingFile(ctx, IT2, { fileName: FILE })).markedUploads, 1);
+    assert.equal((await env.uploads.get(ctx, u.uploadId)).fileDeletedByEmp, 'S000002');
+    await assert.rejects(env.uploads.deleteIncomingFile(ctx, IT2, { fileName: FILE }), { code: 'ITA_UPLOAD_FILE_NOT_FOUND' });
+  });
+
+  it('刪除原始檔的限制:uploaded / queued / signed 409;同路徑有進行中的上傳 409;非全部公司角色 403', async () => {
+    const u = await send(env, IT, FILE, Buffer.from('MZ-npp'));
+    await assert.rejects(env.uploads.deleteFile(ctx, IT2, u.uploadId), { code: 'ITA_UPLOAD_STATE' });
+    await assert.rejects(env.uploads.deleteIncomingFile(ctx, IT2, { fileName: FILE }), { code: 'ITA_UPLOAD_FILE_IN_USE' });
+    await env.uploads.approve(ctx, IT2, u.uploadId);
+    await assert.rejects(env.uploads.deleteFile(ctx, IT2, u.uploadId), { code: 'ITA_UPLOAD_STATE' });
+    env.workstation(u.uploadId);
+    await env.uploads.scanResults(ctx);
+    assert.equal((await env.uploads.get(ctx, u.uploadId)).state, 'signed');
+    await assert.rejects(env.uploads.deleteFile(ctx, IT2, u.uploadId), { code: 'ITA_UPLOAD_STATE' });
+    // signed 的原始檔保留(保留期限待決,ADR 0005)
+    await assert.rejects(env.uploads.deleteIncomingFile(ctx, IT2, { fileName: FILE }), { code: 'ITA_UPLOAD_FILE_IN_USE' });
+    assert.ok(existsSync(path.join(env.incoming.root, ...FILE.split('/'))));
+    await assert.rejects(env.uploads.deleteFile({ ...ctx, scope: only('甲公司') }, IT2, u.uploadId), { code: 'ITA_SCOPE_ALL_REQUIRED' });
+    await assert.rejects(env.uploads.deleteFile(ctx, IT2, randomUUID()), { code: 'ITA_UPLOAD_NOT_FOUND' });
+  });
+
+  it('刪除 incoming 內的檔案:未登錄的直接刪;已駁回的紀錄一併記錄;找不到 404;路徑格式 400;資料夾 409', async () => {
+    env.incoming.put('7-Zip/24.09/7z2409-x64.msi', 'MSI-7zip');
+    assert.deepEqual(await env.uploads.deleteIncomingFile(ctx, IT, { fileName: '7-Zip\\24.09\\7z2409-x64.msi' }), {
+      fileName: '7-Zip/24.09/7z2409-x64.msi',
+      partsRemoved: 0,
+      markedUploads: 0,
+    });
+    assert.deepEqual((await env.uploads.unregisteredIncoming(ctx)).items, []);
+    await assert.rejects(env.uploads.deleteIncomingFile(ctx, IT, { fileName: '7-Zip/24.09/7z2409-x64.msi' }), { code: 'ITA_UPLOAD_FILE_NOT_FOUND' });
+    await assert.rejects(env.uploads.deleteIncomingFile(ctx, IT, { fileName: 'None/1.0/none.exe' }), { code: 'ITA_UPLOAD_FILE_NOT_FOUND' });
+    for (const bad of ['../x/1.0/a.exe', 'a/b.exe', 'a/1.0/a.txt', 'a/1.0/.npp.exe.part-x'])
+      await assert.rejects(env.uploads.deleteIncomingFile(ctx, IT, { fileName: bad }), { code: 'VALIDATION_FAILED' }, bad);
+    // 已駁回後檔案仍在(出現在未登錄清單):從清單刪除時,紀錄也記為已刪除
+    const u = await send(env, IT, FILE, Buffer.from('MZ-npp'));
+    await env.uploads.reject(ctx, IT2, u.uploadId, '版本錯誤');
+    assert.deepEqual((await env.uploads.unregisteredIncoming(ctx)).items.map((f) => f.fileName), [FILE]);
+    assert.equal((await env.uploads.deleteIncomingFile(ctx, IT, { fileName: FILE })).markedUploads, 1);
+    assert.equal((await env.uploads.get(ctx, u.uploadId)).fileDeletedByEmp, 'S000001');
+    // 不是一般檔案(資料夾)不刪
+    mkdirSync(path.join(env.incoming.root, 'Dir', '1.0', 'dir.exe'), { recursive: true });
+    await assert.rejects(env.uploads.deleteIncomingFile(ctx, IT, { fileName: 'Dir/1.0/dir.exe' }), { code: 'ITA_UPLOAD_NOT_FILE' });
+    assert.ok(existsSync(path.join(env.incoming.root, 'Dir', '1.0', 'dir.exe')));
+  });
+
+  it('啟動檢查:目錄存在且可寫才通過(探測檔不留下);不存在或不是資料夾丟錯', async () => {
+    await assertWritableDir('SIGN_QUEUE_DIR', env.queueRoot);
+    assert.deepEqual(readdirSync(env.queueRoot), []);
+    await assert.rejects(assertWritableDir('SIGN_QUEUE_DIR', path.join(env.queueRoot, 'sign-queue01~')), /SIGN_QUEUE_DIR=.*ENOENT/);
+    writeFileSync(path.join(env.queueRoot, 'file'), 'x');
+    await assert.rejects(assertWritableDir('INCOMING_DIR', path.join(env.queueRoot, 'file')), /INCOMING_DIR=.*ENOTDIR/);
+  });
+
   it('簽章結果:主機以軟體庫實際檔案重算,相符才 signed;之後 P7 登錄沿用(檔案在軟體庫)', async () => {
     const u = await send(env, IT, FILE, Buffer.from('MZ-npp'));
     await env.uploads.approve(ctx, IT2, u.uploadId);
@@ -391,14 +484,26 @@ describe('上傳與送簽 API(mgmt-app)', () => {
       assert.equal(res.statusCode, 415);
       res = await app.inject('/v1/software/uploads?state=uploaded');
       assert.deepEqual(res.json().items.map((i: { fileName: string }) => i.fileName), [FILE]);
+      const uploadId = res.json().items[0].uploadId as string;
       // 開發身分(devSkipToken)是上傳者,不能核可
-      res = await app.inject({ method: 'POST', url: `/v1/software/uploads/${res.json().items[0].uploadId}/approve` });
+      res = await app.inject({ method: 'POST', url: `/v1/software/uploads/${uploadId}/approve` });
       assert.deepEqual([res.statusCode, res.json().code], [403, 'ITA_UPLOAD_SAME_PERSON']);
+      // 刪除原始檔(DELETE 不帶本體):待核可 409;駁回後 200
+      res = await app.inject({ method: 'DELETE', url: `/v1/software/uploads/${uploadId}/file` });
+      assert.deepEqual([res.statusCode, res.json().code], [409, 'ITA_UPLOAD_STATE']);
+      await app.inject({ method: 'POST', url: `/v1/software/uploads/${uploadId}/reject`, payload: { reason: '測試' } });
+      res = await app.inject({ method: 'DELETE', url: `/v1/software/uploads/${uploadId}/file` });
+      assert.deepEqual([res.statusCode, res.json().fileDeletedByEmp], [200, 'dev'], res.body);
+      env.incoming.put('7-Zip/24.09/7z2409-x64.msi', 'MSI-7zip');
+      res = await app.inject({ method: 'DELETE', url: `/v1/software/uploads/incoming?fileName=${encodeURIComponent('7-Zip/24.09/7z2409-x64.msi')}` });
+      assert.deepEqual([res.statusCode, res.json()], [200, { fileName: '7-Zip/24.09/7z2409-x64.msi', partsRemoved: 0, markedUploads: 0 }]);
+      res = await app.inject({ method: 'DELETE', url: '/v1/software/uploads/incoming' });
+      assert.equal(res.statusCode, 400);
       const doc = (await app.inject('/openapi.json')).json();
       const ops = Object.entries(doc.paths as Record<string, Record<string, Record<string, unknown>>>)
         .filter(([p]) => p.startsWith('/v1/software/uploads'))
         .flatMap(([, p]) => Object.values(p));
-      assert.equal(ops.length, 8);
+      assert.equal(ops.length, 10);
       for (const op of ops) {
         const id = String(op.operationId);
         // 簽章工作站的確認路由是系統對系統(API Key),其他是使用者路由

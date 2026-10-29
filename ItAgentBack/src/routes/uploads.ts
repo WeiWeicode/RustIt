@@ -4,6 +4,7 @@
  *   - 串流上傳 POST /v1/software/uploads?fileName=:本體為安裝檔原始位元組(application/octet-stream),邊收邊算 SHA-256 寫入 incoming\;
  *     大檔案經 Gateway Nginx 直接串流(§4.5 A,Gateway 另案),經 BFF 時受 BFF 本體上限限制
  *   - 網路芳鄰放進 incoming\ 的檔案:GET /v1/software/uploads/incoming 挑選 → POST /v1/software/uploads/register 登錄(過渡期,§9-2)
+ *   - 刪除 incoming\ 的檔案(§4.4):DELETE /v1/software/uploads/{id}/file(已駁回的上傳)、DELETE /v1/software/uploads/incoming?fileName=(未登錄的檔案)
  * 路由只驗參數與宣告權限,邏輯在 UploadService(AGENT.md §8.1)。
  */
 import type { GatewayIdentity } from '@giganexus/backend-sdk';
@@ -46,6 +47,8 @@ const uploadSchema = {
     signOperator: strOrNull,
     signedSha256: { ...strOrNull, description: '軟體庫內重簽後檔案的 SHA-256(主機重算確認)' },
     signedAt: dateOrNull,
+    fileDeletedByEmp: { ...strOrNull, description: '刪除 incoming 原始檔的人(只有 rejected 可刪);null = 未刪除' },
+    fileDeletedAt: dateOrNull,
   },
 } as const;
 
@@ -294,6 +297,76 @@ export function uploadRoutes(uploads: UploadService): FastifyPluginAsync {
         },
       },
       async (req) => uploads.reject(mgmtCtx(req), identity(req), req.params.uploadId.toLowerCase(), req.body.reason),
+    );
+
+    app.delete<{ Params: { uploadId: string } }>(
+      '/v1/software/uploads/:uploadId/file',
+      {
+        schema: {
+          operationId: 'endpoint.software.upload.delete-file',
+          summary: '刪除已駁回上傳的原始檔',
+          description:
+            '刪除 incoming\ 內已駁回(rejected)上傳的原始檔,紀錄保留並記錄刪除人與時間(fileDeletedByEmp / fileDeletedAt);檔案已不在也記錄為已刪除。' +
+            '其他狀態回 409 ITA_UPLOAD_STATE;已刪除回 409 ITA_UPLOAD_FILE_DELETED;同路徑有進行中或已簽章的上傳回 409 ITA_UPLOAD_FILE_IN_USE;' +
+            '路徑是符號連結或資料夾回 409 ITA_UPLOAD_NOT_FILE;上傳區的檔案大小與這筆上傳不同(之後放進來的另一個檔案)回 409 ITA_UPLOAD_FILE_MISMATCH。' +
+            '同檔名中斷上傳留下的暫存檔一併刪除。',
+          tags: TAGS,
+          'x-permission': 'endpoint.software.manage',
+          'x-audit-level': 'meta',
+          'x-gherkin': [
+            '場景: 刪除已駁回上傳的原始檔',
+            '  假如 winrar-x64/7.23.0/winrar-x64-723.exe 的上傳狀態為 "rejected"',
+            '  當 呼叫 DELETE /api/endpoint/software/uploads/{uploadId}/file',
+            '  那麼 回應 200',
+            '  而且 fileDeletedByEmp 為呼叫者工號、incoming 不再有此檔案',
+            '  而且 同一路徑可以重新上傳',
+            '',
+            '場景: 待核可的上傳不可刪除原始檔',
+            '  假如 上傳狀態為 "uploaded"',
+            '  當 呼叫 DELETE /api/endpoint/software/uploads/{uploadId}/file',
+            '  那麼 回應 409',
+            '  而且 code 為 "ITA_UPLOAD_STATE"',
+          ].join('\n'),
+          params: uploadIdParams,
+          response: { 200: uploadSchema },
+        },
+      },
+      async (req) => uploads.deleteFile(mgmtCtx(req), identity(req), req.params.uploadId.toLowerCase()),
+    );
+
+    app.delete<{ Querystring: { fileName: string } }>(
+      '/v1/software/uploads/incoming',
+      {
+        schema: {
+          operationId: 'endpoint.software.upload.incoming-delete',
+          summary: '刪除 incoming 內的檔案',
+          description:
+            '刪除 incoming\ 內沒有進行中或已簽章紀錄的檔案(網路芳鄰放進來未登錄的,或已駁回後仍留著的);同路徑已駁回的紀錄一併記錄刪除人與時間。' +
+            '檔案已不在但同路徑有尚未記錄的已駁回紀錄時照樣記錄並回 200;都沒有回 404 ITA_UPLOAD_FILE_NOT_FOUND;同路徑有進行中或已簽章的上傳回 409 ITA_UPLOAD_FILE_IN_USE。',
+          tags: TAGS,
+          'x-permission': 'endpoint.software.manage',
+          'x-audit-level': 'meta',
+          'x-gherkin': [
+            '場景: 刪除 incoming 內未登錄的檔案',
+            '  假如 incoming 有 7-Zip/24.09/7z2409-x64.msi 且尚未登錄',
+            '  當 呼叫 DELETE /api/endpoint/software/uploads/incoming?fileName=7-Zip%2F24.09%2F7z2409-x64.msi',
+            '  那麼 回應 200',
+            '  而且 GET /api/endpoint/software/uploads/incoming 不再列出此檔案',
+          ].join('\n'),
+          querystring: { type: 'object', required: ['fileName'], additionalProperties: false, properties: { fileName: FILE_NAME } },
+          response: {
+            200: {
+              type: 'object',
+              properties: {
+                fileName: { type: 'string' },
+                partsRemoved: { type: 'integer', description: '一併刪除的中斷上傳暫存檔數' },
+                markedUploads: { type: 'integer', description: '記錄為已刪除的已駁回紀錄數' },
+              },
+            },
+          },
+        },
+      },
+      async (req) => uploads.deleteIncomingFile(mgmtCtx(req), identity(req), req.query),
     );
   };
 }

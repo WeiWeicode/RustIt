@@ -133,13 +133,19 @@ endpoint-server 每分鐘掃 `queued` 紀錄的 `{id}.result.json`(以同一檔�
 | `GET` | `/v1/software/uploads?state=`、`/incoming`、`/{id}` | 同上 | 清單、`incoming\` 未登錄檔案、詳情 |
 | `POST` | `/v1/software/uploads/{id}/approve` | 同上 | 第二人核可送簽(≠ 上傳者、需全部公司角色);重算 `incoming\` 雜湊(不符 → `INCOMING_CHANGED`)→ 寫工作單 → `queued`;寫完後狀態已變(同時被駁回)就移除工作單 |
 | `POST` | `/v1/software/uploads/{id}/reject` | 同上 | 駁回(`uploaded` / `queued`),一律移除工作單 |
+| `DELETE` | `/v1/software/uploads/{id}/file` | 同上 | 刪除**已駁回**上傳的 `incoming\` 原始檔;紀錄保留,記 `file_deleted_by_emp` / `file_deleted_at`(migration 0012);檔案已不在也記為已刪除。其他狀態 409 `ITA_UPLOAD_STATE`、已刪 409 `ITA_UPLOAD_FILE_DELETED` |
+| `DELETE` | `/v1/software/uploads/incoming?fileName=` | 同上 | 刪除 `incoming\` 內未登錄的檔案(網路芳鄰放進來的、已駁回後仍在的),同路徑已駁回的紀錄一併記錄;找不到 404 `ITA_UPLOAD_FILE_NOT_FOUND` |
 | `GET` | `/v1/software/uploads/{id}/sign-status` | `endpoint.software.sign-check`(**API Key**,`x-auth-mode: api_key`) | 簽章工作站簽章前確認(§3.2 第 1a 步):`state`(找不到為 `not_found`)、路徑、雜湊、大小、上傳者、核可人、`environment` |
 
 全部使用者路由需全部公司角色(其他回 403 `ITA_SCOPE_ALL_REQUIRED`);寫入類 `x-audit-level: meta`。上傳 API 不收備註(查詢字串會進請求日誌,資安審查 L8),備註只在登錄 `incoming\` 檔案時填。
 
 **P7 登錄檢查(資安審查 M1,2026-10-29)**:`POST /v1/software` 登錄時對照同一路徑的上傳紀錄:沒有紀錄 → 允許(S1 過渡期,§9-5);有 `signed` 且主機重算的雜湊等於 `signed_sha256` → 允許;其他(待核可 / 送簽中 / 已駁回,或簽章後檔案被換過)→ 409 `ITA_UPLOAD_NOT_SIGNED`。`GET /v1/software/files` 每個檔案帶 `upload`(該路徑最新一筆紀錄),套件詳情帶 `upload`(登錄檔案對應的 `signed` 紀錄:上傳者、核可人、工作站回報的原廠簽章者),供登錄與發佈覆核參考。只有啟用上傳(`INCOMING_DIR`、`SIGN_QUEUE_DIR`)時檢查。
 
-**待做**:定期清理 `incoming\` 的 `.part-*` 暫存檔與過期原始檔(保留期限待決,ADR 0005)。
+**刪除上傳區檔案(需求方 2026-10-29 決定)**:只有 `rejected` 可刪;`uploaded` / `queued`(檔案在用)與 `signed`(原始檔保留,保留期限待決)不可刪。兩個刪除路由都要求**同一路徑(不分大小寫)的紀錄全是 `rejected`**,否則 409 `ITA_UPLOAD_FILE_IN_USE`。路徑規則同上傳(`splitSoftwarePath`);資料夾以 `realpath` 確認在 `incoming\` 內,檔案本身以 `lstat` 確認是一般檔案(符號連結、資料夾回 409 `ITA_UPLOAD_NOT_FILE`,不跟隨),刪除前再 `realpath` 一次;依紀錄刪除時大小與紀錄不同回 409 `ITA_UPLOAD_FILE_MISMATCH`(之後放進來的另一個檔案,改從上傳區清單刪);同檔名中斷上傳留下、閒置超過 10 分鐘的 `.{檔名}.part-{uuid}` 一併刪除;不刪空資料夾。權限沿用 `endpoint.software.manage` + 全部公司角色、`x-audit-level: meta`(GigaItApp 不另設按鈕節點)。檢查與刪除之間另一人剛好登錄同一路徑時,那筆核可前重算雜湊找不到檔案 → `rejected / INCOMING_CHANGED`(不會送簽錯的檔案)。殘餘風險:IT 群組本來就能經網路芳鄰刪改 `incoming\`(API 的限制對 SMB 無效,要靠 NAS ACL);NAS(Samba)端的符號連結用戶端看不到,需確認 `follow symlinks` / `wide links` 關閉(endpoint-server 帳號兩區共用,理論上可經連結刪到另一區 `incoming\` 的 .msi / .exe)。
+
+**啟動檢查(2026-10-29)**:`INCOMING_DIR` 與 `SIGN_QUEUE_DIR` 只設一個、或沒有 `SOFTWARE_DIR` 時啟動失敗;啟用時兩個目錄要存在且可寫(寫入並刪除 `.ita-write-check-{uuid}`,工作站只處理 `{uuid}.json`),否則啟動失敗(測試區曾誤植路徑,到核可才 `ENOENT`)。
+
+**待做**:定期清理 `signed` 的原始檔與沒有對應刪除操作的 `.part-*` 暫存檔(保留期限待決,ADR 0005)。
 
 ### 4.5 上傳方式(§9-2)
 
