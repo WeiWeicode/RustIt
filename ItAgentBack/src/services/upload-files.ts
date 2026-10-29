@@ -19,8 +19,9 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /** 結果檔大小上限(防止工作站以外的人放大檔案拖垮掃描) */
 const RESULT_MAX_BYTES = 64 * 1024;
 
+// 原始錯誤放在 cause,供呼叫端記錄日誌(syscall、path、errno)
 const unavailable = (err: unknown) =>
-  new AppError(503, 'ITA_FILES_UNAVAILABLE', `上傳目錄暫時無法寫入(${(err as NodeJS.ErrnoException).code ?? 'unknown'}),請稍後重試`);
+  Object.assign(new AppError(503, 'ITA_FILES_UNAVAILABLE', `上傳目錄暫時無法寫入(${(err as NodeJS.ErrnoException).code ?? 'unknown'}),請稍後重試`), { cause: err });
 
 /** 實際位置必須在根目錄內(含符號連結);dir 不存在時建立 */
 async function ensureInside(root: string, dir: string): Promise<string> {

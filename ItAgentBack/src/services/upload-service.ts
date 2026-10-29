@@ -244,6 +244,8 @@ export class UploadService {
         approved_at: at.toISOString(),
       });
     } catch (err) {
+      // 底層錯誤(NAS 掛載、權限)只在這裡記錄;回應只帶錯誤碼(2026-10-29 測試區實測時查不到原因)
+      ctx.log.error({ err, cause: (err as { cause?: unknown }).cause, uploadId: u.uploadId, fileName: u.fileName }, '送簽工作單寫入失敗');
       await this.store
         .rejectUpload(u.uploadId, ['queued'], 'SIGN_JOB_WRITE_FAILED', '送簽工作單寫入失敗,請重新上傳', null, this.now())
         .catch((e: unknown) => ctx.log.error({ err: e, uploadId: u.uploadId }, '送簽工作單寫入失敗後無法改為 rejected'));
