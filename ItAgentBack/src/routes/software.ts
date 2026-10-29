@@ -78,12 +78,29 @@ const packageProps = {
   revokedAt: dateOrNull,
 } as const;
 const packageSchema = { type: 'object', properties: packageProps } as const;
+const uploadRefSchema = {
+  type: ['object', 'null'],
+  description: '對應的上傳與送簽紀錄(S1-3);簽章者欄位為簽章工作站回報(未驗證),實際簽章者以測試機回報為準',
+  properties: {
+    uploadId: uuid,
+    state: { type: 'string', enum: ['uploaded', 'queued', 'signed', 'rejected'] },
+    uploadedBy: { type: 'object', properties: { emp: { type: 'string' }, name: strOrNull } },
+    approvedBy: who2,
+    vendorSigner: strOrNull,
+    vendorSignerSubject: strOrNull,
+    vendorCheck: strOrNull,
+    signedSigner: strOrNull,
+    signedAt: dateOrNull,
+    rejectCode: strOrNull,
+  },
+} as const;
 
 const detailSchema = {
   type: 'object',
   properties: {
     ...packageProps,
     viewerScopeAll: { type: 'boolean', description: '查詢者有可管理所有公司的角色(才能登錄 / 修改 / 標記測試完成 / 發佈 / 撤回)' },
+    upload: uploadRefSchema,
     testResults: {
       type: 'array',
       description: 'pilot 測試機的 software.install(新到舊);qualifies = 可作為 mark-tested 依據',
@@ -184,6 +201,7 @@ export function softwareRoutes(software: SoftwareService): FastifyPluginAsync {
                       version: { type: 'string' },
                       sizeBytes: { type: 'integer' },
                       modifiedAt: { type: 'string', format: 'date-time' },
+                      upload: { ...uploadRefSchema, description: '該路徑最新一筆上傳紀錄;null 代表直接放進軟體庫(S1 過渡期)' },
                     },
                   },
                 },
@@ -202,7 +220,7 @@ export function softwareRoutes(software: SoftwareService): FastifyPluginAsync {
           operationId: 'endpoint.software.register',
           summary: '登錄軟體套件',
           description:
-            '把軟體庫中的安裝檔登錄為 draft;SHA-256 與大小由主機讀檔計算。draft 只能派送到 pilot 環的測試機,測試成功後 mark-tested、再由另一位 IT 發佈。只有可管理所有公司的角色可用(其他回 403 ITA_SCOPE_ALL_REQUIRED);同名同版本或同一檔案已登錄回 409 ITA_PACKAGE_EXISTS;檔案不存在回 404 ITA_PACKAGE_FILE_NOT_FOUND。',
+            '把軟體庫中的安裝檔登錄為 draft;SHA-256 與大小由主機讀檔計算。draft 只能派送到 pilot 環的測試機,測試成功後 mark-tested、再由另一位 IT 發佈。只有可管理所有公司的角色可用(其他回 403 ITA_SCOPE_ALL_REQUIRED);同名同版本或同一檔案已登錄回 409 ITA_PACKAGE_EXISTS;檔案不存在回 404 ITA_PACKAGE_FILE_NOT_FOUND;檔案有上傳紀錄但尚未簽章(待核可 / 送簽中 / 已駁回)或與簽章後的雜湊不符回 409 ITA_UPLOAD_NOT_SIGNED(沒有上傳紀錄的檔案在 S1 過渡期仍可登錄)。',
           tags: TAGS,
           'x-permission': 'endpoint.software.manage',
           'x-audit-level': 'meta',

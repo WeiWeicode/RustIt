@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。本檔自 P7-1 起記錄 `ItAgentBack/` 的修改,先前的後端變更記在 `NewFeatures.md` / `BugFix.md`。
 
+## 2026-10-29 S1-3 P7 登錄對照上傳紀錄(資安審查 M1)
+- 內容:`SoftwareService.register` 讀檔算雜湊後,對照同一路徑的上傳紀錄(`UploadStore.uploadsForFile`,新到舊 20 筆):沒有紀錄 → 允許(S1 過渡期,設計 §9-5);有 `signed` 且雜湊等於 `signed_sha256` → 允許;其他(待核可 / 送簽中 / 已駁回,或簽章後被換檔)→ 409 `ITA_UPLOAD_NOT_SIGNED`(換檔另記 warn)。`GET /v1/software/files` 每個檔案帶 `upload`(該路徑最新一筆),`GET /v1/software/{id}` 帶 `upload`(對應的 signed 紀錄:上傳者、核可人、工作站回報的原廠簽章者),給 S1-4 畫面與發佈覆核。只有啟用上傳(`INCOMING_DIR`、`SIGN_QUEUE_DIR`,即已需 migration 0011)時檢查;`server.ts` 改為兩個服務共用一個 `SqlUploadStore`。無 migration(依 `file_name` 查詢,表小不另建索引)。
+- 檔案:`ItAgentBack/src/{server.ts,routes/software.ts,services/software-service.ts,stores/types.ts,stores/sql-upload-store.ts}`;測試 `test/upload.test.ts`;`docs/S1-SIGNING-DESIGN.md` §4.4、`docs/HANDOFF.md`。
+- 驗證:`npm run typecheck` 通過;`npm test` 243/243(新增 M1 案例:送簽中提早放檔、工作站拒絕、signed 可登錄且詳情帶 upload、簽章後換檔、沒有紀錄可登錄)。`test:int` 未跑(`uploadsForFile` 的 SQL 未經實際資料庫驗證)。security-auditor:無 High / Medium;L2 依路徑查詢改 `LOWER()` 兩邊比對(不依賴資料庫定序,避免 CS 定序時漏掉紀錄而放行);L3 套件詳情(`endpoint.device.read`)可看到上傳者 / 核可人工號與工作站回報簽章者,屬低敏內部資訊,維持。
+
 ## 2026-10-28 重啟 Agent 後第一筆派送偶發下載 404(重連 hello 退回新連線已送出的指令)
 - 內容:0.9.4 VM 重驗(報告 §11.4)重啟 Agent 後第一筆派送回 `DOWNLOAD_FAILED` 404 `ITA_PACKAGE_NOT_FOUND`。指令紀錄 send_count 1、sent_at .269、推送 .297、下載 .324、acked / started .328。根因:Agent 要等第一次蒐集(約 30 秒)才連 WebSocket;`connected()` 登記後就算在線,此時派送的指令由 `trySend()` 直接推送到新連線,接著 hello 處理完的 `onHello()` 以 `requeueSent(deviceRef)` 把該裝置**所有** sent 改回 queued,連剛推送到新連線的也一起改;Agent 立刻下載時 `download()` 的 `activeInstallPackages()`(sent / acked / running)查不到 → 404;Agent 的 running 又能從 queued 直接跳過去,所以 onHello 的重送沒送出、send_count 仍是 1。修正:`requeueSent(deviceRef, sentBefore?)` 只退回 `sent_at < sentBefore`;`onHello(ctx, deviceRef, connectedAt?)` 傳這條連線的登記時間(`DeviceService.connectedAt()`);連線已被取代或已關閉時不做 hello 補送(新連線的 hello / 斷線處理會處理)。斷線處理不變(全部退回)。Agent 不用改,無 migration。
 - 已知限制(code-reviewer、security-auditor Low):以牆鐘比先後。① `trySend` 的 sent_at 取在 claim(SQL)之前,派送在途時新連線剛好登記,sent_at 早於 connectedAt 仍會被退回(極窄窗口,同樣的 404 仍可能發生,重派即可);② 舊連線上的指令與新連線登記同一毫秒,或主機時鐘被往後撥,舊連線上的指令不會被退回,卡在 sent 到逾期(佔並行名額,不越權、不重複執行)。根治要每條連線給序號並記在指令上(需加欄位 / migration),這次不做。

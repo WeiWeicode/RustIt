@@ -26,6 +26,8 @@ import type {
   PackageStatus,
   RebootPolicy,
   SoftwareStore,
+  UploadRecord,
+  UploadStore,
 } from '../stores/types.js';
 import type { CommandDispatcher, CreateBatchResult } from './command-dispatcher.js';
 import type { Ctx } from './device-service.js';
@@ -379,12 +381,45 @@ export interface Download {
   stream: ReadStream | null;
 }
 
+/** 安裝檔對應的上傳與送簽紀錄(S1-3):登錄畫面與覆核參考;簽章者欄位為工作站回報(未驗證) */
+export interface UploadRef {
+  uploadId: string;
+  state: UploadRecord['state'];
+  uploadedBy: { emp: string; name: string | null };
+  approvedBy: { emp: string; name: string | null } | null;
+  vendorSigner: string | null;
+  vendorSignerSubject: string | null;
+  vendorCheck: string | null;
+  signedSigner: string | null;
+  signedAt: string | null;
+  rejectCode: string | null;
+}
+
+export function uploadRef(u: UploadRecord): UploadRef {
+  return {
+    uploadId: u.uploadId,
+    state: u.state,
+    uploadedBy: { emp: u.uploadedByEmp, name: u.uploadedByName },
+    approvedBy: u.approvedByEmp ? { emp: u.approvedByEmp, name: u.approvedByName } : null,
+    vendorSigner: u.vendorSigner,
+    vendorSignerSubject: u.vendorSignerSubject,
+    vendorCheck: u.vendorCheck,
+    signedSigner: u.signedSigner,
+    signedAt: u.signedAt?.toISOString() ?? null,
+    rejectCode: u.rejectCode,
+  };
+}
+
+const UPLOAD_STATE_TEXT: Record<UploadRecord['state'], string> = { uploaded: '待核可', queued: '送簽中', signed: '已簽章', rejected: '已駁回' };
+
 export interface SoftwareServiceOptions {
   now?: () => Date;
   /** 批次派送用的指令派送器(與 kindHooks 互相參照,建立後再接上) */
   commands?: () => CommandDispatcher | undefined;
   /** 安裝檔與登錄雜湊不符時(D4 告警 software_file_tampered);例外由呼叫端自行處理 */
   onPackageTampered?: (ctx: Ctx, deviceRef: number, detail: Record<string, unknown>) => Promise<void>;
+  /** 上傳與送簽紀錄(S1-3 啟用時):登錄時檢查安裝檔的上傳紀錄(資安審查 M1),未啟用則不檢查 */
+  uploads?: Pick<UploadStore, 'uploadsForFile' | 'listUploads'>;
 }
 
 const actorOf = (who: GatewayIdentity): Actor => ({ emp: who.emp ?? who.sub, name: who.name ?? null });
@@ -396,6 +431,7 @@ export class SoftwareService {
   private readonly now: () => Date;
   private readonly commands: () => CommandDispatcher | undefined;
   private readonly onPackageTampered: NonNullable<SoftwareServiceOptions['onPackageTampered']>;
+  private readonly uploads: SoftwareServiceOptions['uploads'];
   /** 下載稽核事件的最後記錄時間(裝置:套件 → 毫秒) */
   private readonly downloadLogged = new Map<string, number>();
   /** 進行中的下載數(裝置內部 id → 條數;L5) */
@@ -417,6 +453,7 @@ export class SoftwareService {
     this.now = opts.now ?? (() => new Date());
     this.commands = opts.commands ?? (() => undefined);
     this.onPackageTampered = opts.onPackageTampered ?? (() => Promise.resolve());
+    this.uploads = opts.uploads;
   }
 
   private async sqlDo<T>(ctx: Ctx, what: string, fn: () => Promise<T>): Promise<T> {
@@ -432,6 +469,42 @@ export class SoftwareService {
   /** 軟體目錄是全公司共用:只有全部公司角色可變更(§9-5) */
   private requireAll(ctx: MgmtCtx): void {
     if (!ctx.scope.all) throw new AppError(403, 'ITA_SCOPE_ALL_REQUIRED', '軟體目錄是全公司共用設定,只有可管理所有公司的角色能變更');
+  }
+
+  /**
+   * 登錄前對照上傳紀錄(資安審查 M1;S1-SIGNING-DESIGN §4.1、§9-5):
+   *   - 沒有紀錄:S1 過渡期允許簽章人員直接放進軟體庫(S2 起要求 signed)
+   *   - 有 signed 紀錄且主機重算的雜湊等於簽章後雜湊:允許,回傳該紀錄供覆核參考
+   *   - 其他(待核可 / 送簽中 / 已駁回,或 signed 後檔案被換過):409 ITA_UPLOAD_NOT_SIGNED
+   */
+  private async signedUpload(ctx: Ctx, fileName: string, sha256: string): Promise<UploadRecord | null> {
+    const uploads = this.uploads;
+    if (!uploads) return null;
+    const rows = await this.sqlDo(ctx, 'upload.forFile', () => uploads.uploadsForFile(fileName));
+    if (!rows.length) return null;
+    const signed = rows.find((u) => u.state === 'signed' && u.signedSha256 === sha256);
+    if (signed) return signed;
+    const latest = rows[0]!;
+    const changed = latest.state === 'signed';
+    if (changed) ctx.log.warn({ fileName, uploadId: latest.uploadId, sha256, signedSha256: latest.signedSha256 }, '軟體庫安裝檔與簽章後雜湊不符,拒絕登錄');
+    throw new AppError(
+      409,
+      'ITA_UPLOAD_NOT_SIGNED',
+      changed
+        ? `${fileName} 與送簽完成時的檔案不同(簽章後被更換),不能登錄;請簽章人員確認軟體庫檔案`
+        : `${fileName} 的上傳紀錄為「${UPLOAD_STATE_TEXT[latest.state]}」,完成簽章前不能登錄`,
+      [{ field: 'fileName', message: `uploadId ${latest.uploadId}:${latest.state}${latest.rejectCode ? `(${latest.rejectCode})` : ''}` }],
+    );
+  }
+
+  /** 安裝檔路徑(小寫)→ 最新一筆上傳紀錄;未啟用上傳時為空 */
+  private async latestUploads(ctx: Ctx): Promise<Map<string, UploadRecord>> {
+    const uploads = this.uploads;
+    const out = new Map<string, UploadRecord>();
+    if (!uploads) return out;
+    for (const u of await this.sqlDo(ctx, 'upload.list', () => uploads.listUploads({})))
+      if (!out.has(u.fileName.toLowerCase())) out.set(u.fileName.toLowerCase(), u);
+    return out;
   }
 
   private async found(ctx: Ctx, packageId: string): Promise<PackageRecord> {
@@ -487,10 +560,24 @@ export class SoftwareService {
   }
 
   /** 軟體庫內尚未登錄的安裝檔;已撤回的套件不佔用(0010,Agent 0.9.3 項目 5:同一個檔案撤回後可重新登錄) */
-  async unregisteredFiles(ctx: MgmtCtx): Promise<{ items: (Omit<SoftwareFileInfo, 'modifiedAt'> & { modifiedAt: string })[] }> {
-    const [files, rows] = await Promise.all([this.files.list(), this.sqlDo(ctx, 'package.list', () => this.store.listPackages({}))]);
+  // upload:該路徑最新一筆上傳紀錄(S1-3;null 代表直接放進軟體庫)
+  async unregisteredFiles(
+    ctx: MgmtCtx,
+  ): Promise<{ items: (Omit<SoftwareFileInfo, 'modifiedAt'> & { modifiedAt: string; upload: UploadRef | null })[] }> {
+    const [files, rows, uploads] = await Promise.all([
+      this.files.list(),
+      this.sqlDo(ctx, 'package.list', () => this.store.listPackages({})),
+      this.latestUploads(ctx),
+    ]);
     const known = new Set(rows.filter((r) => r.status !== 'revoked').map((r) => r.fileName.toLowerCase()));
-    return { items: files.filter((f) => !known.has(f.fileName.toLowerCase())).map((f) => ({ ...f, modifiedAt: f.modifiedAt.toISOString() })) };
+    return {
+      items: files
+        .filter((f) => !known.has(f.fileName.toLowerCase()))
+        .map((f) => {
+          const u = uploads.get(f.fileName.toLowerCase());
+          return { ...f, modifiedAt: f.modifiedAt.toISOString(), upload: u ? uploadRef(u) : null };
+        }),
+    };
   }
 
   async register(ctx: MgmtCtx, who: GatewayIdentity, input: RegisterPackageInput): Promise<PackageView> {
@@ -517,6 +604,7 @@ export class SoftwareService {
     const f = await this.files.resolve(fileName);
     if (!f) throw new AppError(404, 'ITA_PACKAGE_FILE_NOT_FOUND', `軟體庫找不到 ${fileName}(或超過大小上限)`);
     const sha256 = await this.files.sha256(f);
+    const upload = await this.signedUpload(ctx, fileName, sha256);
     const pkg = await this.sqlDo(ctx, 'package.add', () =>
       this.store.addPackage({
         ...fields,
@@ -532,7 +620,10 @@ export class SoftwareService {
         requestId: ctx.requestId,
       }),
     );
-    ctx.log.info({ packageId: pkg.packageId, name: pkg.name, version: pkg.version, fileName, sha256, emp: actorOf(who).emp }, '登錄軟體套件');
+    ctx.log.info(
+      { packageId: pkg.packageId, name: pkg.name, version: pkg.version, fileName, sha256, uploadId: upload?.uploadId ?? null, emp: actorOf(who).emp },
+      '登錄軟體套件',
+    );
     return packageView(pkg, null);
   }
 
@@ -598,7 +689,8 @@ export class SoftwareService {
   /** 詳情:測試機結果(pilot 裝置的 software.install)、已安裝電腦(皆依資料範圍過濾) */
   async get(ctx: MgmtCtx, packageId: string) {
     const pkg = await this.found(ctx, packageId);
-    const [rows, installed, counts] = await Promise.all([
+    const uploads = this.uploads;
+    const [rows, installed, counts, uploadRows] = await Promise.all([
       this.sqlDo(ctx, 'package.installResults', () => this.store.installResults(packageId, DETAIL_LIMIT)),
       pkg.detectType === 'display_name'
         ? this.sqlDo(ctx, 'package.installedDevices', () =>
@@ -606,7 +698,9 @@ export class SoftwareService {
           )
         : Promise.resolve([]),
       this.installedCount(ctx, [pkg]),
+      uploads ? this.sqlDo(ctx, 'upload.forFile', () => uploads.uploadsForFile(pkg.fileName)) : Promise.resolve([]),
     ]);
+    const upload = uploadRows.find((u) => u.state === 'signed' && u.signedSha256 === pkg.sha256);
     const qualifying = new Set(qualifyingSigners(pkg, rows).commandIds);
     const parse = (s: string | null) => {
       try {
@@ -619,6 +713,8 @@ export class SoftwareService {
       ...packageView(pkg, counts[0] ?? null),
       // 查詢者可否變更軟體目錄(全部公司角色,§9-5):畫面據此停用發佈等按鈕並說明原因(P7 VM 驗收 B-5);實際檢查仍在各動作
       viewerScopeAll: ctx.scope.all,
+      // 登錄檔案對應的 signed 上傳紀錄(覆核參考:原廠簽章者、上傳者、核可人);直接放進軟體庫的為 null
+      upload: upload ? uploadRef(upload) : null,
       testResults: rows
         .filter((r) => r.ring === 'pilot' && inScope(ctx.scope, r.deviceCompany))
         .map((r) => {

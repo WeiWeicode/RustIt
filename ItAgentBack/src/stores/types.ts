@@ -934,6 +934,8 @@ export interface UploadStore {
   /** 新到舊,最多 500 筆 */
   listUploads(f: { state?: UploadState }): Promise<UploadRecord[]>;
   getUpload(uploadId: string): Promise<UploadRecord | null>;
+  /** 同一路徑的上傳紀錄(新到舊,最多 20 筆;路徑比對不分大小寫):P7 登錄時檢查(資安審查 M1) */
+  uploadsForFile(fileName: string): Promise<UploadRecord[]>;
   /** 同一路徑已有進行中(uploaded / queued)的上傳丟 AppError 409 ITA_UPLOAD_EXISTS */
   addUpload(n: NewUpload): Promise<UploadRecord>;
   /** uploaded → queued,且核可人 ≠ 上傳者(條件更新) */

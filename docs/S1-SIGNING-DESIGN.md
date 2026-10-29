@@ -135,7 +135,9 @@ endpoint-server 每分鐘掃 `queued` 紀錄的 `{id}.result.json`(以同一檔�
 
 全部使用者路由需全部公司角色(其他回 403 `ITA_SCOPE_ALL_REQUIRED`);寫入類 `x-audit-level: meta`。上傳 API 不收備註(查詢字串會進請求日誌,資安審查 L8),備註只在登錄 `incoming\` 檔案時填。
 
-**待做**:P7 登錄時,若安裝檔路徑對到的上傳紀錄不是 `signed`(例如 `rejected`),擋下或醒目警示(資安審查 M1 建議);定期清理 `incoming\` 的 `.part-*` 暫存檔與過期原始檔(保留期限待決,ADR 0005)。
+**P7 登錄檢查(資安審查 M1,2026-10-29)**:`POST /v1/software` 登錄時對照同一路徑的上傳紀錄:沒有紀錄 → 允許(S1 過渡期,§9-5);有 `signed` 且主機重算的雜湊等於 `signed_sha256` → 允許;其他(待核可 / 送簽中 / 已駁回,或簽章後檔案被換過)→ 409 `ITA_UPLOAD_NOT_SIGNED`。`GET /v1/software/files` 每個檔案帶 `upload`(該路徑最新一筆紀錄),套件詳情帶 `upload`(登錄檔案對應的 `signed` 紀錄:上傳者、核可人、工作站回報的原廠簽章者),供登錄與發佈覆核參考。只有啟用上傳(`INCOMING_DIR`、`SIGN_QUEUE_DIR`)時檢查。
+
+**待做**:定期清理 `incoming\` 的 `.part-*` 暫存檔與過期原始檔(保留期限待決,ADR 0005)。
 
 ### 4.5 上傳方式(§9-2)
 
