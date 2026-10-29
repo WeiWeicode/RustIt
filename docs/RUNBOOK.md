@@ -121,7 +121,7 @@
 
 ### 3.1 套件上傳與送簽(S1-3,`docs/S1-SIGNING-DESIGN.md` §3.2、§4)
 
-前置(一次性):NAS 管理員建立上傳帳號(只能寫 `RustIT\<區>\incoming\`、`sign-queue\`)與簽章人員的寫入權(`software\`);主機 2 本人執行 `sudo sh ItAgentBack/deploy/host2-set-nas-upload.sh` 並照輸出改 `ita.env`;SQL 套用 migration 0011;Gateway 發佈 `endpoint.software.upload.*` 路由、建立簽章工作站 API Key(只授 `endpoint.software.sign-check`,限定簽章人員電腦 IP)。
+前置(一次性):NAS 管理員建立上傳帳號(兩區共用,只能寫兩區的 `incoming\`、`sign-queue\`,S1 設計 §1)與簽章人員的寫入權(`software\`);本人在主機 2 執行 `sudo sh ItAgentBack/deploy/host2-set-nas-upload.sh`(主機 3:`sudo GW_ENV=prod sh …`)並照輸出改 `ita.env`;SQL 套用 migration 0011;Gateway 發佈 `endpoint.software.upload.*` 路由、建立簽章工作站 API Key(只授 `endpoint.software.sign-check`,限定簽章人員電腦 IP)。
 
 | 步驟 | 誰 | 做法 |
 | --- | --- | --- |

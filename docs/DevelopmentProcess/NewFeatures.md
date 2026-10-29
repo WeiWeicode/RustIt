@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-29 S1-5 放寬:endpoint-server 的 NAS 帳號兩區共用
+- 內容:需求方決定測試區與正式區的 endpoint-server 共用一個 NAS 帳號(`rustit-upload`):兩區 `incoming\`、`sign-queue\` 讀寫,兩區 `releases\`、`software\` 只讀,唯讀掛載也用這個帳號(靠 `ro`)。取消原本「上傳帳號不可寫 `RustIT\prod\`」與「唯讀掛載用唯讀帳號」;仍要求寫不到任何一區的 `releases\`、`software\`,簽章人員寫入群組仍兩區分開。設計補上接受的風險(測試區主機被入侵可在正式區送簽目錄放檔、刪改工作單)與防線(正式區工作站向正式區主機確認 `queued`)。`host2-set-nas-upload.sh` 改為 `GW_ENV` 選區(主機 3 用 `GW_ENV=prod`),試寫兩區 `software\`、`releases\`,不再試寫整個 `prod\`。起因:主機 3 以 `rustit-upload` 唯讀掛載 RustIT 時讀不到 `prod/releases`、`prod/software`(Permission denied),NAS 管理員將補讀取權。
+- 檔案:`docs/S1-SIGNING-DESIGN.md` §0、§1、§6;`ItAgentBack/deploy/host2-set-nas-upload.sh`、`host2-set-nas-credentials.sh`(說明文字);`docs/RUNBOOK.md` §3.1;`docs/HANDOFF.md`
+- 驗證:`sh -n` 兩支腳本通過;主機 3 實測 `rustit-upload` 唯讀掛載:`prod/incoming`、`prod/sign-queue` 可讀,`releases`、`software`(兩區)Permission denied(待 NAS 權限後重測)
+
 ## 2026-10-28 S1-3 套件上傳與送簽(後端、簽章工作站 software 模式)
 - 內容:
   - ItAgentBack:migration 0011 `ita.software_upload`(uploaded → queued → signed / rejected,核可人 ≠ 上傳者三道);`/v1/software/uploads` 串流上傳(收檔前檢查 Content-Length、同時 2 筆、軟體庫與進行中同路徑;閒置 2 分鐘中止;失敗刪檔)、登錄 `incoming\` 檔案、清單 / 詳情、核可(重算雜湊 → 寫工作單 → 重讀狀態)、駁回(一律移除工作單);每分鐘讀工作站結果,以軟體庫實際檔案重算雜湊確認;`GET …/{id}/sign-status`(`x-auth-mode: api_key`、`endpoint.software.sign-check`)給工作站確認。設定 `INCOMING_DIR`、`SIGN_QUEUE_DIR`(預設不啟用);compose 兩個讀寫掛載;`deploy/host2-set-nas-upload.sh`(上傳帳號讀寫掛載、試寫 software / releases / prod 應失敗)。

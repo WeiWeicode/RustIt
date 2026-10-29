@@ -13,7 +13,7 @@ S1 的目標:正式區上線前,**簽章人員不需要主機管理權**、**IT 
 | **S1-2 簽章工作站(手動版)** | 新腳本 `signing-workstation.ps1`:`release` 模式 = 簽章 + 上架一次完成;`software` 模式 = 處理 NAS 送簽佇列 | RustAgent/installer | 無(可先做) |
 | **S1-3 套件上傳與送簽(後端)** | 上傳到 NAS `incoming\`、送簽核可(上傳者 ≠ 核可人)、寫送簽工作單、讀簽章結果 | ItAgentBack、migration 0011、compose 掛載 | 上傳方式(§9-2)、核可角色(§9-3) |
 | **S1-4 GigaItApp 畫面** | 「軟體庫 › 上傳」「待簽章」「核可簽章」 | GigaItApp | S1-3 API;跨 repo 需同意 |
-| **S1-5 NAS 權限** | `RustIT\test` / `RustIT\prod` 寫入群組分開(§8.2-14),新增 `incoming\`、`sign-queue\` 的權限 | NAS 管理員 | 需求方安排 |
+| **S1-5 NAS 權限** | 簽章人員的 `RustIT\test` / `RustIT\prod` 寫入群組分開(§8.2-14);endpoint-server 的 NAS 帳號兩區共用(2026-10-29 放寬,§1),新增兩區 `incoming\`、`sign-queue\` 的寫入與 `releases\`、`software\` 的讀取 | NAS 管理員 | 需求方安排 |
 
 **S1 不做**:正式憑證、端點信任清單改為只信任公司指紋(S2)、專用簽章機與自動常駐(S3)、Agent 依 CA + 範本比對(可選)。
 
@@ -21,7 +21,7 @@ S1 的目標:正式區上線前,**簽章人員不需要主機管理權**、**IT 
 
 ## 1. NAS 目錄與權限(S1-5)
 
-每區(`test` / `prod`)各一套,兩區寫入群組分開:
+每區(`test` / `prod`)各一套目錄;簽章人員的寫入群組兩區分開,endpoint-server 的 NAS 帳號兩區共用(見本節最後):
 
 | 目錄 | 內容 | endpoint-server(主機掛載) | 簽章工作站 / 簽章人員 | IT |
 | --- | --- | --- | --- | --- |
@@ -31,8 +31,10 @@ S1 的目標:正式區上線前,**簽章人員不需要主機管理權**、**IT 
 | `RustIT\<區>\sign-queue\` | 送簽工作單(`<uploadId>.json`)與簽章結果(`<uploadId>.result.json`) | **讀寫** | 讀寫 | — |
 
 - 主機仍**寫不到** `software\` 與 `releases\`:主機被入侵也不能自己放檔案進軟體庫,只能寫工作單,而工作單要過簽章工作站的獨立檢查(§3.3)。
-- endpoint-server 新增兩個讀寫掛載 `INCOMING_DIR`、`SIGN_QUEUE_DIR`(容器 `/srv/incoming`、`/srv/sign-queue`):主機 2 以**另一個 NAS 上傳帳號**(只能寫 `incoming\`、`sign-queue\`)執行 `ItAgentBack/deploy/host2-set-nas-upload.sh` 掛到 `/srv/giganexus/nas-rustit-rw/test/`,腳本會試寫 `software\`、`releases\`、`prod\`,寫得進去就失敗結束;原本的唯讀掛載(`host2-set-nas-credentials.sh`)不變。`ita.env` 設定四個變數才啟用(預設不啟用)。
+- endpoint-server 新增兩個讀寫掛載 `INCOMING_DIR`、`SIGN_QUEUE_DIR`(容器 `/srv/incoming`、`/srv/sign-queue`):以 NAS 上傳帳號(只能寫 `incoming\`、`sign-queue\`)執行 `ItAgentBack/deploy/host2-set-nas-upload.sh` 掛到 `/srv/giganexus/nas-rustit-rw/<區>/`(主機 2 預設 `test`;主機 3 以 `GW_ENV=prod` 執行),腳本會試寫兩區的 `software\`、`releases\`,寫得進去就失敗結束;唯讀掛載(`host2-set-nas-credentials.sh`)另外掛載。`ita.env` 設定四個變數才啟用(預設不啟用)。
 - **`sign-queue\` 只開給 endpoint-server 上傳帳號與簽章工作站帳號,不開給 IT 群組**:能寫的人就能偽造工作單(資安審查 S1-3 M2)。主機 2 的掛載點只有 uid 1000 可讀寫,但 WSL 預設使用者也是 uid 1000,所以工作站一律以 API Key 向主機確認送簽狀態(§3.2 第 1a 步),不只看工作單。
+- **endpoint-server 的 NAS 帳號兩區共用**(需求方 2026-10-29 決定,放寬原本「上傳帳號不可寫 `RustIT\prod\`」與「唯讀掛載用唯讀帳號」):測試區與正式區用同一個帳號(`rustit-upload`),權限為兩區 `incoming\`、`sign-queue\` 讀寫,兩區 `releases\`、`software\` 只讀。唯讀掛載(`releases\`、`software\`)也用這個帳號,唯讀靠掛載選項 `ro`。**仍不放寬**:這個帳號寫不到任何一區的 `releases\`、`software\`(上傳腳本試寫兩區,寫得進去就失敗結束);簽章人員的寫入群組兩區分開(§8.2-14)。
+  - 接受的風險:測試區主機被入侵時,可以讀正式區的軟體庫,也可以在正式區 `incoming\`、`sign-queue\` 放檔案、刪改工作單與結果檔。防線不變:正式區工作站以正式區 Gateway 的 API Key 確認送簽狀態(§3.2 第 1a 步),測試區偽造的工作單在正式區查不到 `queued` 紀錄,回 `NOT_APPROVED`;主機以 `software\` 實際檔案重算雜湊確認結果檔。刪除或塞滿正式區 `incoming\`、`sign-queue\` 只影響送簽進度(可重新上傳),不影響已發佈的套件。
 
 ## 2. S1-1 版本查重改走 API
 
@@ -162,7 +164,8 @@ endpoint-server 每分鐘掃 `queued` 紀錄的 `{id}.result.json`(以同一檔�
 | 駁回與核可同時發生,留下已駁回的工作單 | 駁回一律移除工作單;核可寫完工作單後重讀狀態;工作站確認主機狀態是 `queued` |
 | 結果檔被竄改 | 主機重算 `software\` 實際檔案雜湊;後續 Agent 仍驗 Authenticode 與本機信任清單 |
 | API Key 外洩(S1-1) | 只授唯讀 `endpoint.release.registry`、限定來源 IP、可隨時停用 |
-| 跨區誤放 | 工作單帶 `environment`,工作站只處理與 `-Environment` 相同的;NAS 兩區寫入群組分開 |
+| 跨區誤放 | 工作單帶 `environment`,工作站只處理與 `-Environment` 相同的;簽章人員的 NAS 寫入群組兩區分開 |
+| 測試區主機被入侵,寫入正式區 `incoming\`、`sign-queue\`(endpoint-server 的 NAS 帳號兩區共用,§1) | 正式區工作站向正式區主機確認 `queued`,測試區偽造的工作單查不到;帳號寫不到兩區 `software\`、`releases\`;影響只到送簽進度 |
 
 ## 7. 測試
 

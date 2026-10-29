@@ -1,23 +1,26 @@
 #!/bin/sh
-# 主機 2(測試區 WSL)讀寫掛載 NAS RustIT\test\incoming\ 與 RustIT\test\sign-queue\(S1-3,docs/S1-SIGNING-DESIGN.md §1):本人執行,
-# 密碼以隱藏輸入寫入,不經開發機、不給 AI。
+# 主機 2(測試區 WSL)/ 主機 3(正式區,GW_ENV=prod)讀寫掛載 NAS RustIT\<區>\incoming\ 與 RustIT\<區>\sign-queue\
+# (S1-3,docs/S1-SIGNING-DESIGN.md §1):本人執行,密碼以隱藏輸入寫入,不經開發機、不給 AI。
 #   在主機 2 的 WSL:sudo sh host2-set-nas-upload.sh [--no-mount]
+#   在主機 3 的 WSL:sudo GW_ENV=prod sh host2-set-nas-upload.sh [--no-mount]
 # 做的事(已存在的帳密檔不覆寫;要換帳密先刪除 $CRED 再執行):
 #   1. 寫入 /srv/giganexus/nas-secrets/rustit-nas-upload.cred(root 擁有、0400)
-#   2. 以 CIFS **讀寫**分別掛載兩個子目錄到 /srv/giganexus/nas-rustit-rw/test/{incoming,sign-queue}(除非 --no-mount),並確認可寫入
-#   3. 以同一帳號試寫 software\、releases\、正式區 RustIT\prod\,任何一個寫得進去就以失敗結束
+#   2. 以 CIFS **讀寫**分別掛載兩個子目錄到 /srv/giganexus/nas-rustit-rw/<區>/{incoming,sign-queue}(除非 --no-mount),並確認可寫入
+#   3. 以同一帳號試寫兩區的 software\、releases\,任何一個寫得進去就以失敗結束
 #   4. 印出 ita.env 要加的四行與 /etc/fstab 建議行(不自動改 fstab、不自動改 ita.env)
-# NAS 上傳帳號(S1-5,請 NAS 管理員建立):只能寫 RustIT\test\incoming\ 與 RustIT\test\sign-queue\,**不可寫** software\、releases\,
-# 也不可寫正式區 RustIT\prod\。sign-queue\ 只開給這個帳號與簽章工作站帳號,不開給 IT 群組(工作單可被能寫的人偽造,資安審查 M2)。
-# 軟體庫與版本檔仍由 host2-set-nas-credentials.sh 的唯讀帳號掛載。
+# NAS 上傳帳號(S1-5,請 NAS 管理員建立):兩區共用一個帳號(需求方 2026-10-29),只能寫兩區的 incoming\ 與 sign-queue\,
+# **不可寫**任何一區的 software\、releases\。sign-queue\ 只開給這個帳號與簽章工作站帳號,不開給 IT 群組(工作單可被能寫的人偽造,資安審查 M2)。
+# 軟體庫與版本檔由 host2-set-nas-credentials.sh 另外以唯讀選項掛載(可用同一個帳號)。
 # 掛載點只有 uid 1000(容器內 node 使用者)可讀寫(0700 / 0600);WSL 預設使用者也是 uid 1000,所以 ssh host2 的帳號仍可寫,
 # 簽章工作站因此在簽章前一律以 API Key 向主機確認送簽狀態(sign-status),不只看工作單。
 set -eu
 CRED_DIR=/srv/giganexus/nas-secrets
 CRED=$CRED_DIR/rustit-nas-upload.cred
 NAS_ROOT=//10.10.130.31/docker-folder/RustIT
-NAS_BASE=$NAS_ROOT/test
-MNT=/srv/giganexus/nas-rustit-rw/test
+ZONE=${GW_ENV:-test}
+case "$ZONE" in test|prod) ;; *) echo "GW_ENV 只能是 test 或 prod:$ZONE" >&2; exit 1 ;; esac
+NAS_BASE=$NAS_ROOT/$ZONE
+MNT=/srv/giganexus/nas-rustit-rw/$ZONE
 # seal:SMB3 加密(NAS 不支援時拿掉,至少確認 NAS 端啟用 SMB 簽章)
 OPTS="nosuid,nodev,noexec,uid=1000,gid=1000,file_mode=0600,dir_mode=0700,vers=3.0,seal"
 
@@ -30,7 +33,7 @@ chown root:root "$CRED_DIR"; chmod 700 "$CRED_DIR"
 # ---------- 帳密檔(mount.cifs credentials 格式) ----------
 if [ -L "$CRED" ]; then echo "$CRED 是符號連結,中止(請先確認並刪除)" >&2; exit 1; fi
 if [ ! -e "$CRED" ]; then
-  printf '%s' 'NAS 上傳帳號(只能寫 RustIT\test\incoming、sign-queue):'; read -r u
+  printf '%s' 'NAS 上傳帳號(只能寫兩區的 incoming、sign-queue):'; read -r u
   [ -n "$u" ] || { echo "帳號空白,中止" >&2; exit 1; }
   # 中途按 Ctrl-C 也要恢復回顯
   trap 'stty echo' EXIT INT TERM
@@ -61,16 +64,16 @@ else
       echo "$MNT/$d 已掛載,略過"
     else
       mount -t cifs "$NAS_BASE/$d" "$MNT/$d" -o "credentials=$CRED,rw,$OPTS" \
-        || { echo "掛載失敗:檢查帳密、NAS 目錄 RustIT/test/$d 是否存在、SMB 版本(可改 vers=2.1)、NAS 是否支援 seal" >&2; exit 1; }
+        || { echo "掛載失敗:檢查帳密、NAS 目錄 RustIT/$ZONE/$d 是否存在、SMB 版本(可改 vers=2.1)、NAS 是否支援 seal" >&2; exit 1; }
       echo "已讀寫掛載 $NAS_BASE/$d → $MNT/$d"
     fi
     if ( : > "$MNT/$d/.rw-probe" ) 2>/dev/null; then rm -f "$MNT/$d/.rw-probe"; echo "確認可寫入:$MNT/$d"
     else echo "$MNT/$d 無法寫入,請確認 NAS 上傳帳號的權限" >&2; exit 1; fi
   done
 
-  # 上傳帳號不可寫軟體庫、版本檔、正式區(S1-5):以同一帳號暫時掛載試寫,應被拒
+  # 上傳帳號不可寫兩區的軟體庫、版本檔(S1-5):以同一帳號暫時掛載試寫,應被拒
   bad=0
-  for target in "$NAS_BASE/software" "$NAS_BASE/releases" "$NAS_ROOT/prod"; do
+  for target in "$NAS_ROOT/test/software" "$NAS_ROOT/test/releases" "$NAS_ROOT/prod/software" "$NAS_ROOT/prod/releases"; do
     PROBE=$(mktemp -d)
     if mount -t cifs "$target" "$PROBE" -o "credentials=$CRED,rw,$OPTS" 2>/dev/null; then
       if ( : > "$PROBE/.rw-probe" ) 2>/dev/null; then
@@ -100,6 +103,6 @@ cat <<EOT
 2. 重開機後要自動掛載:/etc/fstab 加(WSL 需 systemd 或在 WSL-GigaNexus 排程啟動後執行 mount -a):
      $NAS_BASE/incoming $MNT/incoming cifs credentials=$CRED,rw,$OPTS,_netdev,nofail 0 0
      $NAS_BASE/sign-queue $MNT/sign-queue cifs credentials=$CRED,rw,$OPTS,_netdev,nofail 0 0
-3. 重跑 develop 的 deploy-test 重建 endpoint-server;啟動日誌 uploads 為 true 即已啟用
+3. 重建 endpoint-server(測試區:重跑 develop 的 deploy-test);啟動日誌 uploads 為 true 即已啟用
 4. Gateway 建立簽章工作站的 API Key(只授 endpoint.software.sign-check,限定簽章人員電腦 IP)
 EOT
