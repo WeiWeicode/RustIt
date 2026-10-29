@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。本檔自 P7-1 起記錄 `ItAgentBack/` 的修改,先前的後端變更記在 `NewFeatures.md` / `BugFix.md`。
 
+## 2026-10-29 送簽工作單寫入失敗時記錄原因
+- 內容:測試區 S1-3 實測第一筆(`winrar-x64/7.23.0/winrar-x64-723tc.exe`)核可時回 503、標記 rejected `SIGN_JOB_WRITE_FAILED`,但日誌沒有任何錯誤:`SignQueue.writeJob` 把底層錯誤轉成 `ITA_FILES_UNAVAILABLE`(只帶 errno 代碼),`approve` 改回 rejected 後直接拋出。兩分鐘後在容器內以相同步驟(`wx` 開暫存檔 → 改名 → 刪除)寫 `/srv/sign-queue` 正常,主機 2 掛載 09:11 後沒有變動,原因未明(疑似 NAS 暫時錯誤)。修正:`unavailable()` 把原始錯誤放在 `cause`;`approve` 寫工作單失敗時以 error 記錄 `err`、`cause`、uploadId、路徑。
+- 檔案:`ItAgentBack/src/services/{upload-service.ts,upload-files.ts}`。
+- 驗證:`npm run typecheck` 通過;`test/upload.test.ts` 15/15。
+
 ## 2026-10-29 S1-3 P7 登錄對照上傳紀錄(資安審查 M1)
 - 內容:`SoftwareService.register` 讀檔算雜湊後,對照同一路徑的上傳紀錄(`UploadStore.uploadsForFile`,新到舊 20 筆):沒有紀錄 → 允許(S1 過渡期,設計 §9-5);有 `signed` 且雜湊等於 `signed_sha256` → 允許;其他(待核可 / 送簽中 / 已駁回,或簽章後被換檔)→ 409 `ITA_UPLOAD_NOT_SIGNED`(換檔另記 warn)。`GET /v1/software/files` 每個檔案帶 `upload`(該路徑最新一筆),`GET /v1/software/{id}` 帶 `upload`(對應的 signed 紀錄:上傳者、核可人、工作站回報的原廠簽章者),給 S1-4 畫面與發佈覆核。只有啟用上傳(`INCOMING_DIR`、`SIGN_QUEUE_DIR`,即已需 migration 0011)時檢查;`server.ts` 改為兩個服務共用一個 `SqlUploadStore`。無 migration(依 `file_name` 查詢,表小不另建索引)。
 - 檔案:`ItAgentBack/src/{server.ts,routes/software.ts,services/software-service.ts,stores/types.ts,stores/sql-upload-store.ts}`;測試 `test/upload.test.ts`;`docs/S1-SIGNING-DESIGN.md` §4.4、`docs/HANDOFF.md`。
