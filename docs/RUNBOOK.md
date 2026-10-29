@@ -63,6 +63,18 @@
 
 正式區(主機 3)部署時直接使用 `RustIT\prod\releases`、`RustIT\prod\software`(掛載方式與主機 2 相同時為 `/srv/giganexus/nas-rustit/prod/...`;不同時上架加 `-MountCheckDir`、`ita.env` 指到實際掛載點)。
 
+### 1.2 正式區第一次部署 endpoint-server(主機 3)
+
+主機 3 的 WSL 查不到外部 DNS(Docker Hub、npmjs 不通),不在主機上建置:`main` 由 CI `build-prod` 在主機 2 建置並推送 Registry,`deploy-prod`(手動,`prod-deploy`)在主機 3 拉取後更新;`mongo:7`、`redis:7-alpine` 用主機 3 已有的映像。
+
+1. **PKI(2026-10-29 已完成)**:主機 3 已以 Gateway `deploy/host3-prod-temp-pki.sh` 換成正式區臨時 PKI(根 CA / Agent CA 與測試區不同),`ita-secrets/endpoint_server.crt` 由新根 CA 簽發。正式區 Agent 的裝置憑證用主機 3 `pki/agent-ca.key` 簽發,AD CS 到位後改用電腦憑證(AGENT.md §6)。
+2. **資料庫(本人,sa)**:執行 `ItAgentBack/db/dba/02-create-prod-database.sql`:建立 `giganexus_It_Agent`(已存在則略過)、schema `ita` 與正式專用帳號 `ita_prod_app` / `ita_prod_migrate`(測試區帳號 `ita_app` 不能進正式庫)。
+3. **主機 3(本人)**:`sudo sh /srv/giganexus/deploy/host3-set-ita-db.sh`(本 repo `ItAgentBack/deploy/host3-set-ita-db.sh`),寫入 `ita_prod_app` 密碼、`ita.env` 的 `ITA_DB_USER=ita_prod_app`。其餘機密(`gw_api_key`、Mongo / Redis、監控 Key)與 NAS `prod/releases`、`prod/software` 唯讀掛載已於 2026-10-29 就位。
+4. **migration(本人,開發機)**:在 `ItAgentBack/` 以 `ITA_DB_HOST=10.10.130.220`、`ITA_DB_NAME=giganexus_It_Agent`、`ITA_MIGRATE_USER=ita_prod_migrate` 與其密碼執行 `npm run db:migrate`(0001–0012;密碼只在本次 shell,不寫進 `.env`)。
+5. **合併到 `main`**:`build-prod` 自動建置推送 → 手動執行 `deploy-prod`(`up --no-build --pull never --wait`、`/readyz`、無 Token 回 401)。
+6. **發佈路由**:endpoint-server 啟動後自動註冊為正式區 Gateway **草稿**,在 GigaItApp「服務與路由」審查後發佈;再重跑 GigaItApp `rbac-prod` 補端點畫面節點的 `endpoint.*` 綁定。
+7. **尚未開放**:上傳與送簽(`ITA_INCOMING_DIR` 等未設定)、Agent 升級與軟體派送(正式程式碼簽章憑證與 `-Environment prod` 演練,HANDOFF「上線前準備」)。
+
 ## 2. 版本回滾
 
 適用:新版本推出後發現問題(功能異常、效能變差、大量 `upgrade_failed`)。角色:**IT 管理員**(GigaItApp「Agent 版本」;改發佈環要 `endpoint.software.manage` **且**全部公司角色 `ENDPOINT_SCOPE_ALL_ROLES`,P6-UPGRADE-DESIGN §9-5)。

@@ -1,17 +1,21 @@
 # RustIt Pipeline(Runner:主機 2 WSL shell executor,tag windows-runner;與 Gateway 同一台主機)
 #   check        所有分支:ItAgentBack 型別檢查與單元測試(RustAgent 為 Windows 程式,於開發者電腦 cargo test)
 #   deploy-test  develop:在主機 2 建置並更新 ItAgentBack(endpoint-server,加入 Gateway 網路)與其 Mongo / Redis
+#   build-prod   main:在主機 2 建置 endpoint-server 並推送 GitLab Registry(tag = commit SHA)
+#                主機 3(正式區)WSL 查不到外部 DNS,連不到 Docker Hub 與 npmjs,不能在主機上建置(mongo:7、redis:7-alpine 已在主機 3)
+#   deploy-prod  main 手動:主機 3(prod-deploy)拉取 endpoint-server 並更新;正式庫 migration 需先以 ita_prod_migrate 套用(RUNBOOK §1.2)
 # 主機需有:${ITA_ENV_FILE}(範本 ItAgentBack/deploy/test.env.example)、ITA_SECRETS_DIR 內的機密檔;
 #           Gateway 已部署(giganexus-gw_default 網路);npm Registry Token 同 GigaItApp(${NPM_TOKEN_FILE})
 #   build        tag rustit-v*(自動)或手動:在**主機 2 的 Windows 本機 Runner**(tag windows,P6-4)建置**未簽章**的 Agent / Watchdog exe 與
 #                SHA256SUMS.txt(artifact 保存 30 天);簽章由簽章人員在自己的電腦執行 RustAgent/installer/sign-release.ps1
 #                (私鑰不放 Runner,ADR 0003、PLATFORM-PLAN §4.9 選項 C),再 publish-release.ps1 上架
 # Windows Runner 設定見 docs/WINDOWS-RUNNER-SETUP.md;沒有這個 Runner 時 build 階段的 job 不會被執行(手動 job 不擋 pipeline)
-stages: [check, deploy-test, build]
+stages: [check, deploy-test, build-prod, deploy-prod, build]
 
 variables:
   ITA_ENV_FILE: /srv/giganexus/deploy/ita.env
   NPM_TOKEN_FILE: /srv/giganexus/deploy/secrets/gitlab_npm_token
+  ITA_IMAGE_PREFIX_PROD: $CI_REGISTRY_IMAGE
 
 .runner: &runner
   tags: [windows-runner]
@@ -45,6 +49,41 @@ deploy-test:
     - $C build --pull endpoint-server
     - $C up -d --wait
     # 冒煙測試:SQL / Mongo / Redis 皆可連線;管理 API 無內部 Token → 401
+    - $C exec -T endpoint-server wget -qO- http://127.0.0.1:51240/readyz
+    - '$C exec -T endpoint-server node -e "fetch(\"http://127.0.0.1:51240/v1/devices\").then((r) => process.exit(r.status === 401 ? 0 : 1))" && echo "OK   /v1/devices 無內部 Token → 401"'
+
+build-prod:
+  <<: *runner
+  stage: build-prod
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - export IMAGE_TAG=$CI_COMMIT_SHA RELEASE_SHA=$CI_COMMIT_SHORT_SHA ITA_IMAGE_PREFIX="$ITA_IMAGE_PREFIX_PROD"
+    - export GITLAB_NPM_TOKEN="$(cat "$NPM_TOKEN_FILE")"
+    # 以主機 2 的 ita.env 解析 compose(必要變數、機密路徑);上面 export 的變數優先,映像檔名稱與 tag 指向 Registry
+    - export COMPOSE_ENV_FILES="$ITA_ENV_FILE"
+    - C="docker compose -f ItAgentBack/deploy/docker-compose.yml"
+    - $C build --pull endpoint-server
+    - $C push endpoint-server
+
+deploy-prod:
+  stage: deploy-prod
+  tags: [prod-deploy]
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: manual
+  environment: { name: production }
+  script:
+    - test -f "$ITA_ENV_FILE" || { echo "缺少 $ITA_ENV_FILE" >&2; exit 1; }
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - export IMAGE_TAG=$CI_COMMIT_SHA RELEASE_SHA=$CI_COMMIT_SHORT_SHA ITA_IMAGE_PREFIX="$ITA_IMAGE_PREFIX_PROD" COMPOSE_ENV_FILES="$ITA_ENV_FILE"
+    # 正式區不建置:compose 檔的 build secret npm_token 只需變數存在;mongo / redis 用主機 3 已有的映像(連不到 Docker Hub)
+    - export GITLAB_NPM_TOKEN=unused
+    - C="docker compose -f ItAgentBack/deploy/docker-compose.yml"
+    - $C pull endpoint-server
+    - $C up -d --no-build --pull never --wait
+    # 冒煙測試(同測試區):SQL / Mongo / Redis 皆可連線;管理 API 無內部 Token → 401
     - $C exec -T endpoint-server wget -qO- http://127.0.0.1:51240/readyz
     - '$C exec -T endpoint-server node -e "fetch(\"http://127.0.0.1:51240/v1/devices\").then((r) => process.exit(r.status === 401 ? 0 : 1))" && echo "OK   /v1/devices 無內部 Token → 401"'
 
