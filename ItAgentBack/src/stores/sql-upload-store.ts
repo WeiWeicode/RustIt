@@ -68,10 +68,11 @@ export class SqlUploadStore implements UploadStore {
     return row ? toUpload(row) : null;
   }
 
+  // 不依賴資料庫定序:NAS 路徑不分大小寫,定序若為 CS 會漏掉紀錄而繞過登錄檢查(資安審查 L2;表小,不需索引)
   async uploadsForFile(fileName: string): Promise<UploadRecord[]> {
     const r = await (await this.request())
       .input('file', sql.NVarChar(260), fileName)
-      .query(`SELECT TOP (20) ${COLS} FROM ita.software_upload WHERE file_name = @file ORDER BY uploaded_at DESC, id DESC`);
+      .query(`SELECT TOP (20) ${COLS} FROM ita.software_upload WHERE LOWER(file_name) = LOWER(@file) ORDER BY uploaded_at DESC, id DESC`);
     return (r.recordset as Row[]).map(toUpload);
   }
 
