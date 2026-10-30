@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-30 AD CS 端點電腦憑證申請說明
+- 內容:新增 `docs/ADCS-REQUEST.md`,給需求方向系統工程師說明與申請:Agent 專用中繼 CA、範本「GigaNexus Agent」規格(EKU 只有 Client Authentication、CNG / KSP 金鑰、私鑰不可匯出、主體名稱格式「DNS 名稱」= FQDN)、GPO 自動註冊與試點群組、根 CA 派送、CRL HTTP 發佈(主機 3 可下載)、非網域電腦 `certreq` 流程,以及待 IT 回覆與提供的清單、我們這邊的配合變更與過渡期。內容依 Gateway ENDPOINT-AGENT-GUIDE §3、§10 E1 / E2 / E8 / G1 整理;線上版在 Claude Docs 同名文件
+- 檔案:`docs/ADCS-REQUEST.md`、`docs/PROJECT-MAP.md`
+- 驗證:文件,無程式變更
+
 ## 2026-10-30 正式區臨時裝置憑證簽發腳本
 - 內容:新增 `RustAgent/installer/host3-issue-device-cert.sh`:本人在主機 3 以 root 執行,用正式區臨時 Agent CA(Gateway `deploy/host3-prod-temp-pki.sh` 產生)為一台電腦簽 EC P-256 用戶端憑證(`O=GigaNexus`、EKU clientAuth、365 天、隨機序號),打包成含 Agent CA 的 PFX(AES-256)與隨機密碼檔,輸出到 `C:\Users\user\agent-certs\<電腦名稱>\`;另複製根 CA 公開憑證 `ca-prod.crt` 供建正式區 MSI。與測試區 `host2-issue-test-device-cert.sh` 的差異:`agent-ca.crt` 是 `(prod)` 才簽(避免 pki 被還原成測試區那套)、簽完以根 CA 驗證憑證鏈、簽發紀錄(時間、CN、序號、到期日)追加到 `pki/issued-devices.log` 供撤銷、同一 CN 重簽需 `REISSUE=1`(並提示舊憑證不會撤銷)、FQDN 的網域須在 `ita.env` 的 `ENDPOINT_COMPANY_DOMAINS` 內(避免簽出歸到別家公司的憑證)、CN 不是 FQDN 時提示所屬公司要手動指定(E1)、中斷(INT / TERM / HUP)時也清除暫存私鑰、完成訊息改用 `printf`(dash 的 `echo` 會把 `\a`、`\c` 當跳脫字元;測試區腳本的完成訊息因此被截斷,未改)。私鑰只在暫存目錄、密碼不印在畫面,AI 不經手。
 - 檔案:`RustAgent/installer/host3-issue-device-cert.sh`、`docs/RUNBOOK.md` §1.2、`docs/PROJECT-MAP.md`
