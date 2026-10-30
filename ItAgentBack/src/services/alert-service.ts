@@ -2,7 +2,8 @@
  * 告警(PLATFORM-PLAN §4.3、§4.10 A5;P5-MONITOR-DESIGN §4):固定規則,不做規則引擎;門檻由 ita.env 設定。
  *   - 自動類(offline_long、disk_low、agent_restarts、cert_expiring、clock_skew、agent_silent):每 5 分鐘掃描 active 裝置,
  *     條件成立開(或更新)、條件消失自動關閉;disk_low 以較高的關閉門檻做緩衝,避免在門檻上下反覆開關
- *   - 事件類(hardware_changed;P5-2 加 agent_tampered):事件寫入時開,**不自動關閉**,由 IT 確認(手動關閉留稽核)
+ *   - 事件類(hardware_changed;P5-2 加 agent_tampered;P7 加 software_file_tampered):事件寫入時開,**不自動關閉**,由 IT 確認(手動關閉留稽核)
+ *   - P7:software_install_failed(安裝失敗開、同一套件安裝成功自動關)、reboot_pending(自動類,需要重新開機超過 7 天)
  *   - 停用 / 退役 / 已合併裝置的未結束告警在掃描時一律自動關閉
  *   - SQL 是唯一真相;掃描失敗只記 warn,下次再評估。單一實例評估(與指令派送器相同)
  */
@@ -47,7 +48,32 @@ export const TAMPER_EVENTS: readonly string[] = [
 ];
 
 /** 自動類規則:掃描時評估 */
-export const AUTO_RULES: readonly AlertRule[] = ['offline_long', 'disk_low', 'agent_restarts', 'cert_expiring', 'clock_skew', 'agent_silent'];
+export const AUTO_RULES: readonly AlertRule[] = ['offline_long', 'disk_low', 'agent_restarts', 'cert_expiring', 'clock_skew', 'agent_silent', 'reboot_pending'];
+
+/** reboot_pending:需要重新開機超過幾天(P7-SOFTWARE-DESIGN §9-7) */
+const REBOOT_PENDING_DAYS = 7;
+
+/** software.install 的終態(CommandDispatcher kindHooks.onFinal;P7-SOFTWARE-DESIGN §3.1) */
+export interface SoftwareFinal {
+  deviceRef: number;
+  commandId: string;
+  /** 指令參數快照(JSON 字串) */
+  params: string;
+  state: 'succeeded' | 'failed' | 'canceled' | 'expired';
+  errorCode: string | null;
+  /** Agent 的 result(JSON 字串) */
+  resultSummary: string | null;
+}
+
+function parseObj(s: string | null): Record<string, unknown> {
+  if (!s) return {};
+  try {
+    const v = JSON.parse(s) as unknown;
+    return v && typeof v === 'object' ? (v as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
 
 export interface RuleHit {
   rule: AlertRule;
@@ -98,6 +124,14 @@ export function evaluate(t: MonitorTarget, now: Date, th: AlertThresholds): Rule
       rule: 'agent_silent',
       severity: 'critical',
       detail: { lastSeenAt: t.lastSeenAt.toISOString(), watchdogReportAt: h.watchdogReportAt.toISOString() },
+    });
+
+  // 安裝回報需要重新開機(3010 / 1641),之後開機時間沒有變新(P7)
+  if (t.rebootRequiredSince && at - t.rebootRequiredSince.getTime() > REBOOT_PENDING_DAYS * DAY)
+    hits.push({
+      rule: 'reboot_pending',
+      severity: 'warn',
+      detail: { since: t.rebootRequiredSince.toISOString(), days: Math.floor((at - t.rebootRequiredSince.getTime()) / DAY) },
     });
 
   return hits;
@@ -222,6 +256,58 @@ export class AlertService {
       ctx.log.warn({ deviceRef, alertId: r.alertId, types: tampered.map((e) => e.type) }, 'Agent / Watchdog 服務被變更,已開告警');
     } catch (err) {
       ctx.log.warn({ err, deviceRef }, 'agent_tampered 告警寫入失敗');
+    }
+  }
+
+  /**
+   * software.install 終態(P7):失敗 → software_install_failed(warn,detail 為最近一次失敗);
+   * 同一套件之後安裝成功 → 自動關閉。canceled / expired 不是安裝失敗,不處理。失敗只記 warn(指令結果已保存)
+   */
+  async onSoftwareFinal(ctx: Ctx, f: SoftwareFinal): Promise<void> {
+    const p = parseObj(f.params);
+    const packageId = typeof p.package_id === 'string' ? p.package_id : null;
+    try {
+      if (f.state === 'failed') {
+        const res = parseObj(f.resultSummary);
+        const r = await this.store.openAlert({
+          deviceRef: f.deviceRef,
+          rule: 'software_install_failed',
+          severity: 'warn',
+          detail: JSON.stringify({
+            packageId,
+            name: p.name ?? null,
+            version: p.version ?? null,
+            commandId: f.commandId,
+            errorCode: f.errorCode,
+            exitCode: typeof res.exit_code === 'number' ? res.exit_code : null,
+          }),
+          at: this.now(),
+        });
+        ctx.log.warn({ deviceRef: f.deviceRef, alertId: r.alertId, packageId, errorCode: f.errorCode }, '軟體安裝失敗,已開告警');
+      } else if (f.state === 'succeeded' && packageId) {
+        const [open] = await this.store.listAlerts({ state: 'open', rule: 'software_install_failed', deviceRef: f.deviceRef, limit: 1 });
+        if (open && parseObj(open.detail).packageId === packageId && (await this.store.resolveAuto(f.deviceRef, 'software_install_failed', this.now(), '重新派送已安裝成功')))
+          ctx.log.info({ deviceRef: f.deviceRef, packageId }, '軟體安裝成功,關閉 software_install_failed');
+      }
+    } catch (err) {
+      ctx.log.warn({ err, deviceRef: f.deviceRef }, 'software_install_failed 告警寫入失敗');
+    }
+  }
+
+  /** 軟體庫安裝檔與登錄雜湊不符(D4):開 critical 告警在要求下載的裝置上,不自動關閉;失敗只記 warn(下載已被拒) */
+  async onPackageTampered(ctx: Ctx, deviceRef: number, detail: Record<string, unknown>): Promise<void> {
+    try {
+      const r = await this.store.openAlert({
+        deviceRef,
+        rule: 'software_file_tampered',
+        severity: 'critical',
+        detail: JSON.stringify(detail),
+        keepDetail: true,
+        at: this.now(),
+      });
+      ctx.log.error({ deviceRef, alertId: r.alertId, ...detail }, '軟體庫安裝檔與登錄不符,已開告警');
+    } catch (err) {
+      ctx.log.warn({ err, deviceRef }, 'software_file_tampered 告警寫入失敗');
     }
   }
 

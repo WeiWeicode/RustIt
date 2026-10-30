@@ -4,7 +4,7 @@
  * Mongo 用獨立資料庫 ita_int_test、Redis 用前綴 ita:int_test:,不碰開發資料。
  */
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -20,6 +20,8 @@ import { CommandFileService } from '../../src/services/command-files.js';
 import { SqlDeviceStore } from '../../src/stores/sql-store.js';
 import { SqlMonitorStore } from '../../src/stores/sql-monitor-store.js';
 import { SqlReleaseStore } from '../../src/stores/sql-release-store.js';
+import { SqlSoftwareStore } from '../../src/stores/sql-software-store.js';
+import { displayNameLike, installSnapshot } from '../../src/services/software-service.js';
 import { AlertService } from '../../src/services/alert-service.js';
 import { CommandDispatcher } from '../../src/services/command-dispatcher.js';
 import { parseCompanyDomains } from '../../src/services/company.js';
@@ -197,6 +199,17 @@ describe('SQL Server + Mongo + Redis', () => {
     assert.equal(conn.sent.filter((m) => m.type === 'command').length, 1);
     const shown = await commands.create(ctx, who, 'basic', device.deviceId, { kind: 'message.show', params: { text: '整合測試' } });
     assert.equal(shown.state, 'sent');
+    // 重連 hello 只退回 sentBefore 之前送出的(sent_at 比較)
+    const store = new SqlCommandStore(() => sql.connection());
+    assert.equal(await store.requeueSent(device.id, new Date(Date.now() - 60_000)), 0);
+    assert.equal((await commands.get(ctx, shown.commandId)).state, 'sent');
+    // 反向:sentBefore 晚於送出時間 → 退回(另一台,不影響下面的狀態斷言)
+    const peer = await service.identify(ctx, 'O=GigaNexus Dev,CN=PC-EXAMPLE-REQUEUE', 'f'.repeat(40));
+    await service.connected(ctx, peer, new FakeConnection());
+    const peerCmd = await commands.create(ctx, who, 'basic', peer.deviceId, { kind: 'inventory.collect', expiresInSec: 86400 });
+    assert.equal(peerCmd.state, 'sent');
+    assert.equal(await store.requeueSent(peer.id, new Date(Date.now() + 60_000)), 1);
+    assert.equal((await commands.get(ctx, peerCmd.commandId)).state, 'queued');
 
     assert.deepEqual(await commands.onUpdate(ctx, device.id, { command_id: queued.commandId, state: 'acked' }), { command_id: queued.commandId, accepted: true, state: 'acked' });
     await commands.onUpdate(ctx, device.id, { command_id: queued.commandId, state: 'running', progress: 30 });
@@ -551,5 +564,327 @@ describe('SQL Server + Mongo + Redis', () => {
     assert.equal((await rel.listRings()).filter((x) => x.targetVersion === '0.7.1').length, 0);
     assert.equal((await rel.deviceUpgrades(d.id))[0]!.forcedVersion, null);
     assert.equal((await rel.getRelease(r.releaseId))?.status, 'revoked');
+  });
+  it('P7(0008):套件登錄與重複、狀態條件更新(退回 draft / tested / 同人不可發佈 / CHECK)、撤回取消 queued 安裝、測試結果與指派、已安裝台數、批次核可 / 駁回 / 逾期 / done、全域並行計數', async () => {
+    const sw = new SqlSoftwareStore(() => sql.connection());
+    const cmds = new SqlCommandStore(() => sql.connection());
+    const svc = new DeviceService(sql, mongo, redis, { heartbeatIntervalSec: 30 });
+    const d = await svc.identify(ctx, 'O=GigaNexus Dev,CN=PC-P7-01', '8'.repeat(40));
+    const d2 = await svc.identify(ctx, 'O=GigaNexus Dev,CN=PC-P7-02', '9'.repeat(40));
+    const inv = structuredClone(inventoryRequest({ content_hash: '7'.repeat(64) }));
+    inv.inventory.software = [{ name: '7-Zip 24.09 (x64_edition)', version: '24.09', publisher: 'Igor Pavlov', install_date: '2026-10-20' }];
+    await svc.ingestInventory(ctx, d, inv);
+    const creator = { emp: 'S000001', name: '登錄人' };
+    const reviewer = { emp: 'S000002', name: '覆核人' };
+    const at = new Date('2026-10-21T00:00:00Z');
+    const base = {
+      name: '7-Zip',
+      version: '24.09',
+      fileName: '7-Zip/24.09/7z2409-x64.msi',
+      sha256: 'a'.repeat(64),
+      sizeBytes: 1572864,
+      installerType: 'msi' as const,
+      installArgs: 'ALLUSERS=1',
+      uninstallArgs: null,
+      detectType: 'display_name' as const,
+      detectValue: '7-Zip%',
+      rebootPolicy: 'never' as const,
+      timeoutSec: 1800,
+      licenseLimit: 10,
+      notes: '整合測試',
+      actor: creator,
+      at,
+      requestId: 'int-p7',
+    };
+    const p = await sw.addPackage(base);
+    assert.deepEqual([p.status, p.signerThumbprints, p.licenseLimit, p.createdByEmp, p.timeoutSec], ['draft', [], 10, 'S000001', 1800]);
+    await assert.rejects(sw.addPackage({ ...base, fileName: '7-Zip/24.09/other.msi' }), { code: 'ITA_PACKAGE_EXISTS' });
+    await assert.rejects(sw.addPackage({ ...base, version: '24.10' }), { code: 'ITA_PACKAGE_EXISTS' }, '同一檔案');
+    assert.equal((await sw.listPackages({ q: 'zip', status: 'draft' })).length, 1);
+    assert.equal((await sw.listPackages({ q: '%' })).length, 0, '關鍵字的萬用字元跳脫');
+
+    // 狀態條件更新
+    assert.equal(await sw.updatePackage(p.packageId, 'tested', { notes: 'x', argsChanged: false, revertToDraft: false }, creator, at, 'int-p7'), false);
+    assert.equal(await sw.updatePackage(p.packageId, 'draft', { installArgs: 'ALLUSERS=1 /norestart', licenseLimit: null, argsChanged: true, revertToDraft: false }, creator, at, 'int-p7'), true);
+    // 0009:安裝逾時可改;超出 300–7200 由 CHECK 擋下(程式先驗,這是第二道防線)
+    assert.equal(await sw.updatePackage(p.packageId, 'draft', { timeoutSec: 3600, argsChanged: false, revertToDraft: false }, creator, at, 'int-p7'), true);
+    assert.equal((await sw.getPackage(p.packageId))?.timeoutSec, 3600);
+    await assert.rejects(sw.updatePackage(p.packageId, 'draft', { timeoutSec: 60, argsChanged: false, revertToDraft: false }, creator, at, 'int-p7'));
+    await assert.rejects(sw.updatePackage(p.packageId, 'draft', { timeoutSec: 7201, argsChanged: false, revertToDraft: false }, creator, at, 'int-p7'));
+    assert.equal(await sw.publish(p.packageId, reviewer, at, 'int-p7'), false, 'draft 不能發佈');
+    assert.equal(await sw.markTested(p.packageId, ['b'.repeat(40)], ['b'.repeat(40), 'c'.repeat(40)], creator, at, 'int-p7'), true);
+    assert.equal(await sw.publish(p.packageId, creator, at, 'int-p7'), false, '登錄人不能發佈');
+    assert.equal(await sw.publish(p.packageId, reviewer, at, 'int-p7'), true);
+    const pub = (await sw.getPackage(p.packageId))!;
+    assert.deepEqual(
+      [pub.status, pub.installArgs, pub.licenseLimit, pub.signerThumbprints, pub.observedSigners.length, pub.testedByEmp, pub.publishedByEmp],
+      ['published', 'ALLUSERS=1 /norestart', null, ['b'.repeat(40)], 2, 'S000001', 'S000002'],
+    );
+    // 第二道防線:CHECK 不允許發佈人 = 登錄人
+    const pool = await sql.connection();
+    await assert.rejects(
+      pool.request().input('pid', p.packageId).query(`UPDATE ita.software_package SET published_by_emp = created_by_emp WHERE package_id = @pid`),
+      (err: { number?: number }) => err.number === 547,
+    );
+    // 改安裝參數退回 draft(清除簽章者與覆核)
+    assert.equal(await sw.updatePackage(p.packageId, 'published', { installArgs: 'ALLUSERS=2', argsChanged: true, revertToDraft: true }, creator, at, 'int-p7'), true);
+    const back = (await sw.getPackage(p.packageId))!;
+    assert.deepEqual([back.status, back.signerThumbprints, back.publishedByEmp, back.testedAt, back.updatedByEmp], ['draft', [], null, null, 'S000001']);
+    // D2-2:覆核人改參數後,自己不能發佈(程式條件與 CHECK)
+    assert.equal(await sw.updatePackage(p.packageId, 'draft', { installArgs: 'ALLUSERS=1', argsChanged: true, revertToDraft: false }, reviewer, at, 'int-p7'), true);
+    assert.deepEqual((await sw.getPackage(p.packageId))!.editors, ['S000001', 'S000002'], '退回 draft 後修改人累加');
+    assert.equal(await sw.markTested(p.packageId, ['b'.repeat(40)], ['b'.repeat(40)], creator, at, 'int-p7'), true);
+    assert.equal(await sw.publish(p.packageId, reviewer, at, 'int-p7'), false, '最後修改參數的人不能發佈');
+    await assert.rejects(
+      pool.request().input('pid', p.packageId).query(`UPDATE ita.software_package SET published_by_emp = N'S000002' WHERE package_id = @pid`),
+      (err: { number?: number }) => err.number === 547,
+    );
+    assert.equal(await sw.updatePackage(p.packageId, 'tested', { installArgs: 'ALLUSERS=2', argsChanged: true, revertToDraft: true }, creator, at, 'int-p7'), true);
+
+    // 指令參數快照:測試結果、下載授權(只認 sent / acked / running)
+    const newCmd = (deviceRef: number, dn: string, params: object, batchRef?: string) => ({
+      commandId: randomUUID(),
+      deviceRef,
+      certDn: dn,
+      kind: 'software.install',
+      level: 'admin' as const,
+      params: JSON.stringify(params),
+      expiresAt: new Date(Date.now() + 86_400_000),
+      idempotencyKey: null,
+      createdByEmp: 'S000001',
+      createdByName: null,
+      requestId: batchRef ?? 'int-p7',
+      createdAt: new Date(),
+    });
+    const snap = installSnapshot(back);
+    const c1 = newCmd(d.id, d.certDn, snap);
+    const c2 = newCmd(d.id, d.certDn, snap);
+    await cmds.createCommands(null, [c1, c2]);
+    assert.equal((await sw.installResults(p.packageId, 10)).length, 2);
+    assert.equal((await sw.installResults(randomUUID(), 10)).length, 0);
+    assert.deepEqual(await sw.activeInstallPackages(d.id), []);
+    const rec1 = (await cmds.getCommand(c1.commandId))!;
+    await cmds.transition(rec1.id, ['queued'], { state: 'sent', at: new Date() });
+    assert.deepEqual((await sw.activeInstallPackages(d.id)).map((a) => a.packageId), [p.packageId]);
+    assert.equal(await cmds.activeOfKinds(['software.install', 'software.uninstall']), 1);
+    assert.equal((await cmds.queuedOfKinds(['software.install'], new Date(), 10)).filter((c) => c.deviceRef === d.id).length, 1);
+    // 撤回:同一交易取消尚未送出的安裝(已送出的不動)
+    const rv = await sw.revoke(p.packageId, creator, at, 'int-p7');
+    assert.deepEqual(rv, { ok: true, canceledCommands: 1 });
+    assert.deepEqual([(await cmds.getCommand(c2.commandId))!.state, (await cmds.getCommand(c2.commandId))!.errorCode], ['canceled', 'PACKAGE_REVOKED']);
+    assert.equal((await cmds.getCommand(c1.commandId))!.state, 'sent');
+    assert.deepEqual(await sw.revoke(p.packageId, creator, at, 'int-p7'), { ok: false, canceledCommands: 0 });
+    // 0010:撤回後同一檔案可重新登錄(篩選唯一索引只限未撤回);版本號仍不可重用;兩筆未撤回不可共用檔案
+    await assert.rejects(sw.addPackage(base), { code: 'ITA_PACKAGE_EXISTS' }, '已撤回的版本號');
+    const again = await sw.addPackage({ ...base, version: '24.10' });
+    assert.equal(again.fileName, base.fileName);
+    await assert.rejects(sw.addPackage({ ...base, version: '24.11' }), { code: 'ITA_PACKAGE_EXISTS' }, '未撤回仍佔用');
+    assert.equal((await sw.revoke(again.packageId, creator, at, 'int-p7')).ok, true);
+    assert.equal(await sw.deviceRing(d.id), 'all');
+
+    // 已安裝台數(DisplayName LIKE;_ 與 [ 跳脫、% 萬用)
+    assert.deepEqual(await sw.installedCounts([displayNameLike('7-Zip%'), displayNameLike('7-Zip 24.09 (x64_edition)'), displayNameLike('7-Zip 24.09 (x64Xedition)')]), [1, 1, 0]);
+    assert.deepEqual(await sw.installedCounts([displayNameLike('7-Zip%')], []), [0], '資料範圍 IN 空清單');
+    assert.deepEqual(
+      (await sw.installedDevices(displayNameLike('7-Zip%'), { onlyRefs: [d.id, d2.id], limit: 10 })).map((x) => x.deviceId),
+      [d.deviceId],
+    );
+    assert.deepEqual(await sw.installedDevices(displayNameLike('7-Zip%'), { onlyRefs: [], limit: 10 }), []);
+
+    // 批次核可(B1):pending_approval 不在待送清單;同人不可核可;核可後延長有效期限;駁回、逾期取消 queued;全部結束 → done
+    const newBatch = (createdAt: Date) => ({
+      batchId: randomUUID(),
+      kind: 'software.uninstall',
+      level: 'admin' as const,
+      params: '{}',
+      maxConcurrent: 20,
+      requiresApproval: true,
+      idempotencyKey: null,
+      createdByEmp: 'S000001',
+      createdByName: null,
+      requestId: 'int-p7',
+      createdAt,
+    });
+    const un = (deviceRef: number, dn: string) => ({ ...newCmd(deviceRef, dn, { package_id: p.packageId }), kind: 'software.uninstall' });
+    const b1 = newBatch(new Date());
+    await cmds.createCommands(b1, [un(d.id, d.certDn), un(d2.id, d2.certDn)]);
+    const g1 = (await cmds.getBatch(b1.batchId))!;
+    assert.deepEqual([g1.state, g1.requiresApproval, g1.counts], ['pending_approval', true, { queued: 2 }]);
+    const pending = await cmds.queuedForBatch(g1.id, new Date(), 10);
+    assert.deepEqual([pending.length, pending[0]!.batchState], [2, 'pending_approval']);
+    assert.equal((await cmds.queuedOfKinds(['software.uninstall'], new Date(), 10)).length, 0, '待核可不送');
+    assert.equal(await cmds.approveBatch(g1.id, creator, at, new Date('2030-01-01T00:00:00Z')), false, '建立人不可核可');
+    assert.equal(await cmds.approveBatch(g1.id, reviewer, at, new Date('2030-01-01T00:00:00Z')), true);
+    assert.equal(await cmds.approveBatch(g1.id, reviewer, at, new Date('2030-01-01T00:00:00Z')), false);
+    const ap = (await cmds.getBatch(b1.batchId))!;
+    assert.deepEqual([ap.state, ap.approvedByEmp, ap.approvedByName], ['running', 'S000002', '覆核人']);
+    const q = await cmds.queuedOfKinds(['software.uninstall'], new Date(), 10);
+    assert.deepEqual([q.length, q[0]!.expiresAt.toISOString()], [2, '2030-01-01T00:00:00.000Z']);
+    await assert.rejects(
+      pool.request().input('id', g1.id).query(`UPDATE ita.command_batch SET approved_by_emp = created_by_emp WHERE id = @id`),
+      (err: { number?: number }) => err.number === 547,
+    );
+    for (const c of q) await cmds.transition(c.id, ['queued'], { state: 'succeeded', at: new Date() });
+    await cmds.finishBatchIfDone(g1.id);
+    assert.equal((await cmds.getBatch(b1.batchId))!.state, 'done');
+
+    const b2 = newBatch(new Date());
+    await cmds.createCommands(b2, [un(d.id, d.certDn)]);
+    const g2 = (await cmds.getBatch(b2.batchId))!;
+    assert.equal(await cmds.rejectBatch(g2.id, creator, at, '目標有誤'), true);
+    assert.equal(await cmds.rejectBatch(g2.id, creator, at, '再一次'), false);
+    const rj = (await cmds.getBatch(b2.batchId))!;
+    assert.deepEqual([rj.state, rj.rejectedByEmp, rj.rejectReason, rj.counts], ['rejected', 'S000001', '目標有誤', { canceled: 1 }]);
+
+    const b3 = newBatch(new Date(Date.now() - 25 * 3_600_000));
+    await cmds.createCommands(b3, [un(d2.id, d2.certDn)]);
+    assert.equal(await cmds.expirePendingBatches(new Date(Date.now() - 24 * 3_600_000), new Date()), 1);
+    const ex = (await cmds.getBatch(b3.batchId))!;
+    assert.deepEqual([ex.state, ex.counts], ['expired', { canceled: 1 }]);
+    assert.equal(await cmds.expirePendingBatches(new Date(Date.now() - 24 * 3_600_000), new Date()), 0);
+
+    // 批次清單(P7-5):新到舊、可依狀態與建立時間篩、游標分頁、含各狀態台數
+    const b4 = newBatch(new Date());
+    await cmds.createCommands(b4, [un(d.id, d.certDn), un(d2.id, d2.certDn)]);
+    const pend = await cmds.listBatches({ state: 'pending_approval', createdAfter: new Date(Date.now() - 24 * 3_600_000), limit: 10 });
+    assert.deepEqual(
+      pend.map((x) => [x.batchId, x.counts]),
+      [[b4.batchId, { queued: 2 }]],
+    );
+    // 只看本測試建立的批次(前面的 P4 測試也建立了批次)
+    const mine = new Set<string>([b1.batchId, b2.batchId, b3.batchId, b4.batchId]);
+    const all = (await cmds.listBatches({ limit: 50 })).filter((x) => mine.has(x.batchId));
+    assert.deepEqual(
+      all.map((x) => [x.batchId, x.state]),
+      [
+        [b4.batchId, 'pending_approval'],
+        [b3.batchId, 'expired'],
+        [g2.batchId, 'rejected'],
+        [g1.batchId, 'done'],
+      ],
+    );
+    assert.deepEqual(all[2]!.counts, { canceled: 1 });
+    assert.deepEqual((await cmds.listBatches({ beforeId: all[1]!.id, limit: 1 })).map((x) => x.batchId), [g2.batchId]);
+  });
+
+  it('P7 收尾:撤回記錄原狀態、整批取消回傳裝置、批次收尾掃描、D2-1 累計台數、reboot_required 起算時間', async () => {
+    const sw = new SqlSoftwareStore(() => sql.connection());
+    const cmds = new SqlCommandStore(() => sql.connection());
+    const monitor = new SqlMonitorStore(() => sql.connection());
+    const svc = new DeviceService(sql, mongo, redis, { heartbeatIntervalSec: 30 });
+    const d = await svc.identify(ctx, 'O=GigaNexus Dev,CN=PC-P7F-01', 'd'.repeat(40));
+    const d2 = await svc.identify(ctx, 'O=GigaNexus Dev,CN=PC-P7F-02', 'e'.repeat(40));
+    await svc.ingestInventory(ctx, d, structuredClone(inventoryRequest({ content_hash: '6'.repeat(64) })));
+    const pool = await sql.connection();
+    const creator = { emp: 'S000011', name: '登錄人' };
+    const reviewer = { emp: 'S000012', name: '覆核人' };
+    const at = new Date();
+    const pkgInput = (name: string) => ({
+      name,
+      version: '1.0',
+      fileName: `${name}/1.0/setup.msi`,
+      sha256: 'f'.repeat(64),
+      sizeBytes: 1024,
+      installerType: 'msi' as const,
+      installArgs: null,
+      uninstallArgs: null,
+      detectType: 'display_name' as const,
+      detectValue: `${name}%`,
+      rebootPolicy: 'never' as const,
+      timeoutSec: 1800,
+      licenseLimit: null,
+      notes: null,
+      actor: creator,
+      at,
+      requestId: 'int-p7f',
+    });
+    // revoked_from:撤回時記下原狀態
+    const draft = await sw.addPackage(pkgInput('ToolA'));
+    assert.equal((await sw.revoke(draft.packageId, creator, at, 'int-p7f')).ok, true);
+    const rv = (await sw.getPackage(draft.packageId))!;
+    assert.deepEqual([rv.status, rv.revokedFrom], ['revoked', 'draft']);
+    const p = await sw.addPackage(pkgInput('ToolB'));
+
+    const newCmd = (deviceRef: number, dn: string, kind = 'software.install', emp = creator.emp) => ({
+      commandId: randomUUID(),
+      deviceRef,
+      certDn: dn,
+      kind,
+      level: 'admin' as const,
+      params: JSON.stringify(installSnapshot(p)),
+      expiresAt: new Date(Date.now() + 86_400_000),
+      idempotencyKey: null,
+      createdByEmp: emp,
+      createdByName: null,
+      requestId: 'int-p7f',
+      createdAt: new Date(),
+    });
+    const newBatch = (requiresApproval: boolean, createdAt = new Date(), emp = creator.emp) => ({
+      batchId: randomUUID(),
+      kind: 'software.install',
+      level: 'admin' as const,
+      params: '{}',
+      maxConcurrent: 20,
+      requiresApproval,
+      idempotencyKey: null,
+      createdByEmp: emp,
+      createdByName: null,
+      requestId: 'int-p7f',
+      createdAt,
+    });
+
+    // 整批取消(檔案被換掉,M1):回傳被取消指令的裝置;已送出的不動;批次由收尾掃描結束
+    const b = newBatch(false);
+    const q1 = newCmd(d.id, d.certDn);
+    const q2 = newCmd(d2.id, d2.certDn);
+    await cmds.createCommands(b, [q1, q2]);
+    assert.equal((await cmds.getBatch(b.batchId))!.state, 'running');
+    const sent = (await cmds.getCommand(q1.commandId))!;
+    await cmds.transition(sent.id, ['queued'], { state: 'sent', at: new Date() });
+    assert.deepEqual(await sw.cancelQueuedInstalls(p.packageId, 'PACKAGE_FILE_CHANGED', new Date()), [d2.id]);
+    const c2 = (await cmds.getCommand(q2.commandId))!;
+    assert.deepEqual([c2.state, c2.errorCode], ['canceled', 'PACKAGE_FILE_CHANGED']);
+    // 前面測試留下的批次也可能被收尾,只看本測試的批次
+    const lookback = new Date(Date.now() - 8 * 86_400_000);
+    await cmds.finishIdleBatches(lookback);
+    assert.equal((await cmds.getBatch(b.batchId))!.state, 'running', '還有已送出的指令');
+    await cmds.transition(sent.id, ['sent'], { state: 'succeeded', at: new Date(), resultSummary: JSON.stringify({ exit_code: 3010, reboot_required: true }) });
+    assert.ok((await cmds.finishIdleBatches(lookback)) >= 1);
+    assert.equal((await cmds.getBatch(b.batchId))!.state, 'done');
+    // 待核可的批次不收尾(核可 / 駁回 / 逾期另有流程);超過回溯期間的批次不掃
+    const pend = newBatch(true);
+    const pc = newCmd(d.id, d.certDn);
+    await cmds.createCommands(pend, [pc]);
+    await cmds.transition((await cmds.getCommand(pc.commandId))!.id, ['queued'], { state: 'canceled', at: new Date() });
+    const old = newBatch(false, new Date(Date.now() - 10 * 86_400_000));
+    await cmds.createCommands(old, [{ ...newCmd(d2.id, d2.certDn), createdAt: old.createdAt }]);
+    await pool
+      .request()
+      .input('bid', old.batchId)
+      .query(`UPDATE ita.command SET state = 'canceled' WHERE batch_ref = (SELECT id FROM ita.command_batch WHERE batch_id = @bid)`);
+    await cmds.finishIdleBatches(lookback);
+    assert.deepEqual([(await cmds.getBatch(pend.batchId))!.state, (await cmds.getBatch(old.batchId))!.state], ['pending_approval', 'running']);
+
+    // D2-1:此人 24 小時內涉及的電腦台數;待核可 / 已核可批次不計,未核可的 running / done 批次與單台照計(取消的單台也計)
+    const since = new Date(Date.now() - 86_400_000);
+    const kinds = ['software.install', 'software.uninstall'];
+    assert.equal(await cmds.recentGatedTargets(creator.emp, kinds, since), 2, '未核可的 done 批次含 d、d2;待核可與 10 天前的不計');
+    const single = newCmd(d.id, d.certDn, 'software.uninstall', 'S000013');
+    await cmds.createCommands(null, [single]);
+    await cmds.transition((await cmds.getCommand(single.commandId))!.id, ['queued'], { state: 'canceled', at: new Date() });
+    assert.equal(await cmds.recentGatedTargets('S000013', kinds, since), 1, '取消的單台照計');
+    assert.equal(await cmds.recentGatedTargets('s000013', kinds, since), 1, '工號不分大小寫');
+    assert.equal(await cmds.recentGatedTargets('S000013', ['system.reboot'], since), 0, '另一組類型');
+    const ap = newBatch(true, new Date(), 'S000014');
+    await cmds.createCommands(ap, [newCmd(d.id, d.certDn, 'software.install', 'S000014'), newCmd(d2.id, d2.certDn, 'software.install', 'S000014')]);
+    assert.equal(await cmds.recentGatedTargets('S000014', kinds, since), 0, '待核可不計');
+    assert.equal(await cmds.approveBatch((await cmds.getBatch(ap.batchId))!.id, reviewer, new Date(), new Date(Date.now() + 86_400_000)), true);
+    assert.equal(await cmds.recentGatedTargets('S000014', kinds, since), 0, '已核可不計');
+
+    // reboot_required:開機時間之後成功、結果含 reboot_required 的軟體指令,取最早完成時間;沒有資產(開機時間未知)的不算
+    const t = await monitor.monitorTargets(new Date(Date.now() - 86_400_000));
+    const rb = t.find((x) => x.deviceRef === d.id)!.rebootRequiredSince;
+    assert.ok(rb && Math.abs(rb.getTime() - Date.now()) < 120_000, String(rb));
+    assert.equal(t.find((x) => x.deviceRef === d2.id)!.rebootRequiredSince, null);
   });
 });

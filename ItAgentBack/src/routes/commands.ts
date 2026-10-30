@@ -1,7 +1,8 @@
 /**
  * 指令 API(ENDPOINT-AGENT-GUIDE §8.2–§8.3;PLATFORM-PLAN P4 §4.4、§5.3):對外 /api/endpoint/*,權限由 BFF 依 x-permission 檢查。
  *   - 依風險拆路徑:basic-commands 只接受 basic 類型、admin-commands 只接受 admin 類型(否則 400 ENDPOINT_COMMAND_LEVEL_MISMATCH);
- *     admin 第一個類型 agent.upgrade(P6)。admin 批次等派送的第二人核可(PLATFORM-PLAN B1)一起做,先只開單台
+ *     admin 類型 agent.upgrade(P6)、software.install / software.uninstall / system.reboot(P7)。admin 批次只開軟體派送
+ *     (POST /software/{id}/deploy,routes/software.ts);超過門檻的批次待第二人核可:POST /batches/{id}/approve、/reject(B1)
  *   - POST 支援 Idempotency-Key(同一工號 + 同一 key 回傳既有的那筆);建立指令設 x-audit-level: meta,不設 x-cache-ttl
  *   - 操作人(工號、姓名)取自內部 Token,寫入稽核(§8.5)
  *   - 指令附檔(logs.collect 日誌,P4-2):GET /commands/{id} 回應帶 files;下載 GET /commands/{id}/files/{fileId}(x-audit-level: meta)
@@ -11,9 +12,9 @@
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { COMMAND_KINDS, EXPIRES_MAX_SEC, EXPIRES_MIN_SEC } from '../commands/kinds.js';
 import { AppError } from '../errors.js';
-import { BATCH_MAX_DEVICES, type CommandDispatcher } from '../services/command-dispatcher.js';
+import { BATCH_MAX_DEVICES, type ApprovalRoute, type CommandDispatcher } from '../services/command-dispatcher.js';
 import type { CommandFileService } from '../services/command-files.js';
-import type { CommandState } from '../stores/types.js';
+import type { BatchState, CommandState } from '../stores/types.js';
 import { mgmtCtx } from './mgmt-ctx.js';
 
 const STATES = ['queued', 'sent', 'acked', 'running', 'succeeded', 'failed', 'canceled', 'expired'] as const;
@@ -28,6 +29,11 @@ const commandSchema = {
   properties: {
     commandId: uuid,
     batchId: { type: ['string', 'null'], format: 'uuid' },
+    batchState: {
+      type: ['string', 'null'],
+      enum: ['pending_approval', 'running', 'done', 'rejected', 'expired', null],
+      description: '所屬批次狀態;軟體派送 / 重開機同一人 24 小時內累計超過門檻時,單台指令也會進入 pending_approval 的單台批次,需第二人核可',
+    },
     deviceId: uuid,
     computerName: { type: 'string' },
     kind: { type: 'string' },
@@ -98,6 +104,31 @@ const listQuery = {
 
 const listResponse = { type: 'object', properties: { items: { type: 'array', items: commandSchema }, nextCursor: strOrNull } } as const;
 
+const BATCH_STATES = ['pending_approval', 'running', 'done', 'rejected', 'expired'] as const;
+const actorOrNull = { type: ['object', 'null'], properties: { emp: { type: 'string' }, name: strOrNull } } as const;
+const batchSchema = {
+  type: 'object',
+  properties: {
+    batchId: uuid,
+    kind: { type: 'string' },
+    level: { type: 'string' },
+    params: { type: 'object', additionalProperties: true },
+    targetCount: { type: 'integer' },
+    maxConcurrent: { type: 'integer' },
+    state: { type: 'string', enum: BATCH_STATES, description: 'pending_approval 待第二人核可(指令不送出);rejected / expired 的指令皆已取消' },
+    requiresApproval: { type: 'boolean' },
+    approvalExpiresAt: dateOrNull,
+    approvedBy: actorOrNull,
+    approvedAt: dateOrNull,
+    rejectedBy: actorOrNull,
+    rejectedAt: dateOrNull,
+    rejectReason: strOrNull,
+    createdBy: { type: 'object', properties: { emp: { type: 'string' }, name: strOrNull } },
+    createdAt: { type: 'string', format: 'date-time' },
+    counts: { type: 'object', additionalProperties: { type: 'integer' } },
+  },
+} as const;
+
 interface CreateBody {
   kind: string;
   params?: Record<string, unknown>;
@@ -161,7 +192,7 @@ export function commandRoutes(commands: CommandDispatcher, files?: CommandFileSe
           operationId: 'endpoint.command.admin.create',
           summary: '建立管理指令',
           description:
-            '對一台電腦建立會影響使用者或系統的指令(目前:agent.upgrade 立即檢查升級或指定版本)。流程同一般指令,回 202 與 commandId。類型不屬於 admin 回 400 ENDPOINT_COMMAND_LEVEL_MISMATCH;agent.upgrade 指定的版本未登錄回 404 ITA_RELEASE_NOT_FOUND、未發佈或已撤回回 409。',
+            '對一台電腦建立會影響使用者或系統的指令:agent.upgrade(立即檢查升級或指定版本)、software.install / software.uninstall(params 只帶 packageId,主機換成目錄快照)、system.reboot。流程同一般指令,回 202 與 commandId。類型不屬於 admin 回 400 ENDPOINT_COMMAND_LEVEL_MISMATCH;agent.upgrade 指定的版本未登錄回 404 ITA_RELEASE_NOT_FOUND、未發佈或已撤回回 409;軟體套件不存在 404 ITA_PACKAGE_NOT_FOUND、未發佈套件派到非 pilot 電腦 409 ITA_PACKAGE_NOT_PUBLISHED、已撤回 409 ITA_PACKAGE_REVOKED、超過授權數 409 ITA_LICENSE_EXCEEDED。',
           tags: ['端點指令'],
           'x-permission': 'endpoint.command.admin',
           'x-audit-level': 'meta',
@@ -170,6 +201,11 @@ export function commandRoutes(commands: CommandDispatcher, files?: CommandFileSe
             '  假如 使用者擁有 endpoint.command.admin',
             '  當 呼叫 POST /api/endpoint/devices/{deviceId}/admin-commands,kind 為 "agent.upgrade"、params 為 {"component":"agent"}',
             '  那麼 回應 202',
+            '場景: 對測試機安裝尚未發佈的軟體',
+            '  假如 7-Zip 24.09 為 draft,電腦在 pilot 環',
+            '  當 呼叫 POST /api/endpoint/devices/{deviceId}/admin-commands,kind 為 "software.install"、params 為 {"packageId":"{packageId}"}',
+            '  那麼 回應 202',
+            '  而且 params.sha256 為套件的 SHA-256',
             '場景: 從管理指令路徑送出一般指令',
             '  當 呼叫 POST /api/endpoint/devices/{deviceId}/admin-commands,kind 為 "inventory.collect"',
             '  那麼 回應 400',
@@ -214,6 +250,8 @@ export function commandRoutes(commands: CommandDispatcher, files?: CommandFileSe
               type: 'object',
               properties: {
                 batchId: uuid,
+                state: { type: 'string', enum: BATCH_STATES },
+                requiresApproval: { type: 'boolean' },
                 commands: {
                   type: 'array',
                   items: { type: 'object', properties: { deviceId: uuid, commandId: uuid, state: { type: 'string', enum: STATES } } },
@@ -365,13 +403,44 @@ export function commandRoutes(commands: CommandDispatcher, files?: CommandFileSe
       async (req) => commands.list(ctx(req), { ...req.query, batchId: req.query.batchId?.toLowerCase() }),
     );
 
+    app.get<{ Querystring: { state?: BatchState; cursor?: string; limit?: number } }>(
+      '/v1/batches',
+      {
+        schema: {
+          operationId: 'endpoint.command.batch.list',
+          summary: '批次清單',
+          description:
+            '指令批次,新到舊;可依狀態篩選(待核可清單用 state=pending_approval,只列 24 小時核可期限內的),以 nextCursor 取下一頁。含資料範圍外電腦的批次不列出。各台明細以 GET /commands?batchId= 查詢。',
+          tags: ['端點指令'],
+          'x-permission': 'endpoint.device.read',
+          'x-gherkin': [
+            '場景: 列出待核可的批次',
+            '  假如 有一個 21 台的軟體派送批次為 pending_approval',
+            '  當 呼叫 GET /api/endpoint/batches?state=pending_approval',
+            '  那麼 回應 200',
+            '  而且 items 包含該批次,state 為 "pending_approval"',
+          ].join('\n'),
+          querystring: {
+            type: 'object',
+            properties: {
+              state: { type: 'string', enum: BATCH_STATES },
+              cursor: { type: 'string', pattern: '^\\d+$', description: '上一頁回傳的 nextCursor' },
+              limit: { type: 'integer', minimum: 1, maximum: 100, default: 50 },
+            },
+          },
+          response: { 200: { type: 'object', properties: { items: { type: 'array', items: batchSchema }, nextCursor: strOrNull } } },
+        },
+      },
+      async (req) => commands.listBatches(ctx(req), req.query),
+    );
+
     app.get<{ Params: { batchId: string } }>(
       '/v1/batches/:batchId',
       {
         schema: {
           operationId: 'endpoint.command.batch.get',
           summary: '批次狀態',
-          description: '批次的指令類型、台數、同時執行上限與各狀態台數;各台明細以 GET /commands?batchId= 查詢。',
+          description: '批次的指令類型、台數、同時執行上限、狀態(含第二人核可資訊)與各狀態台數;各台明細以 GET /commands?batchId= 查詢。',
           tags: ['端點指令'],
           'x-permission': 'endpoint.device.read',
           'x-gherkin': [
@@ -381,25 +450,77 @@ export function commandRoutes(commands: CommandDispatcher, files?: CommandFileSe
             '  而且 回應的 code 為 "ITA_BATCH_NOT_FOUND"',
           ].join('\n'),
           params: { type: 'object', properties: { batchId: uuid }, required: ['batchId'] },
-          response: {
-            200: {
-              type: 'object',
-              properties: {
-                batchId: uuid,
-                kind: { type: 'string' },
-                level: { type: 'string' },
-                params: { type: 'object', additionalProperties: true },
-                targetCount: { type: 'integer' },
-                maxConcurrent: { type: 'integer' },
-                createdBy: { type: 'object', properties: { emp: { type: 'string' }, name: strOrNull } },
-                createdAt: { type: 'string', format: 'date-time' },
-                counts: { type: 'object', additionalProperties: { type: 'integer' } },
-              },
-            },
-          },
+          response: { 200: batchSchema },
         },
       },
       async (req) => commands.getBatch(ctx(req), req.params.batchId.toLowerCase()),
     );
+
+    // 第二人核可(PLATFORM-PLAN B1;P7-SOFTWARE-DESIGN §6):核可人需資料範圍涵蓋批次全部電腦(否則 404,同不存在)。
+    // 軟體派送批次:/approve、/reject(endpoint.software.manage);其他類型(system.reboot):/approve-command、/reject-command(endpoint.command.admin)
+    const approval = (route: ApprovalRoute) => {
+      const software = route === 'software';
+      const suffix = software ? '' : '-command';
+      const opSuffix = software ? '' : '-command';
+      const permission = software ? 'endpoint.software.manage' : 'endpoint.command.admin';
+      const scope = software ? '軟體派送(software.install / software.uninstall)' : '軟體派送以外(system.reboot 等)';
+      app.post<{ Params: { batchId: string } }>(
+        `/v1/batches/:batchId/approve${suffix}`,
+        {
+          schema: {
+            operationId: `endpoint.command.batch.approve${opSuffix}`,
+            summary: software ? '核可軟體派送批次' : '核可指令批次(重開機等)',
+            description:
+              `核可${scope}的待核可(pending_approval)批次;由建立人以外的 IT 核可後開始送出,指令有效期限自核可時起算。核可人是建立人回 403 ITA_APPROVER_SAME_AS_CREATOR;批次類型不屬於此路由回 403 ITA_APPROVAL_ROUTE_MISMATCH;不是待核可或已超過 24 小時回 409 ITA_BATCH_NOT_PENDING。` +
+              (software ? '核可前應確認套件、安裝參數、簽章者、雜湊、目標台數與並行數。' : '核可前應確認目標電腦、倒數時間與是否強制。'),
+            tags: ['端點指令'],
+            'x-permission': permission,
+            'x-audit-level': 'meta',
+            'x-gherkin': [
+              '場景: 建立人自己核可',
+              `  假如 S000001 建立了 21 台的${software ? '軟體派送' : '重開機'}批次`,
+              `  當 S000001 呼叫 POST /api/endpoint/batches/{batchId}/approve${suffix}`,
+              '  那麼 回應 403',
+              '  而且 回應的 code 為 "ITA_APPROVER_SAME_AS_CREATOR"',
+            ].join('\n'),
+            params: { type: 'object', properties: { batchId: uuid }, required: ['batchId'] },
+            response: { 200: batchSchema },
+          },
+        },
+        async (req) => commands.approveBatch(ctx(req), who(req), req.params.batchId.toLowerCase(), route),
+      );
+
+      app.post<{ Params: { batchId: string }; Body: { reason: string } }>(
+        `/v1/batches/:batchId/reject${suffix}`,
+        {
+          schema: {
+            operationId: `endpoint.command.batch.reject${opSuffix}`,
+            summary: software ? '駁回軟體派送批次' : '駁回指令批次(重開機等)',
+            description: `駁回${scope}的待核可批次(建立人也可撤回自己的批次),批次內指令全部取消。批次類型不屬於此路由回 403 ITA_APPROVAL_ROUTE_MISMATCH;不是待核可回 409 ITA_BATCH_NOT_PENDING。`,
+            tags: ['端點指令'],
+            'x-permission': permission,
+            'x-audit-level': 'meta',
+            'x-gherkin': [
+              '場景: 駁回待核可的批次',
+              '  假如 批次為 pending_approval',
+              `  當 呼叫 POST /api/endpoint/batches/{batchId}/reject${suffix},reason 為 "目標電腦有誤"`,
+              '  那麼 回應 200',
+              '  而且 state 為 "rejected"',
+            ].join('\n'),
+            params: { type: 'object', properties: { batchId: uuid }, required: ['batchId'] },
+            body: {
+              type: 'object',
+              required: ['reason'],
+              additionalProperties: false,
+              properties: { reason: { type: 'string', minLength: 1, maxLength: 500, pattern: '^[^\\u0000-\\u001F\\u007F]+$' } },
+            },
+            response: { 200: batchSchema },
+          },
+        },
+        async (req) => commands.rejectBatch(ctx(req), who(req), req.params.batchId.toLowerCase(), req.body.reason.trim(), route),
+      );
+    };
+    approval('software');
+    approval('command');
   };
 }

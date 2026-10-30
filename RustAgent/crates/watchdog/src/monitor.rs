@@ -49,6 +49,9 @@ pub struct AgentStatus {
     /// agent.upgrade 指令(P6-2):Watchdog 看到新的 id 就重設失敗次數並立即上報
     #[serde(default)]
     pub upgrade_requested: Option<UpgradeRequested>,
+    /// Agent 正在執行不可中斷的工作(`software`:軟體派送,P7);升級 Agent 延後到結束後
+    #[serde(default)]
+    pub busy: Option<String>,
 }
 
 /// 管道 status.upgrade_requested(pipe.schema.json)

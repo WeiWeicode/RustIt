@@ -8,7 +8,10 @@ import path from 'node:path';
 import { describe, it } from 'node:test';
 import { Ajv } from 'ajv';
 import addFormatsModule from 'ajv-formats';
+import { paramErrors } from '../src/commands/kinds.js';
 import { CONTRACT_IDS, compileWsEnvelope, loadContract } from '../src/contracts.js';
+import { argsErrors, installSnapshot, uninstallSnapshot } from '../src/services/software-service.js';
+import type { PackageRecord } from '../src/stores/types.js';
 import { CONTRACTS_DIR, example } from './helpers.js';
 
 const addFormats = ((addFormatsModule as unknown as { default?: unknown }).default ?? addFormatsModule) as (a: Ajv) => Ajv;
@@ -20,6 +23,9 @@ ajv.addSchema(JSON.parse(readFileSync(path.join(CONTRACTS_DIR, 'pipe.schema.json
 // 指令附檔上傳回應(P4-2):Agent 通道以 Fastify 回傳,只在契約測試編譯
 const COMMAND_FILE_ID = 'https://giganexus.local/rustit/contracts/command-file.schema.json';
 ajv.addSchema(JSON.parse(readFileSync(path.join(CONTRACTS_DIR, 'command-file.schema.json'), 'utf8')) as object);
+// 送簽佇列(S1-3):endpoint-server ↔ 簽章工作站(PowerShell),只在契約測試驗證範例
+const SIGN_QUEUE_ID = 'https://giganexus.local/rustit/contracts/sign-queue.schema.json';
+ajv.addSchema(JSON.parse(readFileSync(path.join(CONTRACTS_DIR, 'sign-queue.schema.json'), 'utf8')) as object);
 
 function check(ref: string, file: string) {
   const validate = ajv.getSchema(ref);
@@ -40,7 +46,11 @@ describe('資料契約範例', () => {
       'pipe-get-status.sample.json',
       'pipe-prepare-shutdown-ack.sample.json',
       'pipe-prepare-shutdown.sample.json',
+      'pipe-replace-watchdog-ack.sample.json',
+      'pipe-replace-watchdog.sample.json',
       'pipe-status.sample.json',
+      'sign-job.sample.json',
+      'sign-result.sample.json',
       'sync-response.sample.json',
       'sync.sample.json',
       'watchdog-report-response-target.sample.json',
@@ -48,9 +58,15 @@ describe('資料契約範例', () => {
       'watchdog-report-upgrade.sample.json',
       'watchdog-report.sample.json',
       'ws-command-log-level.sample.json',
+      'ws-command-software-install.sample.json',
+      'ws-command-software-uninstall.sample.json',
+      'ws-command-system-reboot-cancel.sample.json',
+      'ws-command-system-reboot.sample.json',
       'ws-command-update-ack.sample.json',
       'ws-command-update-diagnose.sample.json',
       'ws-command-update-logs.sample.json',
+      'ws-command-update-software-failed.sample.json',
+      'ws-command-update-software-install.sample.json',
       'ws-command-update.sample.json',
       'ws-command.sample.json',
       'ws-heartbeat-ack.sample.json',
@@ -61,6 +77,16 @@ describe('資料契約範例', () => {
       'ws-prepare-shutdown.sample.json',
       'ws-unsupported.sample.json',
     ]);
+  });
+
+  it('S1-3:送簽工作單與簽章結果;signed 缺雜湊、rejected 缺代碼不通過', () => {
+    check(`${SIGN_QUEUE_ID}#/definitions/SignJob`, 'sign-job.sample.json');
+    check(`${SIGN_QUEUE_ID}#/definitions/SignResult`, 'sign-result.sample.json');
+    const result = ajv.getSchema(`${SIGN_QUEUE_ID}#/definitions/SignResult`)!;
+    const sample = example<Record<string, unknown>>('sign-result.sample.json');
+    assert.equal(result({ ...sample, signed_sha256: null }), false);
+    assert.equal(result({ schema: 'sign-result/1', upload_id: sample.upload_id, state: 'rejected' }), false);
+    assert.ok(result({ schema: 'sign-result/1', upload_id: sample.upload_id, state: 'rejected', reject_code: 'VENDOR_NOT_ALLOWED' }));
   });
 
   it('inventory 請求與回應', () => {
@@ -108,6 +134,22 @@ describe('資料契約範例', () => {
     assert.equal(pipe({ ...ack, body: {} }), false, 'ack 缺 flushed');
     const st = example<Record<string, any>>('pipe-status.sample.json');
     assert.equal(pipe({ ...st, body: { ...st.body, upgrade_requested: { id: 'x', component: 'desktop' } } }), false);
+  });
+
+  it('P6-3:本機管道 replace_watchdog / ack', () => {
+    check(PIPE_ID, 'pipe-replace-watchdog.sample.json');
+    check(PIPE_ID, 'pipe-replace-watchdog-ack.sample.json');
+    const pipe = ajv.getSchema(PIPE_ID)!;
+    const req = example<Record<string, any>>('pipe-replace-watchdog.sample.json');
+    assert.equal(pipe({ ...req, body: { ...req.body, sha256: 'XYZ' } }), false, 'sha256 要 64 碼小寫十六進位');
+    assert.equal(pipe({ ...req, body: { ...req.body, signer_thumbprints: [] } }), false, '至少一個預期簽章者');
+    assert.equal(pipe({ ...req, body: { ...req.body, signer_thumbprints: ['not-a-thumbprint'] } }), false, '指紋 40 碼十六進位');
+    const { path: _omit, ...noPath } = req.body;
+    assert.equal(pipe({ ...req, body: noPath }), false, '缺 path');
+    const ack = example<Record<string, any>>('pipe-replace-watchdog-ack.sample.json');
+    assert.equal(pipe({ ...ack, body: {} }), false, 'ack 缺 accepted');
+    assert.equal(pipe({ ...ack, body: { accepted: false, error_code: 'SIGNER_NOT_TRUSTED', error_message: '簽章者不在本機清單' } }), true);
+    assert.equal(pipe({ ...ack, body: { accepted: false, error_code: '<script>' } }), false, 'error_code 只能是契約內的代碼');
   });
 
   it('P6:Watchdog 上報帶 upgrade、回應 target;升級事件依類型檢查 data', () => {
@@ -170,6 +212,47 @@ describe('資料契約範例', () => {
     assert.equal(validate({ ...sample, sha256: 'ABC' }), false);
     const { file_id: _f, ...noId } = sample;
     assert.equal(validate(noId), false);
+  });
+
+  it('P7:software.install / uninstall 參數快照、system.reboot 參數、安裝結果與錯誤代碼範例', () => {
+    for (const f of [
+      'ws-command-software-install',
+      'ws-command-software-uninstall',
+      'ws-command-system-reboot',
+      'ws-command-system-reboot-cancel',
+      'ws-command-update-software-install',
+      'ws-command-update-software-failed',
+    ])
+      check(CONTRACT_IDS.wsEnvelope, `${f}.sample.json`);
+    // 主機產生的快照欄位與範例一致(Agent 以同一份範例測解析)
+    const install = example<{ body: { params: Record<string, unknown> } }>('ws-command-software-install.sample.json').body.params;
+    const pkg = {
+      packageId: String(install.package_id),
+      name: String(install.name),
+      version: String(install.version),
+      sha256: String(install.sha256),
+      sizeBytes: Number(install.size_bytes),
+      installerType: install.installer_type,
+      installArgs: String(install.install_args),
+      uninstallArgs: '',
+      detectType: (install.detect as { type: string }).type,
+      detectValue: (install.detect as { value: string }).value,
+      rebootPolicy: install.reboot_policy,
+      timeoutSec: Number(install.timeout_sec),
+      signerThumbprints: install.signer_thumbprints,
+    } as unknown as PackageRecord;
+    assert.deepEqual(installSnapshot(pkg), install);
+    const uninstall = example<{ body: { params: Record<string, unknown> } }>('ws-command-software-uninstall.sample.json').body.params;
+    assert.deepEqual(uninstallSnapshot(pkg), uninstall);
+    assert.deepEqual(argsErrors('installArgs', String(install.install_args)), []);
+    assert.equal(paramErrors('system.reboot', example<{ body: { params: unknown } }>('ws-command-system-reboot.sample.json').body.params), null);
+    assert.notEqual(paramErrors('system.reboot', { delay_sec: 90000 }), null);
+    assert.notEqual(paramErrors('system.reboot', { message: '\u202Eevil' }), null);
+    assert.equal(paramErrors('system.reboot.cancel', example<{ body: { params: unknown } }>('ws-command-system-reboot-cancel.sample.json').body.params), null);
+    assert.notEqual(paramErrors('system.reboot.cancel', { delay_sec: 1 }), null, '\u53D6\u6D88\u4E0D\u5E36\u53C3\u6578');
+    const res = example<{ body: { result: Record<string, unknown> } }>('ws-command-update-software-install.sample.json').body.result;
+    assert.match(String(res.signer), /^[0-9a-f]{40}$/);
+    assert.ok(JSON.stringify(res).length <= 4000);
   });
 
   it('相容規則:不認得的欄位與 type 通過信封驗證;已知 type 缺必要欄位不通過', () => {

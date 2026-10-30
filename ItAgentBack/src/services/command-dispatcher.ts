@@ -10,12 +10,26 @@
  *   每分鐘掃描:queued / sent 超過 expires_at → expired;acked / running 超過 timeout_at → failed TIMEOUT。
  *   單一實例(連線表在本行程,指南 §8.4);多實例需改為 Redis pub/sub 轉送。
  *   資料範圍(E6):管理方法收 MgmtCtx;指令跟著裝置目前的公司,範圍外一律回與不存在相同的 404。
+ *   批次第二人核可(B1,P7-SOFTWARE-DESIGN §6):admin 批次超過 approvalThreshold 台 → pending_approval,指令留在 queued 不送出;
+ *     建立人以外、資料範圍涵蓋全部裝置的人核可後 running(指令有效期限自核可時起算);駁回或 24 小時無人核可 → 指令 canceled。
+ *   全域並行上限(limitedKinds,P7 software.*):這些類型 sent / acked / running 的總數達上限時留在 queued,有一筆結束再補送(軟上限)。
  */
 import { randomUUID } from 'node:crypto';
 import type { GatewayIdentity } from '@giganexus/backend-sdk';
-import { EXPIRES_MAX_SEC, EXPIRES_MIN_SEC, kindOf, paramErrors, type CommandKind } from '../commands/kinds.js';
+import { commandTimeoutSec, EXPIRES_MAX_SEC, EXPIRES_MIN_SEC, kindOf, paramErrors, SOFTWARE_KINDS, type CommandKind } from '../commands/kinds.js';
 import { AppError, storageUnavailable } from '../errors.js';
-import type { BatchRecord, CommandLevel, CommandPatch, CommandRecord, CommandState, CommandStore, DeviceRow, DeviceStore } from '../stores/types.js';
+import type {
+  BatchRecord,
+  BatchState,
+  CommandLevel,
+  CommandPatch,
+  CommandRecord,
+  CommandState,
+  CommandStore,
+  DeviceRow,
+  DeviceStore,
+  NewBatch,
+} from '../stores/types.js';
 import type { Ctx } from './device-service.js';
 import { inScope, scopeCompanies, type MgmtCtx } from './scope.js';
 
@@ -54,6 +68,8 @@ export interface CreateCommandInput {
 export interface CommandView {
   commandId: string;
   batchId: string | null;
+  /** 所屬批次的狀態(單台累計超過門檻時為 pending_approval,D2-1);不屬於批次為 null */
+  batchState: BatchState | null;
   deviceId: string;
   computerName: string;
   kind: string;
@@ -82,17 +98,39 @@ export interface BatchView {
   params: Record<string, unknown>;
   targetCount: number;
   maxConcurrent: number;
+  /** running 且全部指令已結束時顯示 done */
+  state: BatchState;
+  requiresApproval: boolean;
+  /** pending_approval 的核可期限 */
+  approvalExpiresAt: string | null;
+  approvedBy: { emp: string; name: string | null } | null;
+  approvedAt: string | null;
+  rejectedBy: { emp: string; name: string | null } | null;
+  rejectedAt: string | null;
+  rejectReason: string | null;
   createdBy: { emp: string; name: string | null };
   createdAt: string;
   counts: Partial<Record<CommandState, number>>;
 }
 
-/** 指令類型的建立前檢查與建立後處理(P6 agent.upgrade:ReleaseService 檢查版本、記錄強制版本) */
+/** 指令類型的建立前檢查與建立後處理(P6 agent.upgrade:ReleaseService 檢查版本、記錄強制版本;P7 software.*:目錄快照、授權數) */
 export interface KindHook {
-  /** 不符時丟 AppError,整筆(批次為整批)不建立 */
-  check(ctx: Ctx, deviceRef: number, params: Record<string, unknown>): Promise<void>;
-  /** 檢查通過後、寫入指令前(失敗則不建立指令;批次為全部檢查通過後逐台套用) */
-  apply(ctx: Ctx, deviceRef: number, params: Record<string, unknown>, actor: { emp: string; name: string | null }): Promise<void>;
+  /** 不符時丟 AppError,整筆(批次為整批)不建立;回傳物件時以它取代寫入指令的 params(P7 目錄快照) */
+  check(ctx: Ctx, deviceRef: number, params: Record<string, unknown>): Promise<Record<string, unknown> | void>;
+  /** 每台都通過 check 之後的整批檢查(單台也呼叫,deviceRefs 只有一台;P7 授權數) */
+  checkBatch?(ctx: Ctx, deviceRefs: number[], params: Record<string, unknown>): Promise<void>;
+  /** 檢查通過後、寫入指令前(失敗則不建立指令;批次為全部檢查通過後逐台套用);params 為管理 API 送來的原始參數 */
+  apply?(ctx: Ctx, deviceRef: number, params: Record<string, unknown>, actor: { emp: string; name: string | null }): Promise<void>;
+  /** Agent 回報終態、不支援、執行逾時之後(P7 告警);例外只記 warn,不影響指令狀態 */
+  onFinal?(ctx: Ctx, cmd: CommandRecord, fin: FinalInfo): Promise<void>;
+}
+
+/** 指令進入終態的結果(kindHooks.onFinal) */
+export interface FinalInfo {
+  state: CommandState;
+  errorCode: string | null;
+  /** Agent 的 result(JSON 字串) */
+  resultSummary: string | null;
 }
 
 export interface CommandDispatcherOptions {
@@ -101,6 +139,17 @@ export interface CommandDispatcherOptions {
   batchMaxConcurrent?: number;
   /** 依指令類型的建立前後處理 */
   kindHooks?: Record<string, KindHook>;
+  /** admin 批次超過幾台需第二人核可(B1,BATCH_APPROVAL_THRESHOLD) */
+  approvalThreshold?: number;
+  /** 跨批次的全域並行上限(P7 software.*,SOFTWARE_MAX_CONCURRENT) */
+  limitedKinds?: { kinds: readonly string[]; max: number };
+}
+
+export interface CreateBatchResult {
+  batchId: string;
+  state: BatchState;
+  requiresApproval: boolean;
+  commands: { deviceId: string; commandId: string; state: CommandState }[];
 }
 
 /** 狀態先後;終態同為 4,不可再變 */
@@ -113,6 +162,50 @@ const NOT_STARTED_CODES = new Set(['UNSUPPORTED_COMMAND', 'EXPIRED', 'INVALID_PA
 const RESULT_MAX = 4000;
 export const BATCH_MAX_DEVICES = 200;
 const SWEEP_LIMIT = 500;
+/** 待核可批次的核可期限(B1:24 小時無人核可 → expired) */
+export const APPROVAL_WINDOW_MS = 24 * 3_600_000;
+/** D2-1:累計核可門檻的時間窗 */
+export const GATE_WINDOW_MS = 24 * 3_600_000;
+/**
+ * 核可路由(需求方 2026-10-21 決定):軟體派送批次由 /approve、/reject(endpoint.software.manage)核可;
+ * 其他類型(system.reboot 等)由 /approve-command、/reject-command(endpoint.command.admin)核可;路由與類型不符回 403
+ */
+export type ApprovalRoute = 'software' | 'command';
+/**
+ * D2-1:同一人 24 小時內累計台數超過門檻需第二人核可的類型;同一組共用計數。
+ * 軟體安裝 / 移除(以 SYSTEM 執行程式)一組,重開機(可用性)另一組
+ */
+export const GATED_GROUPS: Record<string, readonly string[]> = {
+  'software.install': ['software.install', 'software.uninstall'],
+  'software.uninstall': ['software.install', 'software.uninstall'],
+  'system.reboot': ['system.reboot'],
+};
+/** 全域並行上限補送一次最多掃幾頁(每頁 BATCH_MAX_DEVICES 筆) */
+const LIMITED_MAX_PAGES = 50;
+/** 批次收尾掃描只看最近幾天建立的批次(指令有效期限最長 7 天 + 核可 24 小時) */
+const IDLE_BATCH_LOOKBACK_MS = 8 * 24 * 3_600_000;
+/** 會送出指令的批次狀態 */
+const SENDABLE: readonly BatchState[] = ['running', 'done'];
+
+/** A6 延後上限(Agent `power::DEFER_MAX`):延後中重設執行逾時,最多到「開始 + 此上限 + 類型逾時」(資安 M1) */
+const DEFER_MAX_MS = 4 * 3_600_000;
+/** A6 延後原因代碼(Agent 0.9.3 `result.deferred.reason`) */
+export const DEFER_REASONS = ['battery', 'metered'] as const;
+export type DeferReason = (typeof DEFER_REASONS)[number];
+
+/**
+ * running 的 `result.deferred`(Agent 0.9.3 起,軟體安裝 A6 延後中):只收已知原因代碼與可解析的時間,其他一律當成沒有
+ * (不把 Agent 的任意字串存進 result_summary;P7 驗收 §5-4)
+ */
+export function deferredOf(result: unknown): { reason: DeferReason; next_check_at: string } | null {
+  const d = (result as { deferred?: unknown } | undefined)?.deferred as { reason?: unknown; next_check_at?: unknown } | undefined;
+  if (!d || typeof d !== 'object') return null;
+  if (!DEFER_REASONS.includes(d.reason as DeferReason)) return null;
+  if (typeof d.next_check_at !== 'string' || d.next_check_at.length > 40) return null;
+  const t = Date.parse(d.next_check_at);
+  if (Number.isNaN(t)) return null;
+  return { reason: d.reason as DeferReason, next_check_at: new Date(t).toISOString() };
+}
 
 const parse = (s: string | null): Record<string, unknown> | null => {
   if (!s) return null;
@@ -128,6 +221,7 @@ export function toView(c: CommandRecord): CommandView {
   return {
     commandId: c.commandId,
     batchId: c.batchId,
+    batchState: c.batchState,
     deviceId: c.deviceId,
     computerName: c.computerName,
     kind: c.kind,
@@ -150,7 +244,9 @@ export function toView(c: CommandRecord): CommandView {
   };
 }
 
-function batchView(b: BatchRecord): BatchView {
+export function batchView(b: BatchRecord): BatchView {
+  // 0008 之前的批次沒有 done:running 且全部指令已結束就顯示 done
+  const open = NOT_FINAL.some((s) => (b.counts[s] ?? 0) > 0);
   return {
     batchId: b.batchId,
     kind: b.kind,
@@ -158,6 +254,14 @@ function batchView(b: BatchRecord): BatchView {
     params: parse(b.params) ?? {},
     targetCount: b.targetCount,
     maxConcurrent: b.maxConcurrent,
+    state: b.state === 'running' && !open ? 'done' : b.state,
+    requiresApproval: b.requiresApproval,
+    approvalExpiresAt: b.state === 'pending_approval' ? new Date(b.createdAt.getTime() + APPROVAL_WINDOW_MS).toISOString() : null,
+    approvedBy: b.approvedByEmp ? { emp: b.approvedByEmp, name: b.approvedByName } : null,
+    approvedAt: b.approvedAt?.toISOString() ?? null,
+    rejectedBy: b.rejectedByEmp ? { emp: b.rejectedByEmp, name: b.rejectedByName } : null,
+    rejectedAt: b.rejectedAt?.toISOString() ?? null,
+    rejectReason: b.rejectReason,
     createdBy: { emp: b.createdByEmp, name: b.createdByName },
     createdAt: b.createdAt.toISOString(),
     counts: b.counts,
@@ -170,8 +274,10 @@ export class CommandDispatcher {
   private readonly now: () => Date;
   private readonly batchMaxConcurrent: number;
   private readonly kindHooks: Record<string, KindHook>;
-  /** 進行中的批次補送(同一批次串行) */
-  private readonly refilling = new Map<number, Promise<void>>();
+  private readonly approvalThreshold: number;
+  private readonly limited: { kinds: readonly string[]; max: number } | null;
+  /** 進行中的補送(批次 `batch:{id}`、全域並行上限 `limited`);執行中再要求只標記重跑一次 */
+  private readonly refills = new Map<string, { ctx: Ctx; again: boolean; done: Promise<void> }>();
 
   constructor(
     private readonly store: CommandStore,
@@ -182,6 +288,8 @@ export class CommandDispatcher {
     this.now = opts.now ?? (() => new Date());
     this.batchMaxConcurrent = opts.batchMaxConcurrent ?? 20;
     this.kindHooks = opts.kindHooks ?? {};
+    this.approvalThreshold = opts.approvalThreshold ?? 20;
+    this.limited = opts.limitedKinds ?? null;
   }
 
   private async sqlDo<T>(ctx: Ctx, what: string, fn: () => Promise<T>): Promise<T> {
@@ -247,13 +355,44 @@ export class CommandDispatcher {
     return companies.every((c) => inScope(ctx.scope, c));
   }
 
+  /** 同一人同一組管控類型的「計數 → 建立」序列化(單一實例;D2-1 競態) */
+  private readonly gateLocks = new Map<string, Promise<unknown>>();
+
+  private serialized<T>(emp: string, kind: string, fn: () => Promise<T>): Promise<T> {
+    const group = Object.hasOwn(GATED_GROUPS, kind) ? GATED_GROUPS[kind] : undefined;
+    if (!group) return fn();
+    const key = `${emp.toUpperCase()}|${group.join(',')}`;
+    const prev = this.gateLocks.get(key) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    const tail = run.catch(() => undefined);
+    this.gateLocks.set(key, tail);
+    void tail.then(() => {
+      if (this.gateLocks.get(key) === tail) this.gateLocks.delete(key);
+    });
+    return run;
+  }
+
+  /** D2-1:加上這次的台數後,此人 24 小時內累計是否超過門檻 */
+  private async overGate(ctx: Ctx, emp: string, kind: string, adding: number): Promise<{ over: boolean; recent: number }> {
+    const group = Object.hasOwn(GATED_GROUPS, kind) ? GATED_GROUPS[kind] : undefined;
+    if (!group) return { over: false, recent: 0 };
+    const since = new Date(this.now().getTime() - GATE_WINDOW_MS);
+    const recent = await this.sqlDo(ctx, 'command.recentGated', () => this.store.recentGatedTargets(emp, group, since));
+    return { over: recent + adding > this.approvalThreshold, recent };
+  }
+
   async create(ctx: MgmtCtx, who: GatewayIdentity, level: CommandLevel, deviceId: string, input: CreateCommandInput): Promise<CommandView> {
+    return this.serialized(who.emp ?? who.sub, level === 'admin' ? input.kind : '', () => this.createOne(ctx, who, level, deviceId, input));
+  }
+
+  private async createOne(ctx: MgmtCtx, who: GatewayIdentity, level: CommandLevel, deviceId: string, input: CreateCommandInput): Promise<CommandView> {
     const emp = who.emp ?? who.sub;
     const key = input.idempotencyKey;
     const same = (c: CommandRecord) => {
       this.assertScoped(ctx, c.deviceCompany, `command ${c.commandId}`);
       // 同一個 key 用在不同電腦或類型:不可回傳舊的那筆(稽核會看不出沒有建立)
-      if (c.deviceId !== deviceId || c.kind !== input.kind || c.level !== level)
+      const pkg = typeof input.params?.packageId === 'string' ? input.params.packageId.toLowerCase() : undefined;
+      if (c.deviceId !== deviceId || c.kind !== input.kind || c.level !== level || (pkg !== undefined && parse(c.params)?.package_id !== pkg))
         throw new AppError(422, 'ITA_IDEMPOTENCY_KEY_REUSED', 'Idempotency-Key 已用於另一筆不同的指令');
       return toView(c);
     };
@@ -265,23 +404,42 @@ export class CommandDispatcher {
     const device = await this.activeDevice(ctx, deviceId);
     await this.checkPending(ctx, def, device.id, device.computerName);
     const hook = this.kindHooks[def.kind];
+    let stored = params;
     if (hook) {
-      await hook.check(ctx, device.id, params);
-      await hook.apply(ctx, device.id, params, { emp, name: who.name ?? null });
+      stored = (await hook.check(ctx, device.id, params)) ?? params;
+      await hook.checkBatch?.(ctx, [device.id], params);
+      await hook.apply?.(ctx, device.id, params, { emp, name: who.name ?? null });
     }
     const at = this.now();
     const commandId = randomUUID();
+    // D2-1:逐台派送也累計;超過門檻時這一台放進一個待核可的單台批次
+    const gate = level === 'admin' ? await this.overGate(ctx, emp, def.kind, 1) : { over: false, recent: 0 };
+    const gatedBatch: NewBatch | null = gate.over
+      ? {
+          batchId: randomUUID(),
+          kind: def.kind,
+          level,
+          params: JSON.stringify(stored),
+          maxConcurrent: 1,
+          requiresApproval: true,
+          idempotencyKey: null,
+          createdByEmp: emp,
+          createdByName: who.name ?? null,
+          requestId: ctx.requestId,
+          createdAt: at,
+        }
+      : null;
     try {
       await this.sqlDo(ctx, 'command.create', () =>
-        this.store.createCommands(null, [
+        this.store.createCommands(gatedBatch, [
           {
             commandId,
             deviceRef: device.id,
             certDn: device.certDn,
             kind: def.kind,
             level,
-            params: JSON.stringify(params),
-            expiresAt: new Date(at.getTime() + expiresSec * 1000),
+            params: JSON.stringify(stored),
+            expiresAt: new Date(at.getTime() + expiresSec * 1000 + (gatedBatch ? APPROVAL_WINDOW_MS : 0)),
             idempotencyKey: key ?? null,
             createdByEmp: emp,
             createdByName: who.name ?? null,
@@ -298,32 +456,65 @@ export class CommandDispatcher {
       }
       throw err;
     }
-    ctx.log.info({ commandId, deviceId, kind: def.kind, emp }, '建立指令');
+    ctx.log.info(
+      { commandId, deviceId, kind: def.kind, emp, ...(gatedBatch ? { batchId: gatedBatch.batchId, recentDevices: gate.recent } : {}) },
+      gatedBatch ? '建立指令(24 小時內累計超過門檻,待第二人核可)' : '建立指令',
+    );
     const cmd = await this.sqlDo(ctx, 'command.get', () => this.store.getCommand(commandId));
     if (!cmd) throw storageUnavailable();
+    if (gatedBatch) return toView(cmd);
     return toView((await this.trySend(ctx, cmd)) ?? cmd);
   }
 
+  /** maxConcurrent:這個批次的同時執行上限(1 – batchMaxConcurrent;省略用 batchMaxConcurrent) */
   async createBatch(
     ctx: MgmtCtx,
     who: GatewayIdentity,
     level: CommandLevel,
     deviceIds: string[],
     input: CreateCommandInput,
-  ): Promise<{ batchId: string; commands: { deviceId: string; commandId: string; state: CommandState }[] }> {
+    opts: { maxConcurrent?: number } = {},
+  ): Promise<CreateBatchResult> {
+    return this.serialized(who.emp ?? who.sub, level === 'admin' ? input.kind : '', () => this.createMany(ctx, who, level, deviceIds, input, opts));
+  }
+
+  private async createMany(
+    ctx: MgmtCtx,
+    who: GatewayIdentity,
+    level: CommandLevel,
+    deviceIds: string[],
+    input: CreateCommandInput,
+    opts: { maxConcurrent?: number },
+  ): Promise<CreateBatchResult> {
     const emp = who.emp ?? who.sub;
     const key = input.idempotencyKey;
-    const result = async (b: BatchRecord) => {
+    const result = async (b: BatchRecord): Promise<CreateBatchResult> => {
       const cmds = await this.sqlDo(ctx, 'command.list(batch)', () => this.store.listCommands({ batchRef: b.id, limit: BATCH_MAX_DEVICES }));
-      return { batchId: b.batchId, commands: cmds.reverse().map((c) => ({ deviceId: c.deviceId, commandId: c.commandId, state: c.state })) };
+      return {
+        batchId: b.batchId,
+        state: batchView(b).state,
+        requiresApproval: b.requiresApproval,
+        commands: cmds.reverse().map((c) => ({ deviceId: c.deviceId, commandId: c.commandId, state: c.state })),
+      };
     };
     const sameBatch = async (b: BatchRecord) => {
       if (!(await this.batchInScope(ctx, b.id))) {
         ctx.log.info({ batchId: b.batchId, scopeDenied: true }, '既有批次含資料範圍外的裝置');
         throw new AppError(404, 'ITA_DEVICE_NOT_FOUND', '找不到此電腦');
       }
-      if (b.kind !== input.kind || b.level !== level) throw new AppError(422, 'ITA_IDEMPOTENCY_KEY_REUSED', 'Idempotency-Key 已用於另一筆不同的批次');
-      return result(b);
+      // 軟體派送:同一個 key 用在另一個套件也算不同的批次(否則會以為派了新套件,實際回傳舊的那批)
+      const pkg = typeof input.params?.packageId === 'string' ? input.params.packageId.toLowerCase() : undefined;
+      if (b.kind !== input.kind || b.level !== level || (pkg !== undefined && parse(b.params)?.package_id !== pkg))
+        throw new AppError(422, 'ITA_IDEMPOTENCY_KEY_REUSED', 'Idempotency-Key 已用於另一筆不同的批次');
+      // 目標電腦不同也算不同的批次(資安稽核 L11;單台指令已比對 deviceId)
+      const r = await result(b);
+      const want = [...new Set(deviceIds.map((d) => d.toLowerCase()))].sort().join(',');
+      const got = r.commands
+        .map((c) => c.deviceId)
+        .sort()
+        .join(',');
+      if (got !== want) throw new AppError(422, 'ITA_IDEMPOTENCY_KEY_REUSED', 'Idempotency-Key 已用於另一筆不同的批次(目標電腦不同)');
+      return r;
     };
     if (key) {
       const existing = await this.sqlDo(ctx, 'batch.findByIdempotency', () => this.store.findBatchByIdempotency(emp, key));
@@ -332,20 +523,30 @@ export class CommandDispatcher {
     const unique = [...new Set(deviceIds.map((d) => d.toLowerCase()))];
     if (unique.length === 0 || unique.length > BATCH_MAX_DEVICES) throw new AppError(400, 'VALIDATION_FAILED', `deviceIds 需 1–${BATCH_MAX_DEVICES} 台`);
     const { def, params, expiresSec } = this.validate(level, input);
+    const maxConcurrent = opts.maxConcurrent ?? this.batchMaxConcurrent;
+    if (!Number.isInteger(maxConcurrent) || maxConcurrent < 1 || maxConcurrent > this.batchMaxConcurrent)
+      throw new AppError(400, 'VALIDATION_FAILED', `maxConcurrent 需介於 1–${this.batchMaxConcurrent}`);
     // 任一台不存在或不是 active 就整批拒絕,避免部分建立
-    const targets: DeviceRow[] = [];
+    const hook = this.kindHooks[def.kind];
+    const targets: { device: DeviceRow; params: Record<string, unknown> }[] = [];
     for (const id of unique) {
       const d = await this.activeDevice(ctx, id);
       await this.checkPending(ctx, def, d.id, d.computerName);
-      await this.kindHooks[def.kind]?.check(ctx, d.id, params);
-      targets.push(d);
+      targets.push({ device: d, params: (await hook?.check(ctx, d.id, params)) ?? params });
     }
-    const batchHook = this.kindHooks[def.kind];
-    if (batchHook) for (const d of targets) await batchHook.apply(ctx, d.id, params, { emp, name: who.name ?? null });
+    await hook?.checkBatch?.(
+      ctx,
+      targets.map((t) => t.device.id),
+      params,
+    );
+    if (hook?.apply) for (const t of targets) await hook.apply(ctx, t.device.id, params, { emp, name: who.name ?? null });
     const at = this.now();
     const batchId = randomUUID();
-    const paramsJson = JSON.stringify(params);
-    const expiresAt = new Date(at.getTime() + expiresSec * 1000);
+    // 第二人核可(B1):待核可期間的有效期限另加核可期限,核可時重設為核可時間 + 類型有效期限
+    // D2-1:同一人 24 小時內累計(含逐台、多批小批次)超過門檻也要核可
+    const requiresApproval =
+      level === 'admin' && (targets.length > this.approvalThreshold || (await this.overGate(ctx, emp, def.kind, targets.length)).over);
+    const expiresAt = new Date(at.getTime() + expiresSec * 1000 + (requiresApproval ? APPROVAL_WINDOW_MS : 0));
     try {
       await this.sqlDo(ctx, 'batch.create', () =>
         this.store.createCommands(
@@ -353,21 +554,23 @@ export class CommandDispatcher {
             batchId,
             kind: def.kind,
             level,
-            params: paramsJson,
-            maxConcurrent: this.batchMaxConcurrent,
+            // 批次層記第一台的參數(快照對每台相同:同一套件)
+            params: JSON.stringify(targets[0]!.params),
+            maxConcurrent,
+            requiresApproval,
             idempotencyKey: key ?? null,
             createdByEmp: emp,
             createdByName: who.name ?? null,
             requestId: ctx.requestId,
             createdAt: at,
           },
-          targets.map((d) => ({
+          targets.map(({ device: d, params: p }) => ({
             commandId: randomUUID(),
             deviceRef: d.id,
             certDn: d.certDn,
             kind: def.kind,
             level,
-            params: paramsJson,
+            params: JSON.stringify(p),
             expiresAt,
             idempotencyKey: null,
             createdByEmp: emp,
@@ -384,11 +587,81 @@ export class CommandDispatcher {
       }
       throw err;
     }
-    ctx.log.info({ batchId, kind: def.kind, devices: targets.length, emp }, '建立批次指令');
+    ctx.log.info({ batchId, kind: def.kind, devices: targets.length, emp, requiresApproval }, requiresApproval ? '建立批次指令(待第二人核可)' : '建立批次指令');
     const batch = await this.sqlDo(ctx, 'batch.get', () => this.store.getBatch(batchId));
     if (!batch) throw storageUnavailable();
+    if (requiresApproval) return result(batch);
     await this.refillBatch(ctx, batch.id);
-    return result(batch);
+    return result((await this.rereadBatch(ctx, batchId)) ?? batch);
+  }
+
+  // ---------- 批次第二人核可(B1;P7-SOFTWARE-DESIGN §6) ----------
+
+  /** 範圍內的批次;不存在或含範圍外裝置回相同的 404 */
+  private async scopedBatch(ctx: MgmtCtx, batchId: string): Promise<BatchRecord> {
+    const b = await this.sqlDo(ctx, 'batch.get', () => this.store.getBatch(batchId));
+    if (!b || !(await this.batchInScope(ctx, b.id))) {
+      if (b) ctx.log.info({ batchId, scopeDenied: true }, '批次含資料範圍外的裝置');
+      throw new AppError(404, 'ITA_BATCH_NOT_FOUND', '找不到此批次');
+    }
+    return b;
+  }
+
+  /** 寫入後重讀批次;讀取失敗記 warn,由呼叫端退回寫入前的紀錄(寫入已成功,不回 503) */
+  private async rereadBatch(ctx: Ctx, batchId: string): Promise<BatchRecord | null> {
+    try {
+      return await this.store.getBatch(batchId);
+    } catch (err) {
+      ctx.log.warn({ err, batchId }, '重讀批次失敗,回應以寫入前的狀態為準');
+      return null;
+    }
+  }
+
+  private assertPending(b: BatchRecord, at: Date): void {
+    if (b.state !== 'pending_approval') throw new AppError(409, 'ITA_BATCH_NOT_PENDING', `此批次目前為 ${batchView(b).state},不是待核可`);
+    if (at.getTime() - b.createdAt.getTime() >= APPROVAL_WINDOW_MS) throw new AppError(409, 'ITA_BATCH_NOT_PENDING', '此批次已超過 24 小時核可期限');
+  }
+
+  /** 核可人不可是建立人;核可後指令有效期限自核可時起算並開始補送 */
+  /** 核可 / 駁回的路由要與批次類型相符(核可人的權限依類型而定) */
+  private assertRoute(b: BatchRecord, route: ApprovalRoute): void {
+    const software = SOFTWARE_KINDS.includes(b.kind);
+    if (software !== (route === 'software'))
+      throw new AppError(
+        403,
+        'ITA_APPROVAL_ROUTE_MISMATCH',
+        software ? '軟體派送批次請由 /batches/{id}/approve、/reject 核可' : `${b.kind} 批次請由 /batches/{id}/approve-command、/reject-command 核可`,
+      );
+  }
+
+  async approveBatch(ctx: MgmtCtx, who: GatewayIdentity, batchId: string, route: ApprovalRoute): Promise<BatchView> {
+    const emp = who.emp ?? who.sub;
+    const b = await this.scopedBatch(ctx, batchId);
+    this.assertRoute(b, route);
+    const at = this.now();
+    this.assertPending(b, at);
+    if (b.createdByEmp === emp) throw new AppError(403, 'ITA_APPROVER_SAME_AS_CREATOR', '核可人不可是批次建立人,請由另一位 IT 核可');
+    // 批次一律用類型預設的有效期限(批次路由不開放 expiresInSec);開放覆寫時需改為記在批次上
+    const expiresAt = new Date(at.getTime() + (kindOf(b.kind)?.expiresSec ?? 3600) * 1000);
+    const ok = await this.sqlDo(ctx, 'batch.approve', () => this.store.approveBatch(b.id, { emp, name: who.name ?? null }, at, expiresAt));
+    if (!ok) throw new AppError(409, 'ITA_BATCH_NOT_PENDING', '批次狀態已被變更,請重新整理');
+    ctx.log.info({ batchId, kind: b.kind, devices: b.targetCount, createdBy: b.createdByEmp, approvedBy: emp }, '批次已核可');
+    await this.refillBatch(ctx, b.id);
+    if (this.limited?.kinds.includes(b.kind)) await this.refillLimited(ctx);
+    return batchView((await this.rereadBatch(ctx, batchId)) ?? b);
+  }
+
+  /** 駁回(建立人也可撤回自己的批次):指令全部 canceled */
+  async rejectBatch(ctx: MgmtCtx, who: GatewayIdentity, batchId: string, reason: string, route: ApprovalRoute): Promise<BatchView> {
+    const emp = who.emp ?? who.sub;
+    const b = await this.scopedBatch(ctx, batchId);
+    this.assertRoute(b, route);
+    const at = this.now();
+    this.assertPending(b, at);
+    const ok = await this.sqlDo(ctx, 'batch.reject', () => this.store.rejectBatch(b.id, { emp, name: who.name ?? null }, at, reason));
+    if (!ok) throw new AppError(409, 'ITA_BATCH_NOT_PENDING', '批次狀態已被變更,請重新整理');
+    ctx.log.info({ batchId, kind: b.kind, devices: b.targetCount, rejectedBy: emp }, '批次已駁回');
+    return batchView((await this.rereadBatch(ctx, batchId)) ?? b);
   }
 
   /** 只能取消自己建立、仍是 queued 的指令(指南 §8.3) */
@@ -400,7 +673,7 @@ export class CommandDispatcher {
       (await this.sqlDo(ctx, 'command.cancel', () => this.store.transition(cmd.id, ['queued'], { state: 'canceled', at: this.now() })));
     if (!ok) throw new AppError(409, 'ITA_COMMAND_NOT_CANCELABLE', '指令已送出或已結束,無法取消');
     ctx.log.info({ commandId }, '取消指令');
-    if (cmd.batchRef) await this.refillBatch(ctx, cmd.batchRef);
+    await this.afterFinal(ctx, cmd, { state: 'canceled', errorCode: null, resultSummary: null });
     return toView((await this.store.getCommand(commandId)) ?? cmd);
   }
 
@@ -447,23 +720,54 @@ export class CommandDispatcher {
 
   /** 批次內所有裝置都在範圍內才看得到(避免從台數推知其他公司的電腦;E6 §1.4) */
   async getBatch(ctx: MgmtCtx, batchId: string): Promise<BatchView> {
-    const b = await this.sqlDo(ctx, 'batch.get', () => this.store.getBatch(batchId));
-    if (!b || !(await this.batchInScope(ctx, b.id))) {
-      if (b) ctx.log.info({ batchId, scopeDenied: true }, '批次含資料範圍外的裝置');
-      throw new AppError(404, 'ITA_BATCH_NOT_FOUND', '找不到此批次');
-    }
-    return batchView(b);
+    return batchView(await this.scopedBatch(ctx, batchId));
+  }
+
+  /**
+   * 批次清單,新到舊(P7-5 待核可清單);含範圍外裝置的批次略過(同 getBatch)。
+   * 篩 pending_approval 時只列 24 小時核可期限內的(逾期的等每分鐘掃描設為 expired);游標取自掃描到的最後一筆,過濾後本頁可能少於 limit
+   */
+  async listBatches(ctx: MgmtCtx, q: { state?: BatchState; cursor?: string; limit?: number }): Promise<{ items: BatchView[]; nextCursor: string | null }> {
+    const limit = Math.min(Math.max(q.limit ?? 50, 1), 100);
+    const companies = scopeCompanies(ctx.scope);
+    if (companies?.length === 0) return { items: [], nextCursor: null };
+    const beforeId = q.cursor && /^\d+$/.test(q.cursor) ? Number(q.cursor) : undefined;
+    const createdAfter = q.state === 'pending_approval' ? new Date(this.now().getTime() - APPROVAL_WINDOW_MS) : undefined;
+    const rows = await this.sqlDo(ctx, 'batch.list', () => this.store.listBatches({ state: q.state, createdAfter, beforeId, limit: limit + 1 }));
+    const page = rows.slice(0, limit);
+    const items: BatchView[] = [];
+    for (const b of page) if (await this.batchInScope(ctx, b.id)) items.push(batchView(b));
+    return { items, nextCursor: rows.length > limit ? String(page[page.length - 1]!.id) : null };
   }
 
   // ---------- 推送 ----------
+
+  /** 有上限的指令(批次、軟體派送)送出前的「計數 → 改為 sent」序列化鏈(單一實例;M3) */
+  private sendGate: Promise<unknown> = Promise.resolve();
+
+  /** 在序列化鏈上執行 fn;fn 失敗不會卡住後面的送出 */
+  private reserve(fn: () => Promise<boolean>): Promise<boolean> {
+    const run = this.sendGate.then(fn, fn);
+    this.sendGate = run.catch(() => undefined);
+    return run;
+  }
 
   /** queued 且未逾期、裝置在線、批次未達上限 → 改 sent 後送出;回傳送出後的紀錄(沒送回 null)。失敗只記錄,留在 queued */
   private async trySend(ctx: Ctx, cmd: CommandRecord): Promise<CommandRecord | null> {
     const at = this.now();
     if (cmd.state !== 'queued' || cmd.expiresAt <= at || !this.channel.isOnline(cmd.deviceId)) return null;
+    // 待核可、駁回、逾期的批次不送出(B1)
+    if (cmd.batchState && !SENDABLE.includes(cmd.batchState)) return null;
     try {
-      if (cmd.batchRef && cmd.batchMaxConcurrent && (await this.store.activeInBatch(cmd.batchRef)) >= cmd.batchMaxConcurrent) return null;
-      if (!(await this.store.transition(cmd.id, ['queued'], { state: 'sent', at }))) return null;
+      const claim = async () => {
+        if (cmd.batchRef && cmd.batchMaxConcurrent && (await this.store.activeInBatch(cmd.batchRef)) >= cmd.batchMaxConcurrent) return false;
+        // 全域並行上限
+        if (this.limited?.kinds.includes(cmd.kind) && (await this.store.activeOfKinds(this.limited.kinds)) >= this.limited.max) return false;
+        return this.store.transition(cmd.id, ['queued'], { state: 'sent', at });
+      };
+      // 有上限的(批次、軟體派送):「計數 → 改為 sent」在本行程內序列化,大量電腦同時重連時不會超過上限(單一實例;資安稽核 M3)
+      const limited = !!cmd.batchRef || !!this.limited?.kinds.includes(cmd.kind);
+      if (!(await (limited ? this.reserve(claim) : claim()))) return null;
       const body = {
         command_id: cmd.commandId,
         kind: cmd.kind,
@@ -484,33 +788,97 @@ export class CommandDispatcher {
     }
   }
 
-  /** 批次補送到上限;同一批次在本行程內依序執行,避免同時補送超過上限(單一實例,指南 §8.4) */
+  /**
+   * 同一個補送在本行程內不並行;執行中再被要求時只標記「結束後再跑一次」,
+   * 不把每次要求串成一條鏈(大量指令同時結束時鏈會一直累積,資安稽核 L10)
+   */
+  private coalesce(key: string, ctx: Ctx, run: (ctx: Ctx) => Promise<void>): Promise<void> {
+    const cur = this.refills.get(key);
+    if (cur) {
+      cur.ctx = ctx;
+      cur.again = true;
+      return cur.done;
+    }
+    const slot = { ctx, again: true, done: Promise.resolve() };
+    this.refills.set(key, slot);
+    slot.done = (async () => {
+      try {
+        while (slot.again) {
+          slot.again = false;
+          await run(slot.ctx);
+        }
+      } finally {
+        this.refills.delete(key);
+      }
+    })();
+    return slot.done;
+  }
+
+  /** 批次補送到上限;同一批次在本行程內不並行,避免同時補送超過上限(單一實例,指南 §8.4) */
   private refillBatch(ctx: Ctx, batchRef: number): Promise<void> {
-    const run = async () => {
+    return this.coalesce(`batch:${batchRef}`, ctx, async (ctx) => {
       try {
         const queued = await this.store.queuedForBatch(batchRef, this.now(), BATCH_MAX_DEVICES);
         // 上限在 trySend 送出前計數
         for (const cmd of queued) if (this.channel.isOnline(cmd.deviceId)) await this.trySend(ctx, cmd);
+        await this.store.finishBatchIfDone(batchRef);
       } catch (err) {
         ctx.log.warn({ err, batchRef }, '批次補送失敗,下次掃描再試');
       }
-    };
-    const next = (this.refilling.get(batchRef) ?? Promise.resolve()).then(run);
-    this.refilling.set(batchRef, next);
-    void next.then(() => {
-      if (this.refilling.get(batchRef) === next) this.refilling.delete(batchRef);
     });
-    return next;
+  }
+
+  /** 全域並行上限類型的補送(有一筆結束、核可、每分鐘掃描時);不並行 */
+  private refillLimited(ctx: Ctx): Promise<void> {
+    const limited = this.limited;
+    if (!limited) return Promise.resolve();
+    return this.coalesce('limited', ctx, async (ctx) => {
+      try {
+        // 依 id 分頁掃到底:最舊的一頁全是離線電腦時,後面在線的仍補送得到;名額已滿就提早結束
+        let afterId = 0;
+        for (let page = 0; page < LIMITED_MAX_PAGES; page++) {
+          if ((await this.store.activeOfKinds(limited.kinds)) >= limited.max) return;
+          const queued = await this.store.queuedOfKinds(limited.kinds, this.now(), BATCH_MAX_DEVICES, afterId);
+          for (const cmd of queued) if (this.channel.isOnline(cmd.deviceId)) await this.trySend(ctx, cmd);
+          if (queued.length < BATCH_MAX_DEVICES) return;
+          afterId = queued[queued.length - 1]!.id;
+        }
+      } catch (err) {
+        ctx.log.warn({ err }, '軟體派送補送失敗,下次掃描再試');
+      }
+    });
+  }
+
+  /** 依指令類型的終態處理(P7 告警);失敗只記 warn */
+  private async finalHook(ctx: Ctx, cmd: CommandRecord, fin: FinalInfo): Promise<void> {
+    const hook = this.kindHooks[cmd.kind]?.onFinal;
+    if (!hook) return;
+    try {
+      await hook(ctx, cmd, fin);
+    } catch (err) {
+      ctx.log.warn({ err, commandId: cmd.commandId, kind: cmd.kind }, '指令終態處理失敗');
+    }
+  }
+
+  /** 終態後:依類型處理,再補送(批次與全域並行上限) */
+  private async afterFinal(ctx: Ctx, cmd: CommandRecord, fin: FinalInfo): Promise<void> {
+    await this.finalHook(ctx, cmd, fin);
+    if (cmd.batchRef) await this.refillBatch(ctx, cmd.batchRef);
+    if (this.limited?.kinds.includes(cmd.kind)) await this.refillLimited(ctx);
   }
 
   /**
    * Agent 重連並收到 hello_ack 之後:依建立順序補送(指南 §8.4)。
-   * 先把 sent 改回 queued:上一條連線被新連線取代或半開時,未確認的指令沒有經過斷線處理(Agent 以 command_id 去重,重送無害)
+   * 先把 sent 改回 queued:上一條連線被新連線取代或半開時,未確認的指令沒有經過斷線處理(Agent 以 command_id 去重,重送無害)。
+   * 只改 connectedAt(這條連線登記)之前送出的:連線登記後、hello 處理前就推送到這條連線的指令不能改回 queued,
+   * 否則 Agent 立刻來下載時查不到被指派的安裝(404 ITA_PACKAGE_NOT_FOUND),running 也會從 queued 直接跳過去。
+   * 已知限制:trySend 的 sent_at 取在 claim(SQL)之前;派送在途時新連線剛好登記,sent_at 會早於 connectedAt 而仍被退回(窄窗口,
+   * Agent 以 command_id 去重、重派即可)。同一毫秒(sent_at = connectedAt)視為新連線的,不退回
    */
-  async onHello(ctx: Ctx, deviceRef: number): Promise<void> {
+  async onHello(ctx: Ctx, deviceRef: number, connectedAt?: Date): Promise<void> {
     let queued: CommandRecord[];
     try {
-      await this.store.requeueSent(deviceRef);
+      await this.store.requeueSent(deviceRef, connectedAt);
       queued = await this.store.queuedForDevice(deviceRef, this.now());
     } catch (err) {
       ctx.log.warn({ err }, '查詢待送指令失敗,下次掃描再送');
@@ -556,8 +924,20 @@ export class CommandDispatcher {
     const patch: CommandPatch = { state: target, at };
     if (body.progress !== undefined) patch.progress = body.progress;
     if (target === 'acked' || target === 'running') {
-      const def = kindOf(cmd.kind);
-      patch.timeoutAt = new Date(at.getTime() + (def?.timeoutSec ?? 600) * 1000);
+      patch.timeoutAt = new Date(at.getTime() + commandTimeoutSec(cmd.kind, cmd.params) * 1000);
+    }
+    if (target === 'running' && cmd.kind === 'software.install') {
+      // A6 延後中:result_summary 暫存延後狀態(畫面顯示「延後中(原因)」),並重設執行逾時(延後最多 4 小時,不該被判 TIMEOUT);
+      // 之後不帶 deferred 的 running 清除;終態的 result 覆寫
+      // 已進入下載 / 安裝(進度 > 0)後不再接受延後;重設的逾時不超過「開始 + 延後上限 + 類型逾時」,
+      // 被冒用的裝置不能讓指令永遠不逾時、一直佔住並行名額(資安 M1)
+      const deferred = (cmd.progress ?? 0) === 0 ? deferredOf(body.result) : null;
+      if (deferred) {
+        const cap = (cmd.startedAt ?? cmd.ackedAt ?? at).getTime() + DEFER_MAX_MS + commandTimeoutSec(cmd.kind, cmd.params) * 1000;
+        patch.resultSummary = JSON.stringify({ deferred });
+        patch.timeoutAt = new Date(Math.min(patch.timeoutAt!.getTime(), cap));
+        patch.resetTimeout = true;
+      } else if (cmd.resultSummary !== null) patch.resultSummary = null;
     }
     if (isFinal(target)) {
       if (body.result !== undefined) {
@@ -586,7 +966,7 @@ export class CommandDispatcher {
       return { command_id: body.command_id, accepted: false, ...(now ? { state: now.state } : {}) };
     }
     ctx.log.info({ commandId, kind: cmd.kind, state: target, errorCode: patch.errorCode }, '指令狀態更新');
-    if (isFinal(target) && cmd.batchRef) await this.refillBatch(ctx, cmd.batchRef);
+    if (isFinal(target)) await this.afterFinal(ctx, cmd, { state: target, errorCode: patch.errorCode ?? null, resultSummary: patch.resultSummary ?? null });
     return { command_id: body.command_id, accepted: true, state: target };
   }
 
@@ -608,15 +988,21 @@ export class CommandDispatcher {
       });
     if (ok) {
       ctx.log.warn({ commandId: cmd.commandId }, 'Agent 不支援指令訊息(舊版),設為 failed UNSUPPORTED_COMMAND');
-      if (cmd.batchRef) await this.refillBatch(ctx, cmd.batchRef);
+      await this.afterFinal(ctx, cmd, { state: 'failed', errorCode: 'UNSUPPORTED_COMMAND', resultSummary: null });
     }
   }
 
   // ---------- 逾期與逾時 ----------
 
-  /** 每分鐘呼叫:queued / sent 逾期 → expired;acked / running 逾時 → failed TIMEOUT */
+  /** 每分鐘呼叫:queued / sent 逾期 → expired;acked / running 逾時 → failed TIMEOUT;待核可超過 24 小時的批次 → expired(B1) */
   async sweep(ctx: Ctx): Promise<{ expired: number; timedOut: number }> {
     const at = this.now();
+    try {
+      const n = await this.store.expirePendingBatches(new Date(at.getTime() - APPROVAL_WINDOW_MS), at);
+      if (n) ctx.log.info({ batches: n }, '待核可批次超過 24 小時,已逾期(指令取消)');
+    } catch (err) {
+      ctx.log.warn({ err }, '待核可批次逾期掃描失敗,下次再試');
+    }
     let due: CommandRecord[];
     try {
       due = await this.store.dueForSweep(at, SWEEP_LIMIT);
@@ -633,14 +1019,25 @@ export class CommandDispatcher {
           if (await this.store.transition(cmd.id, ['queued', 'sent'], { state: 'expired', at })) expired++;
         } else if (
           await this.store.transition(cmd.id, ['acked', 'running'], { state: 'failed', at, errorCode: 'TIMEOUT', errorMessage: 'Agent 未在執行逾時內回報結果' })
-        )
+        ) {
           timedOut++;
+          await this.finalHook(ctx, cmd, { state: 'failed', errorCode: 'TIMEOUT', resultSummary: null });
+        }
         if (cmd.batchRef) batches.add(cmd.batchRef);
       } catch (err) {
         ctx.log.warn({ err, commandId: cmd.commandId }, '指令逾期處理失敗');
       }
     }
     for (const b of batches) await this.refillBatch(ctx, b);
+    // 不經派送器結束的指令(套件被換掉時整批取消等)所屬的批次:全部結束就收尾(code-reviewer P7-1 第 7 點)
+    try {
+      const n = await this.store.finishIdleBatches(new Date(at.getTime() - IDLE_BATCH_LOOKBACK_MS));
+      if (n) ctx.log.info({ batches: n }, '批次內指令都已結束,批次收尾');
+    } catch (err) {
+      ctx.log.warn({ err }, '批次收尾掃描失敗,下次再試');
+    }
+    // 全域並行上限:等待中的指令(名額釋出、離線後上線)
+    await this.refillLimited(ctx);
     if (expired || timedOut) ctx.log.info({ expired, timedOut }, '指令逾期 / 逾時');
     return { expired, timedOut };
   }

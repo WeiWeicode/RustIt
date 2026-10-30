@@ -9,16 +9,24 @@ import { loadConfig } from './config.js';
 import { buildAgentApp } from './agent-app.js';
 import { buildMgmtApp } from './mgmt-app.js';
 import { AlertService } from './services/alert-service.js';
-import { CommandDispatcher } from './services/command-dispatcher.js';
+import { CommandDispatcher, type KindHook } from './services/command-dispatcher.js';
+import { AppError } from './errors.js';
 import { CommandFileService } from './services/command-files.js';
 import { DeviceService } from './services/device-service.js';
 import { ReleaseFiles } from './services/release-files.js';
 import { ReleaseService } from './services/release-service.js';
+import { SoftwareFiles } from './services/software-files.js';
+import { SoftwareService } from './services/software-service.js';
+import { assertWritableDir, SignQueue } from './services/upload-files.js';
+import { UploadService } from './services/upload-service.js';
+import { SOFTWARE_KINDS } from './commands/kinds.js';
 import { MongoSnapshotStore } from './stores/mongo-store.js';
 import { RedisStateStore } from './stores/redis-store.js';
 import { SqlCommandStore } from './stores/sql-command-store.js';
 import { SqlMonitorStore } from './stores/sql-monitor-store.js';
 import { SqlReleaseStore } from './stores/sql-release-store.js';
+import { SqlSoftwareStore } from './stores/sql-software-store.js';
+import { SqlUploadStore } from './stores/sql-upload-store.js';
 import { SqlDeviceStore } from './stores/sql-store.js';
 
 const config = loadConfig();
@@ -52,16 +60,69 @@ if (config.releasesDir)
     (deviceId) => service.lookup(deviceId),
     { maxConcurrent: config.releaseMaxConcurrent },
   );
-// 指令派送(P4):SQL 與裝置共用連線池,推送經 DeviceService 的 WebSocket 連線表;agent.upgrade 建立前後交給 ReleaseService(P6)
+// 軟體派送(P7):SOFTWARE_DIR 未設定時不啟用(軟體 API 與套件下載不註冊;software.* 指令沒有 kindHook 會被拒絕)
+let commands: CommandDispatcher | undefined;
+// 上傳與送簽(S1-3):INCOMING_DIR、SIGN_QUEUE_DIR 都設定且已啟用軟體派送才啟用(才需要 migration 0011);登錄時也據此檢查上傳紀錄(M1)
+const uploadStore = config.softwareDir && config.incomingDir && config.signQueueDir ? new SqlUploadStore(() => sql.connection()) : undefined;
+const software = config.softwareDir
+  ? new SoftwareService(new SqlSoftwareStore(() => sql.connection()), new SoftwareFiles(config.softwareDir, config.softwareMaxBytes), sql, {
+      commands: () => commands,
+      onPackageTampered: (ctx, deviceRef, detail) => alerts!.onPackageTampered(ctx, deviceRef, detail),
+      uploads: uploadStore,
+    })
+  : undefined;
+// 啟用上傳送簽時兩個目錄要存在且可寫,否則啟動失敗(NAS 未掛載、路徑誤植時不要到核可才 ENOENT)
+if (uploadStore) {
+  await assertWritableDir('INCOMING_DIR', config.incomingDir!);
+  await assertWritableDir('SIGN_QUEUE_DIR', config.signQueueDir!);
+}
+// incoming\ 讀取規則與軟體庫相同
+const uploads =
+  uploadStore && config.softwareDir && config.incomingDir && config.signQueueDir
+    ? new UploadService(
+        uploadStore,
+        new SoftwareFiles(config.incomingDir, config.softwareMaxBytes),
+        new SignQueue(config.signQueueDir),
+        new SoftwareFiles(config.softwareDir, config.softwareMaxBytes),
+        { environment: config.gateway.gwEnv, maxBytes: config.softwareMaxBytes },
+      )
+    : undefined;
+// 指令派送(P4):SQL 與裝置共用連線池,推送經 DeviceService 的 WebSocket 連線表;agent.upgrade 建立前後交給 ReleaseService(P6);
+// software.install / uninstall 由 SoftwareService 檢查並換成目錄快照、授權數(P7);admin 批次超過門檻待第二人核可(B1)
 const commandStore = new SqlCommandStore(() => sql.connection());
 const releaseSvc = releases;
-const commands = new CommandDispatcher(commandStore, sql, service, {
-  kindHooks: releaseSvc
-    ? { 'agent.upgrade': { check: (ctx, ref, params) => releaseSvc.checkUpgradeCommand(ctx, ref, params), apply: (ctx, ref, params, actor) => releaseSvc.applyUpgradeCommand(ctx, ref, params, actor) } }
-    : {},
+const kindHooks: Record<string, KindHook> = {
+  // 未啟用軟體派送時一律拒絕(沒有目錄快照的 software.* 不可送到 Agent)
+  'software.install': { check: () => Promise.reject(softwareDisabled()) },
+  'software.uninstall': { check: () => Promise.reject(softwareDisabled()) },
+};
+if (releaseSvc)
+  kindHooks['agent.upgrade'] = {
+    check: (ctx, ref, params) => releaseSvc.checkUpgradeCommand(ctx, ref, params),
+    apply: (ctx, ref, params, actor) => releaseSvc.applyUpgradeCommand(ctx, ref, params, actor),
+  };
+if (software) {
+  kindHooks['software.install'] = {
+    check: (ctx, ref, params) => software.checkCommand(ctx, ref, params, 'install'),
+    checkBatch: (ctx, refs, params) => software.checkLicense(ctx, refs, params),
+    onFinal: (ctx, cmd, fin) =>
+      fin.state === 'succeeded' || fin.state === 'failed'
+        ? alerts!.onSoftwareFinal(ctx, { deviceRef: cmd.deviceRef, commandId: cmd.commandId, params: cmd.params, ...fin, state: fin.state })
+        : Promise.resolve(),
+  };
+  kindHooks['software.uninstall'] = { check: (ctx, ref, params) => software.checkCommand(ctx, ref, params, 'uninstall') };
+}
+commands = new CommandDispatcher(commandStore, sql, service, {
+  kindHooks,
+  approvalThreshold: config.batchApprovalThreshold,
+  limitedKinds: { kinds: SOFTWARE_KINDS, max: config.softwareMaxConcurrent },
 });
 // 指令附檔(logs.collect 日誌,P4-2):檔案在 COMMAND_FILES_DIR,索引在 ita.command_file
 const files = new CommandFileService(commandStore, config.commandFilesDir, { keepDays: config.commandFileKeepDays });
+
+function softwareDisabled(): AppError {
+  return new AppError(404, 'ITA_PACKAGE_NOT_FOUND', '軟體派送未啟用(SOFTWARE_DIR 未設定)');
+}
 
 const check = async (fn: () => Promise<void>) => {
   try {
@@ -90,8 +151,8 @@ const deps = (): Promise<DepStatus[]> =>
     }),
   );
 
-const mgmt = await buildMgmtApp({ config, service, commands, files, alerts, releases, readiness, deps });
-const agent = await buildAgentApp({ config, service, commands, files, alerts, releases, monitor: config.agentMonitor, deps });
+const mgmt = await buildMgmtApp({ config, service, commands, files, alerts, releases, software, uploads, readiness, deps });
+const agent = await buildAgentApp({ config, service, commands, files, alerts, releases, software, monitor: config.agentMonitor, deps });
 
 await mgmt.listen({ host: config.host, port: config.port });
 await agent.listen({ host: config.host, port: config.agentPort });
@@ -108,6 +169,10 @@ mgmt.log.info(
     monitor: config.monitor.enabled,
     agentMonitor: config.agentMonitor.enabled,
     releases: !!config.releasesDir,
+    software: !!config.softwareDir,
+    uploads: !!uploads,
+    softwareMaxConcurrent: config.softwareMaxConcurrent,
+    batchApprovalThreshold: config.batchApprovalThreshold,
   },
   '服務已啟動',
 );

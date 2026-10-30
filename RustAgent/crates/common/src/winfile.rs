@@ -78,9 +78,81 @@ pub fn product_version(path: &Path) -> Option<String> {
     (!s.is_empty()).then(|| s.to_string())
 }
 
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+/// 目錄必須是一般目錄,不是 junction、符號連結等 reparse point(升級快取不可被導向別處;Watchdog 與 Agent 共用)
+pub fn not_reparse(dir: &Path) -> Result<(), String> {
+    use std::os::windows::fs::MetadataExt;
+    let m =
+        std::fs::symlink_metadata(dir).map_err(|e| format!("無法讀取 {}:{e}", dir.display()))?;
+    if m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || !m.is_dir() {
+        return Err(format!("{} 不是一般目錄(連結)", dir.display()));
+    }
+    Ok(())
+}
+
+/// 檔案存在時必須是一般檔案(不是 reparse point、不是目錄);回傳是否存在
+pub fn plain_file(path: &Path) -> Result<bool, String> {
+    use std::os::windows::fs::MetadataExt;
+    match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("無法讀取 {}:{e}", path.display())),
+        Ok(m) if m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || !m.is_file() => {
+            Err(format!("{} 不是一般檔案(連結)", path.display()))
+        }
+        Ok(_) => Ok(true),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn junctions_are_not_plain_directories() {
+        struct Tmp(std::path::PathBuf);
+        impl Drop for Tmp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        impl Tmp {
+            fn path(&self) -> &Path {
+                &self.0
+            }
+        }
+        let dir = Tmp(std::env::temp_dir().join(format!(
+            "rustit-reparse-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )));
+        std::fs::create_dir_all(dir.path()).unwrap();
+        let target = dir.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        assert!(not_reparse(&target).is_ok());
+        assert!(not_reparse(&dir.path().join("missing")).is_err());
+        let file = target.join("f.txt");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(not_reparse(&file).is_err(), "檔案不是目錄");
+        assert_eq!(plain_file(&file), Ok(true));
+        assert_eq!(plain_file(&target.join("none")), Ok(false));
+        assert!(plain_file(&target).is_err(), "目錄不是檔案");
+        // junction 不需要系統管理員權限
+        let link = dir.path().join("link");
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "建立 junction 失敗:{made:?}");
+        assert!(not_reparse(&link).is_err(), "junction 要拒絕");
+        // 經過 junction 的路徑本身不是 reparse point,呼叫端要逐層檢查(cache\ 與 cache\watchdog\ 各查一次)
+        assert!(plain_file(&link.join("f.txt")).unwrap());
+    }
 
     #[test]
     fn free_space_and_missing_version() {

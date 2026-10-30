@@ -77,6 +77,37 @@ pub fn find_installed(name_prefix: &str) -> Option<crate::InstalledApp> {
     found
 }
 
+/// 整台電腦的 Uninstall 機碼（只有 HKLM；不可加入 HKCU，見 [`machine_uninstall_entries`]）
+const MACHINE_UNINSTALL_PATHS: [&str; 2] = [
+    r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+    r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+];
+
+/// 整台電腦的 Uninstall 項目（只讀 HKLM 與 WOW6432Node，不含 HKCU）：軟體派送的偵測與移除用（P7-SOFTWARE-DESIGN §5.1）。
+/// 每使用者安裝（HKCU）可由一般使用者寫入，Agent 以 SYSTEM 執行其移除指令會被利用，所以不讀。
+pub fn machine_uninstall_entries() -> Vec<crate::UninstallEntry> {
+    let mut list = Vec::new();
+    for path in MACHINE_UNINSTALL_PATHS {
+        let Ok(uninstall) = HKLM.open_subkey(path) else { continue };
+        for key in uninstall.enum_keys().flatten() {
+            let Ok(entry) = uninstall.open_subkey(&key) else { continue };
+            // 更新套件(ParentKeyName)不是獨立的軟體,不拿來偵測或移除
+            if !string(&entry, "ParentKeyName").is_empty() {
+                continue;
+            }
+            list.push(crate::UninstallEntry {
+                name: string(&entry, "DisplayName"),
+                version: string(&entry, "DisplayVersion"),
+                uninstall_string: string(&entry, "UninstallString"),
+                quiet_uninstall_string: string(&entry, "QuietUninstallString"),
+                windows_installer: entry.get_value::<u32, _>("WindowsInstaller").unwrap_or(0) == 1,
+                key,
+            });
+        }
+    }
+    list
+}
+
 /// `20260915` → `2026-09-15`；其他格式原樣回傳。
 fn format_install_date(raw: &str) -> String {
     if raw.len() == 8 && raw.bytes().all(|b| b.is_ascii_digit()) {

@@ -21,6 +21,12 @@ fn read(rel: &str) -> Value {
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("{} 不是合法 JSON:{e}", path.display()))
 }
 
+fn is_valid(schema: &str, instance: &Value) -> bool {
+    jsonschema::validator_for(&read(schema))
+        .expect("schema 可編譯")
+        .is_valid(instance)
+}
+
 fn assert_valid(schema: &str, instance: &Value) {
     let validator = jsonschema::validator_for(&read(schema)).expect("schema 可編譯");
     let errors: Vec<String> = validator
@@ -357,6 +363,36 @@ fn p6_upgrade_messages() {
     ] {
         assert_valid("pipe.schema.json", &read(name));
     }
+    // P6-3:replace_watchdog 與 ack(接受 / 拒絕)
+    for name in [
+        "examples/pipe-replace-watchdog.sample.json",
+        "examples/pipe-replace-watchdog-ack.sample.json",
+    ] {
+        assert_valid("pipe.schema.json", &read(name));
+    }
+    let rw: Envelope =
+        serde_json::from_value(read("examples/pipe-replace-watchdog.sample.json")).unwrap();
+    for rejected in [None, Some(("SIGNER_NOT_TRUSTED", "簽章者不在本機信任清單"))] {
+        let ack = Envelope::reply(
+            &rw,
+            "replace_watchdog_ack",
+            rustit_agent::protocol::replace_watchdog_ack(rejected),
+        );
+        let v = serde_json::to_value(&ack).unwrap();
+        assert_valid("pipe.schema.json", &v);
+        assert_eq!(v["id"], json!(rw.id), "回應沿用請求 id");
+        assert_eq!(v["body"]["accepted"], json!(rejected.is_none()));
+    }
+    // 不在契約的代碼會被 schema 擋下(Watchdog 端另以 known_code 收斂)
+    let bad = Envelope::reply(
+        &rw,
+        "replace_watchdog_ack",
+        rustit_agent::protocol::replace_watchdog_ack(Some(("<script>", "x"))),
+    );
+    assert!(!is_valid(
+        "pipe.schema.json",
+        &serde_json::to_value(&bad).unwrap()
+    ));
     let req: Envelope =
         serde_json::from_value(read("examples/pipe-prepare-shutdown.sample.json")).unwrap();
     let ack = Envelope::reply(

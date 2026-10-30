@@ -97,7 +97,7 @@ Claude 把搜尋、審查、資安檢查、除錯、測試、重構交給子代�
 
 - 開發在工作分支(`feature/*`、`fix/*`、`docs/*`、`refactor/*`),從最新的 `origin/develop` 開。目前在 `develop` / `main` 而任務要改檔時,**先詢問使用者要開哪個分支**,不要直接提交。
 - 只推送工作分支;`develop`、`main` **只透過 GitLab Merge Request 由 Maintainer 合併**。AI 不得推送 `develop` / `main`(使用者在本次對話明確指示且為 Maintainer 除外),不得 force push 或改寫已推送的提交;推送被拒時不找繞過方式。
-- **本 repo 部署**:合併到 `develop` → CI 自動部署測試區(主機 2 的 `endpoint-server`、`ita-mongo`、`ita-redis`);`main` 尚未設定正式區部署。測試區共用,合併前提醒使用者在群組告知。
+- **本 repo 部署**:合併到 `develop` → CI 自動部署測試區(主機 2 的 `endpoint-server`、`ita-mongo`、`ita-redis`);合併到 `main` → 主機 2 建置映像檔推送 Registry(`build-prod`),再手動執行 `deploy-prod`(主機 3 拉取並更新 `endpoint-server`;第一次部署步驟見 `docs/RUNBOOK.md` §1.2)。測試區共用,合併前提醒使用者在群組告知。
 - 提交前確認 diff 只含本次任務的檔案,不提交 `.env*` 與任何機密;提交訊息用 `<type>(<scope>): <中文說明>`。
 
 ---
@@ -259,7 +259,7 @@ Agent 與 Server 之間只透過 **資料契約**(`docs/contracts/`,JSON Schema 
 | **交接文件** | `docs/HANDOFF.md` | 目前做到哪、下一步、已決定事項、需使用者親自執行的事、開工前必讀清單 |
 | **專案地圖** | `docs/PROJECT-MAP.md` | 目錄與檔案職責、分層、跨專案對應;**開發新功能後必須更新**(§8.1) |
 | 產品需求 | `docs/PRD.md` | 功能需求、非功能需求、里程碑 |
-| 架構決策 | `docs/decisions/` | 0001 Nginx 與通訊(Agent 改 HTTPS + WebSocket)、0002 軟體派送、0003 程式碼簽章與 PKI、0004 Endpoint Server 改 Node.js |
+| 架構決策 | `docs/decisions/` | 0001 Nginx 與通訊(Agent 改 HTTPS + WebSocket)、0002 軟體派送、0003 程式碼簽章與 PKI、0004 Endpoint Server 改 Node.js、0005 簽章與上架流程改善(建議中) |
 | 資料契約 | `docs/contracts/` | Agent ↔ Server 的 JSON Schema 與範例(M0 建立) |
 | Gateway 開發手冊 | `../giga-api-gateway-bff/AGENT.md` | 通用準則來源;§10 多專案工作區、§10.7 設計原則、§10.8 AI 分工 |
 | 端點規格 | `../giga-api-gateway-bff/docs/ENDPOINT-AGENT-GUIDE.md` | **上位規範**:憑證、`:9443`、Agent / Server 規範、§8 管理 API 與指令、§10 待辦、§11 上線檢查 |

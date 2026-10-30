@@ -86,6 +86,7 @@ const target = (patch: Partial<MonitorTarget> = {}): MonitorTarget => ({
   health: null,
   unexpectedRestarts24h: 0,
   openRules: [],
+  rebootRequiredSince: null,
   ...patch,
 });
 const health = (patch: Record<string, unknown> = {}) =>
@@ -170,6 +171,12 @@ describe('告警規則(evaluate)', () => {
     const t = target({ lastSeenAt: new Date('2026-10-18T23:40:00Z'), health: health({ watchdogReportAt: new Date('2026-10-19T00:03:00Z') }) });
     assert.deepEqual(rules(t), ['agent_silent']);
     assert.deepEqual(rules({ ...t, health: health({ watchdogReportAt: new Date('2026-10-18T23:40:00Z') }) }), []);
+  });
+
+  it('reboot_pending(P7):需要重新開機超過 7 天', () => {
+    assert.deepEqual(rules(target({ rebootRequiredSince: new Date(NOW.getTime() - 8 * 86_400_000) })), ['reboot_pending']);
+    assert.deepEqual(rules(target({ rebootRequiredSince: new Date(NOW.getTime() - 6 * 86_400_000) })), []);
+    assert.deepEqual(rules(target({ rebootRequiredSince: null })), []);
   });
 });
 

@@ -24,12 +24,21 @@
  *   RELEASES_DIR              Agent / Watchdog 版本檔目錄(唯讀;{component}/{version}/{檔名},P6-UPGRADE-DESIGN §4);省略 = 不啟用升級
  *                             (版本 API 不註冊、Watchdog 的 target 一律 null)。容器 /srv/releases
  *   RELEASE_MAX_CONCURRENT    同時升級中的裝置上限,預設 20(P6-UPGRADE-DESIGN §2.1)
+ *   SOFTWARE_DIR              軟體庫(唯讀;{軟體}/{版本}/{安裝檔},P7-SOFTWARE-DESIGN §4);省略 = 不啟用軟體派送
+ *                             (軟體 API 與套件下載不註冊、software.* 指令建立時回 404)。容器 /srv/software
+ *   SOFTWARE_MAX_BYTES        單一安裝檔大小上限(位元組),預設 4 GB
+ *   SOFTWARE_MAX_CONCURRENT   software.install / uninstall 同時執行的總數上限(跨批次與單台),預設 20
+ *   INCOMING_DIR              上傳的原始安裝檔(讀寫;NAS RustIT\<區>\incoming\,S1-SIGNING-DESIGN §1)
+ *   SIGN_QUEUE_DIR            送簽工作單與簽章結果(讀寫;NAS RustIT\<區>\sign-queue\);與 INCOMING_DIR 都設定且已啟用軟體派送才啟用上傳送簽。
+ *                             只設其中一個、或沒有 SOFTWARE_DIR 時啟動失敗;啟用時兩個目錄要存在且可寫,否則啟動失敗(server.ts)
+ *   BATCH_APPROVAL_THRESHOLD  admin 批次超過幾台需第二人核可(PLATFORM-PLAN B1),預設 20
  */
 import { readFileSync } from 'node:fs';
 import { isGatewayPort, loadGatewayEnv, loadMonitorEnv, type GatewayEnv, type MonitorEnv } from '@giganexus/backend-sdk';
 import type { AgentSettings } from './contracts.js';
 import { parseCompanyDomains } from './services/company.js';
 import { DEFAULT_THRESHOLDS, type AlertThresholds } from './services/alert-service.js';
+import { SOFTWARE_DEFAULT_MAX_BYTES } from './services/software-files.js';
 
 export interface SqlConfig {
   server: string;
@@ -86,6 +95,17 @@ export interface Config {
   releasesDir: string | null;
   /** 同時升級中的裝置上限(P6) */
   releaseMaxConcurrent: number;
+  /** 軟體庫(P7);null = 不啟用軟體派送 */
+  softwareDir: string | null;
+  /** 單一安裝檔大小上限(P7) */
+  softwareMaxBytes: number;
+  /** software.* 同時執行的總數上限(P7) */
+  softwareMaxConcurrent: number;
+  /** 上傳與送簽(S1-3);任一為 null = 不啟用 */
+  incomingDir: string | null;
+  signQueueDir: string | null;
+  /** admin 批次超過幾台需第二人核可(B1) */
+  batchApprovalThreshold: number;
 }
 
 export class ConfigError extends Error {
@@ -179,6 +199,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd?: string): 
   } catch (err) {
     throw new ConfigError(`ENDPOINT_COMPANY_DOMAINS 格式錯誤:${(err as Error).message}`);
   }
+  // 上傳送簽的設定不完整時啟動失敗,不靜默停用(2026-10-29 測試區路徑誤植,到核可才發現)
+  const incomingDir = env.INCOMING_DIR?.trim() || null;
+  const signQueueDir = env.SIGN_QUEUE_DIR?.trim() || null;
+  if (!incomingDir !== !signQueueDir) throw new ConfigError('INCOMING_DIR 與 SIGN_QUEUE_DIR 要一起設定(都不設定 = 不啟用上傳送簽)');
+  if (incomingDir && !env.SOFTWARE_DIR?.trim()) throw new ConfigError('啟用上傳送簽(INCOMING_DIR、SIGN_QUEUE_DIR)需同時設定 SOFTWARE_DIR');
 
   return {
     gateway,
@@ -212,6 +237,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd?: string): 
     alertThresholds: alertThresholds(env),
     releasesDir: env.RELEASES_DIR?.trim() || null,
     releaseMaxConcurrent: int('RELEASE_MAX_CONCURRENT', env.RELEASE_MAX_CONCURRENT, 20, 1, 1000),
+    softwareDir: env.SOFTWARE_DIR?.trim() || null,
+    softwareMaxBytes: int('SOFTWARE_MAX_BYTES', env.SOFTWARE_MAX_BYTES, SOFTWARE_DEFAULT_MAX_BYTES, 1024 * 1024, 16 * 1024 ** 3),
+    softwareMaxConcurrent: int('SOFTWARE_MAX_CONCURRENT', env.SOFTWARE_MAX_CONCURRENT, 20, 1, 1000),
+    incomingDir,
+    signQueueDir,
+    batchApprovalThreshold: int('BATCH_APPROVAL_THRESHOLD', env.BATCH_APPROVAL_THRESHOLD, 20, 1, 200),
   };
 }
 

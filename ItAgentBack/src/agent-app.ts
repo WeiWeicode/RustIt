@@ -8,9 +8,11 @@
  *   - POST /agent/v1/watchdog/report(Watchdog 上報,watchdog.schema.json,P5-2):同一張裝置憑證,只更新 Watchdog 欄位與寫 Watchdog 事件
  *   - POST /agent/v1/commands/{commandId}/files(指令附檔,logs.collect 日誌 zip,上限 20 MB;command-file.schema.json,P4-2)
  *   - GET /agent/v1/releases/{component}/{version}/{file}(版本檔下載,支援 Range;只給這台被指派的目標版本,P6-UPGRADE-DESIGN §3.1)
+ *   - GET /agent/v1/packages/{packageId}(軟體套件下載,支援 Range;只給有尚未結束的此套件 software.install 的裝置,P7-SOFTWARE-DESIGN §3.3)
  *   - HTTPS 回報同時處理中的請求超過 AGENT_MAX_INFLIGHT 時回 429 ITA_BUSY + Retry-After,在驗證身分前就擋下(A3)
  *   - 與 :51240 是不同的 Fastify 實例,不共用 hook(§5.2);日誌帶 x-request-id、DN、指紋(§5.7)
  *   - 告警評估(P5):每 5 分鐘由這裡的計時器呼叫 AlertService.sweep(與心跳逾時、指令逾期掃描同一處管理)
+ *   - 軟體庫定期複驗(P7 資安稽核 M1):啟動 10 分鐘後一次,之後每天一次(SoftwareService.verifyFiles)
  *   - 監控(giga-observe 服務 endpoint-agent,與管理 API 分開的 Key):HTTPS 回報逐筆;WebSocket 每條連線關閉時記一筆
  *     (method WS、持續時間、關閉碼、訊息數;非正常關閉為 warn);心跳附上在線連線數。Agent 的 heartbeat 訊息不逐筆記錄(量大)
  */
@@ -38,6 +40,7 @@ import type { AlertService } from './services/alert-service.js';
 import type { CommandDispatcher, CommandUpdateBody } from './services/command-dispatcher.js';
 import type { CommandFileService } from './services/command-files.js';
 import type { ReleaseService } from './services/release-service.js';
+import type { SoftwareService } from './services/software-service.js';
 import type { AgentConnection, Ctx, DeviceService } from './services/device-service.js';
 import type { DeviceRecord } from './stores/types.js';
 
@@ -73,6 +76,11 @@ export interface AgentAppOptions {
   alertSweepIntervalMs?: number;
   /** 升級(P6;省略 = 不開放下載、不評估升級告警) */
   releases?: ReleaseService;
+  /** 軟體派送(P7;省略 = 不開放套件下載,SOFTWARE_DIR 未設定) */
+  software?: SoftwareService;
+  /** 軟體庫定期複驗間隔與啟動後第一次的延遲(毫秒;M1) */
+  softwareVerifyIntervalMs?: number;
+  softwareVerifyFirstMs?: number;
   /** giga-observe 監控(loadMonitorEnv;省略 = 不監控) */
   monitor?: MonitorEnv;
   /** 監控心跳附帶的相依服務狀態(SQL Server / Mongo / Redis) */
@@ -266,6 +274,19 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
       },
     );
 
+  // 軟體套件下載(P7):Agent 中斷後以 Range 續傳;大檔不經 Fastify 緩衝(串流)
+  const software = opts.software;
+  if (software)
+    app.get<{ Params: { packageId: string } }>(
+      '/agent/v1/packages/:packageId',
+      { schema: { params: { type: 'object', required: ['packageId'], properties: { packageId: { type: 'string', format: 'uuid' } } } } },
+      async (req, reply) => {
+        const range = req.headers.range;
+        const d = await software.download(ctxOf(req), req.device!, req.params.packageId, typeof range === 'string' ? range : undefined);
+        return reply.status(d.status).headers(d.headers).send(d.stream ?? undefined);
+      },
+    );
+
   // 指令附檔:本體為 zip 原始位元組,串流交給 CommandFileService(大小與 SHA-256 在寫檔時檢查);只在這個範圍接受 application/zip
   if (files)
     await app.register(async (scope) => {
@@ -321,7 +342,11 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
         case 'hello':
           send('hello_ack', m.id, await service.hello(mctx, device, m.body as unknown as HelloBody));
           // 重連補送 queued 指令(指南 §8.4);在 hello_ack 之後(Agent 才知道時鐘偏差)。不等待,避免擋住心跳
-          if (commands) void commands.onHello(mctx, device.id);
+          // 只退回這條連線登記前送出的;這條連線已被取代時不處理(新連線的 hello 會處理)
+          if (commands) {
+            const connectedAt = service.connectedAt(device.deviceId, conn);
+            if (connectedAt) void commands.onHello(mctx, device.id, connectedAt);
+          }
           return;
         case 'command_update': {
           if (!commands) return send('unsupported', m.id, { type: m.type });
@@ -387,6 +412,8 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
   let fileTimer: NodeJS.Timeout | undefined;
   let alertTimer: NodeJS.Timeout | undefined;
   let releaseTimer: NodeJS.Timeout | undefined;
+  let verifyTimer: NodeJS.Timeout | undefined;
+  let verifyFirst: NodeJS.Timeout | undefined;
   app.addHook('onReady', async () => {
     timer = setInterval(() => void service.sweep({ log: app.log, requestId: 'sweep' }), opts.sweepIntervalMs ?? 10_000);
     timer.unref();
@@ -411,6 +438,14 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
       releaseTimer = setInterval(() => void releases.sweep({ log: app.log, requestId: 'release-sweep' }), opts.alertSweepIntervalMs ?? 300_000);
       releaseTimer.unref();
     }
+    // 軟體庫定期複驗:每一輪重讀所有未撤回套件的安裝檔,啟動後先等 10 分鐘(避開部署時的負載)
+    if (software) {
+      const verify = () => void software.verifyFiles({ log: app.log, requestId: 'software-verify' });
+      verifyFirst = setTimeout(verify, opts.softwareVerifyFirstMs ?? 600_000);
+      verifyFirst.unref();
+      verifyTimer = setInterval(verify, opts.softwareVerifyIntervalMs ?? 86_400_000);
+      verifyTimer.unref();
+    }
   });
   app.addHook('preClose', async () => {
     clearInterval(timer);
@@ -418,6 +453,8 @@ export async function buildAgentApp(opts: AgentAppOptions): Promise<FastifyInsta
     clearInterval(fileTimer);
     clearInterval(alertTimer);
     clearInterval(releaseTimer);
+    clearTimeout(verifyFirst);
+    clearInterval(verifyTimer);
     await service.closeAll();
   });
   return app;

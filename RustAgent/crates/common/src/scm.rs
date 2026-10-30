@@ -14,12 +14,14 @@ use windows_service::service::{
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
-    ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
-    SE_FILE_OBJECT, SE_KERNEL_OBJECT, SetNamedSecurityInfoW,
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW,
+    GetNamedSecurityInfoW, GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT, SE_KERNEL_OBJECT,
+    SetNamedSecurityInfoW,
 };
 use windows_sys::Win32::Security::{
-    ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, IsWellKnownSid,
-    OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
+    GetSecurityDescriptorDacl, INHERIT_ONLY_ACE, IsWellKnownSid, OWNER_SECURITY_INFORMATION,
+    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, WinBuiltinAdministratorsSid,
     WinLocalSystemSid,
 };
 use windows_sys::Win32::System::Services::{
@@ -425,6 +427,59 @@ fn msi_mutex_owned_by_system() -> bool {
     }
 }
 
+/// `Global\_MSIExecute` 的狀態(Agent 軟體派送判斷 Windows Installer 是否忙碌,P7 L3)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MsiMutex {
+    /// 不存在(或打不開)
+    Absent,
+    /// 擁有者是 SYSTEM 或 Administrators:msiserver 以 SYSTEM 執行,SYSTEM 權杖的預設擁有者是 Administrators 群組
+    Privileged,
+    /// 其他擁有者(一般使用者自建的同名 mutex,不能採信)或讀不到擁有者
+    Other,
+}
+
+/// 讀 `Global\_MSIExecute`:Windows Installer 執行安裝指令碼(含 deferred 自訂動作)期間由 msiserver 持有
+pub fn msi_mutex() -> MsiMutex {
+    let name = wide(r"Global\_MSIExecute");
+    // SAFETY:開啟既有的具名 mutex 只讀擁有者;控制代碼與安全性描述元在本函式內釋放
+    unsafe {
+        let h = OpenMutexW(SYNCHRONIZE | READ_CONTROL, 0, name.as_ptr());
+        if h.is_null() {
+            return MsiMutex::Absent;
+        }
+        let mut owner: PSID = std::ptr::null_mut();
+        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let rc = GetSecurityInfo(
+            h,
+            SE_KERNEL_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut sd,
+        );
+        let privileged = rc == 0
+            && !owner.is_null()
+            && (IsWellKnownSid(owner, WinLocalSystemSid) != 0
+                || IsWellKnownSid(owner, WinBuiltinAdministratorsSid) != 0);
+        if !sd.is_null() {
+            LocalFree(sd as _);
+        }
+        CloseHandle(h);
+        if privileged {
+            MsiMutex::Privileged
+        } else {
+            MsiMutex::Other
+        }
+    }
+}
+
+/// `msiserver` 服務執行中
+pub fn msiserver_running() -> bool {
+    query("msiserver").is_ok_and(|i| i.state == SvcState::Running)
+}
+
 /// Windows Installer 正在執行(安裝 / 升級 / 解除安裝監控 MSI 時會依序停止兩個服務,這時不重啟對方,避免檔案被占用)。
 /// 必須同時:`Global\_MSIExecute` 的擁有者是 SYSTEM、`msiserver` 服務執行中;連續超過 30 分鐘視為異常,恢復看守
 pub fn installer_running() -> bool {
@@ -504,6 +559,141 @@ pub fn protect_dir(dir: &std::path::Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// 目錄擁有者必須是 SYSTEM 或 Administrators:擁有者可以事後改回 ACL,一般使用者預先建立的目錄即使套了
+/// [`protect_dir`] 也不可信(軟體派送的快取與 staging,P7-2 資安 M1)
+pub fn owner_is_admin(dir: &std::path::Path) -> Result<(), String> {
+    let path = wide(&dir.to_string_lossy());
+    let mut owner: PSID = std::ptr::null_mut();
+    let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY:路徑以 NUL 結尾;owner 指向 sd 內部,sd 以 LocalFree 釋放,釋放前使用完畢
+    unsafe {
+        let rc = GetNamedSecurityInfoW(
+            path.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut sd,
+        );
+        if rc != 0 {
+            return Err(format!("無法讀取 {} 的擁有者(錯誤 {rc})", dir.display()));
+        }
+        let ok = !owner.is_null()
+            && (IsWellKnownSid(owner, WinLocalSystemSid) != 0
+                || IsWellKnownSid(owner, WinBuiltinAdministratorsSid) != 0);
+        LocalFree(sd as _);
+        if !ok {
+            return Err(format!(
+                "{} 的擁有者不是 SYSTEM 或 Administrators",
+                dir.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 寫入類權限:寫入 / 附加(目錄:新增檔案 / 子目錄)、刪除子項、刪除、改 ACL、改擁有者、GENERIC_WRITE / GENERIC_ALL
+const WRITE_MASK: u32 =
+    0x2 | 0x4 | 0x40 | 0x1_0000 | 0x4_0000 | 0x8_0000 | 0x4000_0000 | 0x1000_0000;
+/// NT SERVICE\TrustedInstaller
+const TRUSTED_INSTALLER: &str = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
+
+/// 一個檔案或目錄:擁有者與 DACL 中可寫入的對象都只能是 SYSTEM / Administrators / TrustedInstaller
+fn admin_only_one(path: &std::path::Path, ti: PSID) -> Result<(), String> {
+    let w = wide(&path.to_string_lossy());
+    let mut owner: PSID = std::ptr::null_mut();
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let trusted = |sid: PSID| {
+        // SAFETY:sid 指向有效的 SID(安全性描述元或 ACE 內部)
+        unsafe {
+            IsWellKnownSid(sid, WinLocalSystemSid) != 0
+                || IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0
+                || (!ti.is_null() && EqualSid(sid, ti) != 0)
+        }
+    };
+    // SAFETY:路徑以 NUL 結尾;owner / dacl 指向 sd 內部,sd 以 LocalFree 釋放,釋放前使用完畢
+    unsafe {
+        let rc = GetNamedSecurityInfoW(
+            w.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            &mut dacl,
+            std::ptr::null_mut(),
+            &mut sd,
+        );
+        if rc != 0 {
+            return Err(format!("無法讀取 {} 的權限(錯誤 {rc})", path.display()));
+        }
+        let result = if owner.is_null() || !trusted(owner) {
+            Err(format!("{} 的擁有者不是系統管理帳號", path.display()))
+        } else if dacl.is_null() {
+            Err(format!("{} 沒有 DACL(所有人可寫)", path.display()))
+        } else {
+            let mut r = Ok(());
+            for i in 0..(*dacl).AceCount as u32 {
+                let mut ace: *mut core::ffi::c_void = std::ptr::null_mut();
+                if GetAce(dacl, i, &mut ace) == 0 || ace.is_null() {
+                    r = Err(format!("無法讀取 {} 的 ACE", path.display()));
+                    break;
+                }
+                let header = &*(ace as *const ACE_HEADER);
+                // 只繼承給子項的 ACE 不作用在本身;拒絕類 ACE 只會減少權限
+                if header.AceFlags as u32 & INHERIT_ONLY_ACE != 0 || header.AceType == 1 {
+                    continue;
+                }
+                if header.AceType != 0 {
+                    r = Err(format!(
+                        "{} 有無法判斷的 ACE 類型 {}",
+                        path.display(),
+                        header.AceType
+                    ));
+                    break;
+                }
+                let allowed = &*(ace as *const ACCESS_ALLOWED_ACE);
+                let sid = &allowed.SidStart as *const u32 as PSID;
+                if allowed.Mask & WRITE_MASK != 0 && !trusted(sid) {
+                    r = Err(format!("{} 可被系統管理帳號以外的對象寫入", path.display()));
+                    break;
+                }
+            }
+            r
+        };
+        LocalFree(sd as _);
+        result
+    }
+}
+
+/// 檔案本身與上層每一層目錄(不含磁碟機根目錄:一般使用者在根目錄只能新增資料夾,換不掉既有路徑)
+/// 都只有 SYSTEM / Administrators / TrustedInstaller 可寫入。Agent 以 SYSTEM 執行 Program Files 以外的移除程式前檢查(P7-2 資安 H1)
+pub fn admin_only_writable(path: &std::path::Path) -> Result<(), String> {
+    let sid = wide(TRUSTED_INSTALLER);
+    let mut ti: PSID = std::ptr::null_mut();
+    // SAFETY:字串以 NUL 結尾;成功時 ti 以 LocalFree 釋放
+    let ok = unsafe { ConvertStringSidToSidW(sid.as_ptr(), &mut ti) } != 0;
+    let mut result = Ok(());
+    let mut cur = Some(path);
+    while let Some(p) = cur {
+        if p.parent().is_none() {
+            break;
+        }
+        if let Err(e) = admin_only_one(p, if ok { ti } else { std::ptr::null_mut() }) {
+            result = Err(e);
+            break;
+        }
+        cur = p.parent();
+    }
+    if ok {
+        // SAFETY:ConvertStringSidToSidW 配置
+        unsafe { LocalFree(ti as _) };
+    }
+    result
 }
 
 /// 失敗復原:第 1、2、後續失敗分別 10 / 30 / 60 秒後重新啟動,1 天後重設;非當機失敗也套用(指南 §6.1)

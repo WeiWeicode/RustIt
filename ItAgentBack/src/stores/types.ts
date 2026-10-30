@@ -51,7 +51,9 @@ export type DeviceEventType =
   /** 所屬公司變更(自動判定或 IT 指定;E6) */
   | 'company_changed'
   /** 開始下載版本檔(從第 0 位元組起的請求;P6) */
-  | 'release_download';
+  | 'release_download'
+  /** 開始下載軟體套件(從第 0 位元組起的請求,每台每套件每小時一筆;P7) */
+  | 'package_download';
 
 /** Agent 回報的端點事件(event.schema.json;PLATFORM-PLAN §4.2) */
 export interface AgentEvent {
@@ -279,6 +281,8 @@ export interface StateStore {
 
 export type CommandState = 'queued' | 'sent' | 'acked' | 'running' | 'succeeded' | 'failed' | 'canceled' | 'expired';
 export type CommandLevel = 'basic' | 'admin';
+/** 批次狀態(migration 0008;P7 B1 第二人核可) */
+export type BatchState = 'pending_approval' | 'running' | 'done' | 'rejected' | 'expired';
 
 export interface CommandRecord {
   id: number;
@@ -287,6 +291,8 @@ export interface CommandRecord {
   batchId: string | null;
   /** 批次同時執行上限;不屬於批次為 null */
   batchMaxConcurrent: number | null;
+  /** 批次狀態(B1 第二人核可);不屬於批次為 null。pending_approval / rejected / expired 的批次指令不送出 */
+  batchState: BatchState | null;
   deviceRef: number;
   deviceId: string;
   computerName: string;
@@ -338,6 +344,8 @@ export interface NewBatch {
   level: CommandLevel;
   params: string;
   maxConcurrent: number;
+  /** 需第二人核可(> BATCH_APPROVAL_THRESHOLD 台):state = pending_approval */
+  requiresApproval: boolean;
   idempotencyKey: string | null;
   createdByEmp: string;
   createdByName: string | null;
@@ -353,6 +361,15 @@ export interface BatchRecord {
   params: string;
   targetCount: number;
   maxConcurrent: number;
+  state: BatchState;
+  requiresApproval: boolean;
+  approvedByEmp: string | null;
+  approvedByName: string | null;
+  approvedAt: Date | null;
+  rejectedByEmp: string | null;
+  rejectedByName: string | null;
+  rejectedAt: Date | null;
+  rejectReason: string | null;
   createdByEmp: string;
   createdByName: string | null;
   createdAt: Date;
@@ -368,10 +385,21 @@ export interface CommandPatch {
   resultSummary?: string | null;
   errorCode?: string | null;
   errorMessage?: string | null;
-  /** acked / running 時設定(已有值不覆寫) */
+  /** acked / running 時設定(已有值不覆寫,resetTimeout 除外) */
   timeoutAt?: Date;
+  /** 以 timeoutAt 覆寫既有的執行逾時(A6 延後中的 running,Agent 0.9.3) */
+  resetTimeout?: boolean;
   /** 終態但沒收到 running(瞬間完成,Agent 只送最後狀態):started_at 以 acked_at(沒有則本次時間)補上 */
   markStarted?: boolean;
+}
+
+/** 批次清單篩選(新到舊;P7-5 待核可清單) */
+export interface BatchFilter {
+  state?: BatchState;
+  /** created_at 晚於此時間(待核可只列 24 小時核可期限內的) */
+  createdAfter?: Date;
+  beforeId?: number;
+  limit: number;
 }
 
 export interface CommandFilter {
@@ -393,13 +421,15 @@ export interface CommandStore {
   findByIdempotency(emp: string, key: string): Promise<CommandRecord | null>;
   findBatchByIdempotency(emp: string, key: string): Promise<BatchRecord | null>;
   getBatch(batchId: string): Promise<BatchRecord | null>;
+  /** 批次清單,新到舊(含各狀態台數);資料範圍由 service 層過濾 */
+  listBatches(filter: BatchFilter): Promise<BatchRecord[]>;
   /** 批次內各裝置目前的所屬公司(去重;資料範圍檢查用,E6) */
   batchCompanies(batchRef: number): Promise<(string | null)[]>;
   listCommands(filter: CommandFilter): Promise<CommandRecord[]>;
   /** 條件更新:目前狀態在 from 之內才更新,回傳是否更新(狀態只能往前,指南 §8.4) */
   transition(id: number, from: CommandState[], patch: CommandPatch): Promise<boolean>;
-  /** WebSocket 斷線:該裝置 sent(尚未 acked)改回 queued */
-  requeueSent(deviceRef: number): Promise<number>;
+  /** WebSocket 斷線:該裝置 sent(尚未 acked)改回 queued;給 sentBefore 時只改在此之前送出的(重連 hello:不動新連線已送出的) */
+  requeueSent(deviceRef: number, sentBefore?: Date): Promise<number>;
   /** 該裝置未逾期的 queued,依建立順序 */
   queuedForDevice(deviceRef: number, now: Date): Promise<CommandRecord[]>;
   /** 該批次未逾期的 queued,依建立順序 */
@@ -410,6 +440,28 @@ export interface CommandStore {
   pendingCount(deviceRef: number, kind: string): Promise<number>;
   /** 逾期(queued / sent 超過 expires_at)與逾時(acked / running 超過 timeout_at)的指令 */
   dueForSweep(now: Date, limit: number): Promise<CommandRecord[]>;
+  /**
+   * 第二人核可(B1):pending_approval → running,核可人 ≠ 建立人才更新;同一交易把批次內 queued 指令的 expires_at 改為 expiresAt
+   * (待核可期間不倒數)。回傳是否更新
+   */
+  approveBatch(batchRef: number, actor: Actor, at: Date, expiresAt: Date): Promise<boolean>;
+  /** pending_approval → rejected;同一交易取消批次內 queued 指令 */
+  rejectBatch(batchRef: number, actor: Actor, at: Date, reason: string): Promise<boolean>;
+  /** created_at 早於 createdBefore 的 pending_approval → expired,批次內 queued 指令取消;回傳逾期的批次數 */
+  expirePendingBatches(createdBefore: Date, at: Date): Promise<number>;
+  /** running 且所有指令都已結束 → done */
+  finishBatchIfDone(batchRef: number): Promise<void>;
+  /** createdAfter 之後建立、running 且所有指令都已結束的批次 → done(不經派送器結束的指令,例如整批取消);回傳筆數 */
+  finishIdleBatches(createdAfter: Date): Promise<number>;
+  /** 這些類型 sent / acked / running 的總數(全域並行上限) */
+  activeOfKinds(kinds: readonly string[]): Promise<number>;
+  /**
+   * 此人 since 之後建立的這些類型指令涉及的電腦台數(D2-1);
+   * 已由第二人核可的批次、待核可 / 駁回 / 逾期的批次不計;取消的單台照計(避免「建立 → 取消」循環)
+   */
+  recentGatedTargets(emp: string, kinds: readonly string[], since: Date): Promise<number>;
+  /** 這些類型未逾期的 queued(不屬於批次、或批次 running),內部 id 大於 afterId,依 id(建立順序) */
+  queuedOfKinds(kinds: readonly string[], now: Date, limit: number, afterId?: number): Promise<CommandRecord[]>;
 }
 
 // ---------- 指令附檔(logs.collect;PLATFORM-PLAN A4、B5;migration 0003 ita.command_file) ----------
@@ -479,7 +531,13 @@ export type AlertRule =
   /** P6:同一目標版本升級失敗 2 次或還原失敗 */
   | 'upgrade_failed'
   /** P6:發佈環目標設定超過 24 小時仍未到目標版本 */
-  | 'version_mismatch';
+  | 'version_mismatch'
+  /** P7:software.install 失敗(同一台再派送同一套件成功時自動關閉) */
+  | 'software_install_failed'
+  /** P7:安裝回報需要重新開機(3010 / 1641)超過 7 天仍未重開機 */
+  | 'reboot_pending'
+  /** P7(D4):軟體庫的安裝檔與登錄的雜湊不符(檔案被換掉);開在要求下載的那台裝置 */
+  | 'software_file_tampered';
 export type AlertSeverity = 'warn' | 'critical';
 export type AlertState = 'open' | 'resolved';
 
@@ -538,6 +596,8 @@ export interface MonitorTarget {
   unexpectedRestarts24h: number;
   /** 目前未結束的告警規則 */
   openRules: AlertRule[];
+  /** P7:最早一筆「成功且 reboot_required」且晚於開機時間的 software.* 指令完成時間;沒有為 null */
+  rebootRequiredSince: Date | null;
 }
 
 /** Watchdog 回報的 Agent 狀態(P5-2;ita.device_health 的 Watchdog 欄位) */
@@ -684,4 +744,211 @@ export interface ReleaseStore {
   activeUpgrades(pendingSince: Date, activeSince: Date): Promise<number>;
   /** active、未合併的裝置(companies:資料範圍,undefined = 全部;deviceRef:只查這一台) */
   upgradeTargets(companies?: string[], deviceRef?: number): Promise<UpgradeTargetRow[]>;
+}
+
+// ---------- 軟體派送(PLATFORM-PLAN P7 §4.6;P7-SOFTWARE-DESIGN;migration 0008) ----------
+
+export type InstallerType = 'msi' | 'inno' | 'nsis' | 'burn' | 'exe';
+export type DetectType = 'msi_product_code' | 'display_name';
+export type RebootPolicy = 'never' | 'required';
+export type PackageStatus = 'draft' | 'tested' | 'published' | 'revoked';
+
+export interface PackageRecord {
+  id: number;
+  packageId: string;
+  name: string;
+  version: string;
+  /** 軟體庫內相對路徑 {軟體}/{版本}/{檔名} */
+  fileName: string;
+  sha256: string;
+  sizeBytes: number;
+  installerType: InstallerType;
+  installArgs: string | null;
+  uninstallArgs: string | null;
+  detectType: DetectType;
+  detectValue: string;
+  rebootPolicy: RebootPolicy;
+  /** Agent 執行安裝 / 移除程式的逾時(秒,300–7200;0009) */
+  timeoutSec: number;
+  signerThumbprints: string[];
+  observedSigners: string[];
+  licenseLimit: number | null;
+  status: PackageStatus;
+  notes: string | null;
+  createdByEmp: string;
+  createdByName: string | null;
+  createdAt: Date;
+  updatedByEmp: string | null;
+  updatedAt: Date | null;
+  /** 上次發佈以來改過安裝參數 / 偵測規則 / 重開機政策的人(發佈人不可在其中,D2-2) */
+  editors: string[];
+  testedByEmp: string | null;
+  testedAt: Date | null;
+  publishedByEmp: string | null;
+  publishedByName: string | null;
+  publishedAt: Date | null;
+  revokedByEmp: string | null;
+  revokedAt: Date | null;
+  /** 撤回前的狀態(C1:只有從 published 撤回才可對所有電腦移除) */
+  revokedFrom: PackageStatus | null;
+}
+
+export interface NewPackage {
+  name: string;
+  version: string;
+  fileName: string;
+  sha256: string;
+  sizeBytes: number;
+  installerType: InstallerType;
+  installArgs: string | null;
+  uninstallArgs: string | null;
+  detectType: DetectType;
+  detectValue: string;
+  rebootPolicy: RebootPolicy;
+  timeoutSec: number;
+  licenseLimit: number | null;
+  notes: string | null;
+  actor: Actor;
+  at: Date;
+  requestId: string;
+}
+
+/** 可修改的欄位(undefined = 不改);revertToDraft:改到安裝參數 / 偵測規則時退回 draft 並清除 tested_* / published_* 與簽章者 */
+export interface PackagePatch {
+  installArgs?: string | null;
+  uninstallArgs?: string | null;
+  detectType?: DetectType;
+  detectValue?: string;
+  rebootPolicy?: RebootPolicy;
+  timeoutSec?: number;
+  licenseLimit?: number | null;
+  notes?: string | null;
+  /** 改到安裝參數 / 偵測規則 / 重開機政策:記錄修改人(editors;已發佈時重設為此人) */
+  argsChanged: boolean;
+  revertToDraft: boolean;
+}
+
+/** 某套件的 software.install 指令(測試機結果、標記 tested 的依據) */
+export interface InstallResultRow {
+  commandId: string;
+  deviceId: string;
+  computerName: string;
+  deviceCompany: string | null;
+  ring: Ring;
+  state: CommandState;
+  /** 參數快照(JSON 字串) */
+  params: string;
+  resultSummary: string | null;
+  errorCode: string | null;
+  createdByEmp: string;
+  finishedAt: Date | null;
+}
+
+export interface SoftwareStore {
+  /** q:名稱關鍵字(部分比對) */
+  listPackages(f: { status?: PackageStatus; q?: string }): Promise<PackageRecord[]>;
+  getPackage(packageId: string): Promise<PackageRecord | null>;
+  /** 同名同版本或同一檔案已登錄丟 AppError 409 ITA_PACKAGE_EXISTS */
+  addPackage(p: NewPackage): Promise<PackageRecord>;
+  /** 條件更新:status 仍為 expect 才更新;revertToDraft 時同交易取消此套件尚未送出的 software.*(M2) */
+  updatePackage(packageId: string, expect: PackageStatus, patch: PackagePatch, actor: Actor, at: Date, requestId: string): Promise<boolean>;
+  /** draft → tested(寫入預期與實際簽章者) */
+  markTested(packageId: string, signers: string[], observed: string[], actor: Actor, at: Date, requestId: string): Promise<boolean>;
+  /** tested → published,且發佈人 ≠ created_by_emp、不在 editors */
+  publish(packageId: string, actor: Actor, at: Date, requestId: string): Promise<boolean>;
+  /** 非 revoked → revoked;同一交易取消此套件尚未送出(queued)的 software.install */
+  revoke(packageId: string, actor: Actor, at: Date, requestId: string): Promise<{ ok: boolean; canceledCommands: number }>;
+  /** 取消此套件尚未送出(queued)的 software.install,回傳被取消指令的裝置內部 id(每筆一個,可重複;檔案被換掉,M1) */
+  cancelQueuedInstalls(packageId: string, errorCode: string, at: Date): Promise<number[]>;
+  /** 此套件的 software.install 指令(新到舊) */
+  installResults(packageId: string, limit: number): Promise<InstallResultRow[]>;
+  /** 這台尚未結束(sent / acked / running)的 software.install 的 package_id(下載授權) */
+  activeInstallPackages(deviceRef: number): Promise<{ packageId: string; params: Record<string, unknown> }[]>;
+  deviceRing(deviceRef: number): Promise<Ring | null>;
+  /** 各樣式(LIKE,已跳脫)的已安裝台數:active、未合併的裝置;companies 為資料範圍(undefined = 全部) */
+  installedCounts(patterns: string[], companies?: string[]): Promise<number[]>;
+  /** 已安裝此樣式的裝置(active、未合併);onlyRefs 指定時只查這些裝置 */
+  installedDevices(
+    pattern: string,
+    opts: { companies?: string[]; onlyRefs?: number[]; limit: number },
+  ): Promise<{ deviceRef: number; deviceId: string; computerName: string; company: string | null; name: string; version: string | null }[]>;
+}
+
+// ---- 軟體套件上傳與送簽(S1-3,migration 0011;S1-SIGNING-DESIGN §4)----
+
+export type UploadState = 'uploaded' | 'queued' | 'signed' | 'rejected';
+export type UploadSource = 'upload' | 'incoming';
+
+export interface UploadRecord {
+  id: number;
+  uploadId: string;
+  /** {軟體}/{版本}/{檔名}:incoming\ 的原始檔與軟體庫的目標位置相同 */
+  fileName: string;
+  sha256: string;
+  sizeBytes: number;
+  state: UploadState;
+  source: UploadSource;
+  notes: string | null;
+  uploadedByEmp: string;
+  uploadedByName: string | null;
+  uploadedAt: Date;
+  approvedByEmp: string | null;
+  approvedByName: string | null;
+  approvedAt: Date | null;
+  rejectCode: string | null;
+  rejectReason: string | null;
+  rejectedByEmp: string | null;
+  rejectedAt: Date | null;
+  vendorSigner: string | null;
+  vendorSignerSubject: string | null;
+  vendorCheck: string | null;
+  signedSigner: string | null;
+  signOperator: string | null;
+  signedSha256: string | null;
+  signedAt: Date | null;
+  /** 刪除 incoming\ 原始檔的人與時間(0012;只有 rejected 可刪) */
+  fileDeletedByEmp: string | null;
+  fileDeletedAt: Date | null;
+}
+
+export interface NewUpload {
+  fileName: string;
+  sha256: string;
+  sizeBytes: number;
+  source: UploadSource;
+  notes: string | null;
+  actor: Actor;
+  at: Date;
+  requestId: string;
+}
+
+/** 工作站結果(signed 時)寫入的欄位;signedSha256 為主機以軟體庫實際檔案重算的值 */
+export interface UploadSignedPatch {
+  vendorSigner: string | null;
+  vendorSignerSubject: string | null;
+  vendorCheck: string | null;
+  signedSigner: string;
+  signOperator: string | null;
+  signedSha256: string;
+  at: Date;
+}
+
+export interface UploadStore {
+  /** 新到舊,最多 500 筆 */
+  listUploads(f: { state?: UploadState }): Promise<UploadRecord[]>;
+  getUpload(uploadId: string): Promise<UploadRecord | null>;
+  /** 同一路徑的上傳紀錄(新到舊,最多 20 筆;路徑比對不分大小寫):P7 登錄時檢查(資安審查 M1) */
+  uploadsForFile(fileName: string): Promise<UploadRecord[]>;
+  /** 同一路徑已有進行中(uploaded / queued)的上傳丟 AppError 409 ITA_UPLOAD_EXISTS */
+  addUpload(n: NewUpload): Promise<UploadRecord>;
+  /** uploaded → queued,且核可人 ≠ 上傳者(條件更新) */
+  approveUpload(uploadId: string, actor: Actor, at: Date, requestId: string): Promise<boolean>;
+  /** 狀態在 expect 之中才改為 rejected;actor 為 null 代表工作站拒絕或主機重算不符 */
+  rejectUpload(uploadId: string, expect: UploadState[], code: string, reason: string | null, actor: Actor | null, at: Date): Promise<boolean>;
+  /** queued → signed */
+  markSigned(uploadId: string, patch: UploadSignedPatch): Promise<boolean>;
+  /** 同一路徑(不分大小寫)所有紀錄的狀態(不限筆數,去重複):刪除 incoming\ 原始檔前檢查 */
+  fileStates(fileName: string): Promise<UploadState[]>;
+  /** 同一路徑(不分大小寫)rejected 且尚未記錄刪除的紀錄寫入刪除人與時間(條件更新);回傳筆數 */
+  markFilesDeleted(fileName: string, emp: string, at: Date): Promise<number>;
 }

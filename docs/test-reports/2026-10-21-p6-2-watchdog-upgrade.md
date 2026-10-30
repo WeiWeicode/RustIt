@@ -33,7 +33,7 @@ SHA-256 不符由主機下載前複驗擋下,端點端驗證由單元測試涵�
 ## 3. 觀察與可能問題
 
 1. **步驟 9 證據偏弱**:`logs.collect` 太快,與升級沒有重疊。要驗 `AGENT_UPGRADING` 需要較慢的指令(例如先把 Agent 日誌等級調高並蒐集、或暫時以測試指令拉長),建議併入 P6-3 驗收時補測。
-2. **步驟 8 事件缺漏**:重開機後 `ita.device_event` 沒有該次降版的 `upgrade_succeeded`(只有 `agent_started`),但 `ita.device_upgrade` 與日誌正確。推測是收尾由 Watchdog 重啟後完成,事件未補送或被去重;影響只在事件時間軸,不影響升級結果。建議 P6-3 時確認收尾路徑是否補報 `upgrade_succeeded`。
+2. **步驟 8 事件(更正)**:驗收當下查 `ita.device_event` 時沒看到降版收尾的 `upgrade_succeeded`,原以為缺漏;事後再查,該事件(#143,`occurred_at` 00:32:55Z)在 00:33:00Z Watchdog 下一次上報時已送達。當時只是查得比上報早,**不是缺陷**(`ita.device_upgrade` 與日誌一直正確)。
 3. `rustit_common::stop 結束逾時(5 秒),不再等待背景工作`(WARN):停服務時背景工作 5 秒內未結束,屬既有行為,升級結果未受影響。
 4. 驗收中途會話 Token 逾時(401),以 `/api/auth/refresh` 更新後繼續,與升級功能無關。
 
@@ -45,7 +45,7 @@ SHA-256 不符由主機下載前複驗擋下,端點端驗證由單元測試涵�
 
 ## 5. 建議交給 Claude 處理
 
-- P6-3(Agent 替換 Watchdog、`replace_watchdog`)前,先決定是否補測步驟 9 與步驟 8 的事件補報。
+- 步驟 9(升級時有執行中的指令且逾時的 `AGENT_UPGRADING` 情境)仍未驗,需要較慢的指令才能觸發;步驟 8 的事件已確認(見 §3-2),不需另處理。
 - 同步 P6 設計 §8.4 進度、HANDOFF、甘特圖 W6-19。
 
 ---

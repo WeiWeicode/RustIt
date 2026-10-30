@@ -50,6 +50,43 @@ fn assert_valid(instance: &Value) {
     assert!(errors.is_empty(), "不符合 watchdog.schema.json:{errors:#?}");
 }
 
+/// P6-3:Watchdog 送給 Agent 的 replace_watchdog 要符合管道契約(與 Agent 端的契約測試吃同一份 pipe.schema.json)
+#[test]
+fn replace_watchdog_request_matches_pipe_schema() {
+    use rustit_common::envelope::Envelope;
+    use rustit_watchdog::upgrade::{UpgradeTarget, replace_watchdog_body};
+    let sample = read("examples/pipe-replace-watchdog.sample.json");
+    let target = UpgradeTarget {
+        version: sample["body"]["version"].as_str().unwrap().into(),
+        url: "/agent/v1/releases/watchdog/0.3.1/rustit-watchdog.exe".into(),
+        sha256: sample["body"]["sha256"].as_str().unwrap().into(),
+        size_bytes: 8_000_000,
+        signer_thumbprints: vec![
+            sample["body"]["signer_thumbprints"][0]
+                .as_str()
+                .unwrap()
+                .into(),
+        ],
+    };
+    let path = PathBuf::from(sample["body"]["path"].as_str().unwrap());
+    let env = Envelope::new("replace_watchdog", replace_watchdog_body(&target, &path));
+    let v = serde_json::to_value(&env).unwrap();
+    let validator = jsonschema::validator_for(&read("pipe.schema.json")).expect("schema 可編譯");
+    let errors: Vec<String> = validator
+        .iter_errors(&v)
+        .map(|e| format!("{} {}", e.instance_path(), e))
+        .collect();
+    assert!(errors.is_empty(), "不符合 pipe.schema.json:{errors:#?}");
+    assert_eq!(v["body"], sample["body"], "與範例檔一致");
+    // 範例檔自己也要合法
+    for name in [
+        "examples/pipe-replace-watchdog.sample.json",
+        "examples/pipe-replace-watchdog-ack.sample.json",
+    ] {
+        assert!(validator.is_valid(&read(name)), "{name}");
+    }
+}
+
 #[test]
 fn report_matches_schema() {
     let snap = Snapshot {

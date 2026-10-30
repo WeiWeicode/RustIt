@@ -45,8 +45,15 @@ struct Fake {
     now: Cell<Instant>,
     calls: RefCell<Vec<String>>,
     rec: RefCell<Option<UpgradeRecord>>,
+    /// component = watchdog 的本機紀錄(P6-3)
+    wd_rec: RefCell<Option<UpgradeRecord>>,
+    /// replace_watchdog 的回應(預設被 Agent 接受)與送出的 (agent_pid, 版本)
+    replace_result: RefCell<Result<(), (String, String)>>,
+    replaced: RefCell<Vec<(u32, String)>>,
     events: RefCell<Vec<(&'static str, Value)>>,
     maint: RefCell<Vec<bool>>,
+    /// Agent 管道 status.busy(P7 軟體派送中)
+    busy: RefCell<Option<String>>,
 }
 
 impl Fake {
@@ -68,8 +75,12 @@ impl Fake {
             now: Cell::new(Instant::now()),
             calls: RefCell::new(Vec::new()),
             rec: RefCell::new(None),
+            wd_rec: RefCell::new(None),
+            replace_result: RefCell::new(Ok(())),
+            replaced: RefCell::new(Vec::new()),
             events: RefCell::new(Vec::new()),
             maint: RefCell::new(Vec::new()),
+            busy: RefCell::new(None),
         }
     }
 
@@ -102,7 +113,7 @@ impl UpgradeEnv for Fake {
         offset: u64,
         limit: u64,
     ) -> Result<Fetched, String> {
-        assert!(url.starts_with("/agent/v1/releases/agent/"));
+        assert!(url.starts_with("/agent/v1/releases/"));
         self.offsets.borrow_mut().push(offset);
         let step = self.plan.borrow_mut().pop_front().unwrap_or(Dl::Full);
         let mut have = std::fs::read(part).unwrap_or_default();
@@ -165,6 +176,7 @@ impl UpgradeEnv for Fake {
             version: version.into(),
             pid,
             ws_connected: mode == Mode::Healthy,
+            busy: self.busy.borrow().clone(),
             ..Default::default()
         })
     }
@@ -191,17 +203,41 @@ impl UpgradeEnv for Fake {
     fn hands_off(&self) -> bool {
         false
     }
-    fn load(&self) -> Option<UpgradeRecord> {
-        self.rec.borrow().clone()
+    fn load_component(&self, component: &str) -> Option<UpgradeRecord> {
+        if component == WATCHDOG_COMPONENT {
+            self.wd_rec.borrow().clone()
+        } else {
+            self.rec.borrow().clone()
+        }
     }
     fn save(&self, rec: &UpgradeRecord) {
-        *self.rec.borrow_mut() = Some(rec.clone());
+        if rec.component == WATCHDOG_COMPONENT {
+            *self.wd_rec.borrow_mut() = Some(rec.clone());
+        } else {
+            *self.rec.borrow_mut() = Some(rec.clone());
+        }
     }
-    fn clear(&self) {
-        *self.rec.borrow_mut() = None;
+    fn clear_component(&self, component: &str) {
+        if component == WATCHDOG_COMPONENT {
+            *self.wd_rec.borrow_mut() = None;
+        } else {
+            *self.rec.borrow_mut() = None;
+        }
     }
     fn event(&self, kind: &'static str, data: Value) {
         self.events.borrow_mut().push((kind, data));
+    }
+    async fn replace_watchdog(
+        &self,
+        agent_pid: u32,
+        target: &UpgradeTarget,
+        path: &Path,
+    ) -> Result<(), (String, String)> {
+        assert!(path.is_file(), "交給 Agent 的檔案要存在");
+        self.replaced
+            .borrow_mut()
+            .push((agent_pid, target.version.clone()));
+        self.replace_result.borrow().clone()
     }
     fn maintenance(&self, on: bool) {
         self.maint.borrow_mut().push(on);
@@ -272,6 +308,26 @@ async fn succeeds_and_keeps_previous() {
     // 已是目標版本:不動作
     let again = upgrader(&f, &s).run(&target(), Some("0.7.1")).await;
     assert_eq!(again, Outcome::Skipped("已是目標版本"));
+}
+
+#[tokio::test]
+async fn agent_busy_defers_install() {
+    let s = setup();
+    let f = Fake::new(&s.paths.install_dir);
+    *f.busy.borrow_mut() = Some("software".into());
+    assert_eq!(
+        run(&f, &s, &target()).await,
+        Outcome::Skipped("Agent 正在執行軟體派送")
+    );
+    // 沒有停止 Agent、紀錄不算失敗;下載檔留在 cache
+    assert_eq!(f.installed(), OLD);
+    assert!(f.calls().is_empty());
+    assert!(f.rec.borrow().is_none());
+    assert!(s.paths.version_dir("0.7.1").join(AGENT_EXE).is_file());
+    // 軟體派送結束後的下一次:沿用已下載的檔案完成升級
+    *f.busy.borrow_mut() = None;
+    assert_eq!(run(&f, &s, &target()).await, Outcome::Succeeded);
+    assert_eq!(f.installed(), NEW);
 }
 
 #[tokio::test]
@@ -527,14 +583,22 @@ async fn rollback_tolerates_stolen_pipe() {
         fn hands_off(&self) -> bool {
             false
         }
-        fn load(&self) -> Option<UpgradeRecord> {
-            self.0.load()
+        fn load_component(&self, c: &str) -> Option<UpgradeRecord> {
+            self.0.load_component(c)
         }
         fn save(&self, r: &UpgradeRecord) {
             self.0.save(r)
         }
-        fn clear(&self) {
-            self.0.clear()
+        fn clear_component(&self, c: &str) {
+            self.0.clear_component(c)
+        }
+        async fn replace_watchdog(
+            &self,
+            pid: u32,
+            t: &UpgradeTarget,
+            p: &Path,
+        ) -> Result<(), (String, String)> {
+            self.0.replace_watchdog(pid, t, p).await
         }
         fn event(&self, k: &'static str, d: Value) {
             self.0.event(k, d)
@@ -686,4 +750,337 @@ fn progress_matches_contract_shape() {
                 "attempts": 1, "error_code": "HEALTH_CHECK_FAILED", "error_message": "x" })
     );
     assert!(r.terminal());
+}
+
+// ---------- Watchdog 自己的升級(P6-3):下載、驗證後交給 Agent ----------
+
+fn wd_target() -> UpgradeTarget {
+    UpgradeTarget {
+        version: "0.3.1".into(),
+        url: "/agent/v1/releases/watchdog/0.3.1/rustit-watchdog.exe".into(),
+        sha256: hex::encode(Sha256::digest(NEW)),
+        size_bytes: NEW.len() as u64,
+        signer_thumbprints: vec![SIGNER.into()],
+    }
+}
+
+fn wd_fake(s: &Setup) -> Fake {
+    let mut f = Fake::new(&s.paths.install_dir);
+    f.version = Some("0.3.1".into());
+    f
+}
+
+async fn run_wd(env: &Fake, s: &Setup, t: &UpgradeTarget) -> Outcome {
+    upgrader(env, s).run_watchdog(t, "0.3.0").await
+}
+
+#[tokio::test]
+async fn watchdog_target_is_downloaded_verified_and_handed_to_agent() {
+    let s = setup();
+    let f = wd_fake(&s);
+    assert_eq!(run_wd(&f, &s, &wd_target()).await, Outcome::HandedOff);
+    // 下載到 cache\watchdog\{版本}\,Agent 與 Watchdog 自己的 exe 都沒被 Watchdog 動
+    let file = s
+        .paths
+        .cache_dir
+        .join("watchdog")
+        .join("0.3.1")
+        .join("rustit-watchdog.exe");
+    assert_eq!(std::fs::read(&file).unwrap(), NEW);
+    assert_eq!(f.installed(), OLD);
+    assert_eq!(*f.replaced.borrow(), [(100, "0.3.1".to_string())]);
+    // 本機紀錄:component = watchdog、installing(Agent 隨後停止這個行程);Agent 的紀錄不受影響
+    let rec = f.wd_rec.borrow().clone().unwrap();
+    assert_eq!(rec.component, "watchdog");
+    assert_eq!(rec.state, "installing");
+    assert_eq!(rec.from_version.as_deref(), Some("0.3.0"));
+    assert_eq!(rec.target_sha256, wd_target().sha256);
+    assert!(f.rec.borrow().is_none());
+    // Watchdog 路徑不送 component = watchdog 的事件(主機只收 Agent 上報的)
+    assert!(f.events.borrow().is_empty());
+    assert!(f.calls().is_empty(), "不停止、不啟動任何服務");
+    assert!(f.maint.borrow().is_empty(), "不進入維護中");
+}
+
+#[tokio::test]
+async fn watchdog_target_rejected_by_agent_is_a_failure_with_known_code() {
+    let s = setup();
+    let f = wd_fake(&s);
+    *f.replace_result.borrow_mut() =
+        Err(("SIGNER_NOT_TRUSTED".into(), "簽章者不在本機清單".into()));
+    assert_eq!(
+        run_wd(&f, &s, &wd_target()).await,
+        Outcome::Failed("failed", "SIGNER_NOT_TRUSTED")
+    );
+    let rec = f.wd_rec.borrow().clone().unwrap();
+    assert_eq!((rec.state.as_str(), rec.attempts), ("failed", 1));
+    assert_eq!(rec.error_code.as_deref(), Some("SIGNER_NOT_TRUSTED"));
+    // 不認得的代碼一律 REPLACE_FAILED(不把主機以外的字串當代碼寫進紀錄)
+    let f = wd_fake(&s);
+    *f.replace_result.borrow_mut() = Err(("<script>".into(), "x".into()));
+    assert_eq!(
+        run_wd(&f, &s, &wd_target()).await,
+        Outcome::Failed("failed", "REPLACE_FAILED")
+    );
+}
+
+#[tokio::test]
+async fn watchdog_target_with_bad_signature_never_reaches_agent() {
+    let s = setup();
+    let mut f = wd_fake(&s);
+    f.signer = Err("未簽章".into());
+    assert_eq!(
+        run_wd(&f, &s, &wd_target()).await,
+        Outcome::Failed("failed", "SIGNATURE_INVALID")
+    );
+    assert!(f.replaced.borrow().is_empty());
+    assert!(
+        !s.paths
+            .cache_dir
+            .join("watchdog")
+            .join("0.3.1")
+            .join("rustit-watchdog.exe")
+            .exists(),
+        "驗證失敗的檔案要刪除"
+    );
+}
+
+#[tokio::test]
+async fn watchdog_target_rejects_untrusted_signer_and_wrong_version() {
+    let s = setup();
+    let f = wd_fake(&s);
+    let up = Upgrader {
+        env: &f,
+        paths: s.paths.clone(),
+        trusted: vec!["0000000000000000000000000000000000000000".into()],
+    };
+    assert_eq!(
+        up.run_watchdog(&wd_target(), "0.3.0").await,
+        Outcome::Failed("failed", "SIGNER_NOT_TRUSTED")
+    );
+    let s = setup();
+    let mut f = wd_fake(&s);
+    f.version = Some("0.3.2".into());
+    assert_eq!(
+        run_wd(&f, &s, &wd_target()).await,
+        Outcome::Failed("failed", "HASH_MISMATCH")
+    );
+    assert!(f.replaced.borrow().is_empty());
+}
+
+#[tokio::test]
+async fn watchdog_target_below_minimum_version_is_refused() {
+    let s = setup();
+    let f = wd_fake(&s);
+    let mut t = wd_target();
+    t.version = "0.2.0".into();
+    t.url = "/agent/v1/releases/watchdog/0.2.0/rustit-watchdog.exe".into();
+    assert_eq!(
+        run_wd(&f, &s, &t).await,
+        Outcome::Failed("failed", "DOWNLOAD_FAILED")
+    );
+    assert!(f.replaced.borrow().is_empty());
+    // 下載網址的元件必須是 watchdog(主機給 agent 的網址也不接受)
+    let mut t = wd_target();
+    t.url = "/agent/v1/releases/agent/0.3.1/rustit-agent.exe".into();
+    assert_eq!(
+        run_wd(&f, &s, &t).await,
+        Outcome::Failed("failed", "DOWNLOAD_FAILED")
+    );
+}
+
+#[tokio::test]
+async fn watchdog_target_needs_a_running_agent() {
+    let s = setup();
+    let f = wd_fake(&s);
+    f.running.set(false);
+    assert_eq!(
+        run_wd(&f, &s, &wd_target()).await,
+        Outcome::Failed("failed", "REPLACE_FAILED")
+    );
+    assert!(f.replaced.borrow().is_empty());
+}
+
+#[tokio::test]
+async fn watchdog_target_skips_when_current_or_attempts_exhausted() {
+    let s = setup();
+    let f = wd_fake(&s);
+    let up = upgrader(&f, &s);
+    assert_eq!(
+        up.run_watchdog(&wd_target(), "0.3.1").await,
+        Outcome::Skipped("已是目標版本")
+    );
+    *f.replace_result.borrow_mut() = Err(("REPLACE_FAILED".into(), "x".into()));
+    assert!(matches!(
+        run_wd(&f, &s, &wd_target()).await,
+        Outcome::Failed(..)
+    ));
+    assert!(matches!(
+        run_wd(&f, &s, &wd_target()).await,
+        Outcome::Failed(..)
+    ));
+    assert_eq!(
+        run_wd(&f, &s, &wd_target()).await,
+        Outcome::Skipped("同一目標版本已失敗,不再自動嘗試")
+    );
+    // 同版本的 Agent 失敗次數與 Watchdog 無關
+    assert!(f.rec.borrow().is_none());
+}
+
+#[tokio::test]
+async fn watchdog_resume_marks_succeeded_when_running_the_target_version() {
+    let s = setup();
+    let f = wd_fake(&s);
+    run_wd(&f, &s, &wd_target()).await;
+    let up = upgrader(&f, &s);
+    assert_eq!(up.resume_watchdog("0.3.1"), Some(Outcome::Succeeded));
+    let rec = f.wd_rec.borrow().clone().unwrap();
+    assert_eq!(rec.state, "succeeded");
+    assert!(rec.error_code.is_none());
+    assert_eq!(rec.attempts, 0);
+    // 已結束的紀錄不再處理
+    assert_eq!(up.resume_watchdog("0.3.1"), None);
+}
+
+#[tokio::test]
+async fn watchdog_resume_marks_rolled_back_when_still_old() {
+    let s = setup();
+    let f = wd_fake(&s);
+    run_wd(&f, &s, &wd_target()).await;
+    let up = upgrader(&f, &s);
+    assert_eq!(
+        up.resume_watchdog("0.3.0"),
+        Some(Outcome::Failed("rolled_back", "HEALTH_CHECK_FAILED"))
+    );
+    let rec = f.wd_rec.borrow().clone().unwrap();
+    assert_eq!((rec.state.as_str(), rec.attempts), ("rolled_back", 1));
+    assert!(f.events.borrow().is_empty(), "事件由 Agent 上報");
+}
+
+#[tokio::test]
+async fn watchdog_resume_marks_rolled_back_when_old_returns_after_success() {
+    // 審查必修 A:新版啟動記 succeeded 後,Agent 健康檢查失敗換回舊版 → 舊版啟動時記 rolled_back
+    let s = setup();
+    let f = wd_fake(&s);
+    run_wd(&f, &s, &wd_target()).await;
+    let up = upgrader(&f, &s);
+    assert_eq!(up.resume_watchdog("0.3.1"), Some(Outcome::Succeeded));
+    assert_eq!(
+        up.resume_watchdog("0.3.0"),
+        Some(Outcome::Failed("rolled_back", "HEALTH_CHECK_FAILED"))
+    );
+    let rec = f.wd_rec.borrow().clone().unwrap();
+    assert_eq!((rec.state.as_str(), rec.attempts), ("rolled_back", 1));
+    assert_eq!(rec.error_code.as_deref(), Some("HEALTH_CHECK_FAILED"));
+    assert!(f.events.borrow().is_empty(), "事件由 Agent 上報");
+    // 已收尾,不重複加次數
+    assert_eq!(up.resume_watchdog("0.3.0"), None);
+    // 下一次替換再失敗就達上限,不再自動嘗試(不會無限循環)
+    assert_eq!(run_wd(&f, &s, &wd_target()).await, Outcome::HandedOff);
+    assert_eq!(up.resume_watchdog("0.3.1"), Some(Outcome::Succeeded));
+    assert_eq!(
+        up.resume_watchdog("0.3.0"),
+        Some(Outcome::Failed("rolled_back", "HEALTH_CHECK_FAILED"))
+    );
+    assert_eq!(f.wd_rec.borrow().as_ref().unwrap().attempts, 2);
+    assert_eq!(
+        run_wd(&f, &s, &wd_target()).await,
+        Outcome::Skipped("同一目標版本已失敗,不再自動嘗試")
+    );
+}
+
+#[tokio::test]
+async fn watchdog_resume_keeps_success_of_own_version() {
+    let s = setup();
+    let f = wd_fake(&s);
+    run_wd(&f, &s, &wd_target()).await;
+    let up = upgrader(&f, &s);
+    assert_eq!(up.resume_watchdog("0.3.1"), Some(Outcome::Succeeded));
+    // 新版重新啟動(版本 = 目標):紀錄不變
+    assert_eq!(up.resume_watchdog("0.3.1"), None);
+    assert_eq!(f.wd_rec.borrow().as_ref().unwrap().state, "succeeded");
+}
+
+/// 已交給 Agent、`started_at` 在 `ago` 之前的 installing 紀錄
+fn wd_installing(ago: chrono::Duration, attempts: u32) -> UpgradeRecord {
+    UpgradeRecord {
+        component: WATCHDOG_COMPONENT.into(),
+        target_version: "0.3.1".into(),
+        target_sha256: wd_target().sha256,
+        from_version: Some("0.3.0".into()),
+        state: "installing".into(),
+        attempts,
+        error_code: None,
+        error_message: None,
+        started_at: (chrono::Utc::now() - ago).to_rfc3339(),
+    }
+}
+
+#[tokio::test]
+async fn watchdog_installing_within_limit_is_skipped() {
+    let s = setup();
+    let f = wd_fake(&s);
+    f.save(&wd_installing(chrono::Duration::minutes(14), 0));
+    assert_eq!(
+        run_wd(&f, &s, &wd_target()).await,
+        Outcome::Skipped("上一次替換尚未收尾")
+    );
+    let rec = f.wd_rec.borrow().clone().unwrap();
+    assert_eq!((rec.state.as_str(), rec.attempts), ("installing", 0));
+    assert!(f.replaced.borrow().is_empty());
+}
+
+#[tokio::test]
+async fn watchdog_stale_installing_is_rolled_back_then_retried_once() {
+    // 審查必修 B:Agent 沒動到服務就失敗,舊 Watchdog 仍在跑、紀錄停在 installing
+    let s = setup();
+    let f = wd_fake(&s);
+    f.save(&wd_installing(chrono::Duration::minutes(16), 0));
+    assert_eq!(
+        run_wd(&f, &s, &wd_target()).await,
+        Outcome::Failed("rolled_back", "HEALTH_CHECK_FAILED")
+    );
+    let rec = f.wd_rec.borrow().clone().unwrap();
+    assert_eq!((rec.state.as_str(), rec.attempts), ("rolled_back", 1));
+    assert!(rec.error_message.unwrap().contains("替換逾時未完成"));
+    assert!(f.replaced.borrow().is_empty(), "這一次只收尾,不交給 Agent");
+    assert!(f.events.borrow().is_empty());
+    // 可再試一次(冷卻由 lib.rs 依 Failed 設定)
+    assert_eq!(run_wd(&f, &s, &wd_target()).await, Outcome::HandedOff);
+    assert_eq!(f.replaced.borrow().len(), 1);
+    // 第二次又停在 installing 逾時 → 失敗次數達上限,不再嘗試
+    let mut rec = f.wd_rec.borrow().clone().unwrap();
+    assert_eq!((rec.state.as_str(), rec.attempts), ("installing", 1));
+    rec.started_at = (chrono::Utc::now() - chrono::Duration::minutes(20)).to_rfc3339();
+    f.save(&rec);
+    assert_eq!(
+        run_wd(&f, &s, &wd_target()).await,
+        Outcome::Failed("rolled_back", "HEALTH_CHECK_FAILED")
+    );
+    assert_eq!(f.wd_rec.borrow().as_ref().unwrap().attempts, 2);
+    assert_eq!(
+        run_wd(&f, &s, &wd_target()).await,
+        Outcome::Skipped("同一目標版本已失敗,不再自動嘗試")
+    );
+    assert_eq!(f.replaced.borrow().len(), 1);
+}
+
+#[tokio::test]
+async fn watchdog_resume_ignores_agent_records() {
+    let s = setup();
+    let f = wd_fake(&s);
+    assert_eq!(upgrader(&f, &s).resume_watchdog("0.3.0"), None);
+    // Agent 停在 installing 的紀錄不是 Watchdog 的收尾對象
+    f.save(&UpgradeRecord {
+        component: "agent".into(),
+        target_version: "0.7.1".into(),
+        target_sha256: String::new(),
+        from_version: None,
+        state: "installing".into(),
+        attempts: 0,
+        error_code: None,
+        error_message: None,
+        started_at: crate::now_rfc3339(),
+    });
+    assert_eq!(upgrader(&f, &s).resume_watchdog("0.3.0"), None);
 }

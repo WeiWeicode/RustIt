@@ -94,6 +94,27 @@ describe('部署區設定', () => {
     assert.throws(() => loadConfig(clean({ ...testEnv, COMMAND_FILE_KEEP_DAYS: '31' })), /COMMAND_FILE_KEEP_DAYS/);
   });
 
+  it('軟體派送(P7):SOFTWARE_DIR 省略不啟用;上限預設值與範圍', () => {
+    const c = loadConfig(clean(testEnv));
+    assert.deepEqual([c.softwareDir, c.softwareMaxBytes, c.softwareMaxConcurrent, c.batchApprovalThreshold], [null, 4 * 1024 ** 3, 20, 20]);
+    const s = loadConfig(clean({ ...testEnv, SOFTWARE_DIR: '/srv/software', SOFTWARE_MAX_CONCURRENT: '5', BATCH_APPROVAL_THRESHOLD: '10' }));
+    assert.deepEqual([s.softwareDir, s.softwareMaxConcurrent, s.batchApprovalThreshold], ['/srv/software', 5, 10]);
+    assert.throws(() => loadConfig(clean({ ...testEnv, SOFTWARE_MAX_CONCURRENT: '0' })), /SOFTWARE_MAX_CONCURRENT/);
+    assert.throws(() => loadConfig(clean({ ...testEnv, BATCH_APPROVAL_THRESHOLD: '201' })), /BATCH_APPROVAL_THRESHOLD/);
+    assert.throws(() => loadConfig(clean({ ...testEnv, SOFTWARE_MAX_BYTES: '1x' })), /SOFTWARE_MAX_BYTES/);
+  });
+
+  it('上傳送簽(S1-3):INCOMING_DIR 與 SIGN_QUEUE_DIR 要一起設定且需 SOFTWARE_DIR;都空白 = 不啟用', () => {
+    const sw = { ...testEnv, SOFTWARE_DIR: '/srv/software' };
+    const c = loadConfig(clean({ ...sw, INCOMING_DIR: '/srv/incoming', SIGN_QUEUE_DIR: '/srv/sign-queue' }));
+    assert.deepEqual([c.incomingDir, c.signQueueDir], ['/srv/incoming', '/srv/sign-queue']);
+    // Compose 未設定時傳空字串
+    assert.equal(loadConfig(clean({ ...sw, INCOMING_DIR: '', SIGN_QUEUE_DIR: ' ' })).incomingDir, null);
+    assert.throws(() => loadConfig(clean({ ...sw, INCOMING_DIR: '/srv/incoming', SIGN_QUEUE_DIR: '' })), /SIGN_QUEUE_DIR/);
+    assert.throws(() => loadConfig(clean({ ...sw, SIGN_QUEUE_DIR: '/srv/sign-queue' })), /INCOMING_DIR/);
+    assert.throws(() => loadConfig(clean({ ...testEnv, INCOMING_DIR: '/srv/incoming', SIGN_QUEUE_DIR: '/srv/sign-queue' })), /SOFTWARE_DIR/);
+  });
+
   it('監測(P5):健康摘要預設開、告警門檻預設值;磁碟關閉門檻不可低於開啟門檻', () => {
     const c = loadConfig(clean(testEnv));
     assert.equal(c.agentSettings.health_enabled, true);

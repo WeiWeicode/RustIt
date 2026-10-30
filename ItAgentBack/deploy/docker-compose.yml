@@ -14,7 +14,8 @@ name: giganexus-ita-${GW_ENV:?GW_ENV 必須設定(test / prod)}
 
 services:
   endpoint-server:
-    image: giganexus/it-agent-back:${IMAGE_TAG:-dev}
+    # 測試區在主機上建置(本機名稱);正式區 ITA_IMAGE_PREFIX=<GitLab Registry>/giganexus/rustit,拉取 main 建置的映像檔
+    image: ${ITA_IMAGE_PREFIX:-giganexus}/it-agent-back:${IMAGE_TAG:-dev}
     build:
       context: ../..
       dockerfile: ItAgentBack/Dockerfile
@@ -66,9 +67,24 @@ services:
       # 升級(P6,docs/P6-UPGRADE-DESIGN.md §4):版本檔目錄唯讀掛載;測試區在 NAS 帳密到位前用主機 2 本機目錄
       RELEASES_DIR: /srv/releases
       RELEASE_MAX_CONCURRENT: ${RELEASE_MAX_CONCURRENT:-20}
+      # 軟體派送(P7,docs/P7-SOFTWARE-DESIGN.md §4):軟體庫唯讀掛載;測試區在 NAS 帳密到位前用主機 2 本機目錄(P7-4 改 CIFS)。
+      # 需先套用 migration 0008(command_batch.state)再部署,否則指令查詢會失敗
+      SOFTWARE_DIR: /srv/software
+      SOFTWARE_MAX_BYTES: ${SOFTWARE_MAX_BYTES:-4294967296}
+      SOFTWARE_MAX_CONCURRENT: ${SOFTWARE_MAX_CONCURRENT:-20}
+      BATCH_APPROVAL_THRESHOLD: ${BATCH_APPROVAL_THRESHOLD:-20}
+      # 上傳與送簽(S1-3,docs/S1-SIGNING-DESIGN.md §1):預設不啟用;NAS incoming\ 與 sign-queue\ 以上傳專用帳號讀寫掛載後(host2-set-nas-upload.sh),
+      # ita.env 設 ITA_INCOMING_DIR=/srv/incoming、ITA_SIGN_QUEUE_DIR=/srv/sign-queue 與兩個 *_HOST_DIR 才啟用。需先套用 migration 0011
+      INCOMING_DIR: ${ITA_INCOMING_DIR:-}
+      SIGN_QUEUE_DIR: ${ITA_SIGN_QUEUE_DIR:-}
     volumes:
       - ita_command_files:/data/command-files
-      - ${ITA_RELEASES_HOST_DIR:-/srv/giganexus/ita-releases}:/srv/releases:ro
+      # 預設:主機 2 的 NAS 唯讀掛載(RustIT\test\releases、RustIT\test\software;B-3 兩區分開,RUNBOOK §1.1);ita.env 有設定時以 ita.env 為準
+      - ${ITA_RELEASES_HOST_DIR:-/srv/giganexus/nas-rustit/test/releases}:/srv/releases:ro
+      - ${ITA_SOFTWARE_HOST_DIR:-/srv/giganexus/nas-rustit/test/software}:/srv/software:ro
+      # 上傳與送簽(S1-3):endpoint-server 唯一可寫的 NAS 位置;未啟用時掛空的本機目錄(INCOMING_DIR 為空,服務不使用)
+      - ${ITA_INCOMING_HOST_DIR:-/srv/giganexus/ita-upload-disabled/incoming}:/srv/incoming
+      - ${ITA_SIGN_QUEUE_HOST_DIR:-/srv/giganexus/ita-upload-disabled/sign-queue}:/srv/sign-queue
     secrets: [gw_api_key, ita_db_password, mongo_url, redis_url, endpoint_server_crt, endpoint_server_key, monitor_api_key, agent_monitor_api_key]
     depends_on: [ita-mongo, ita-redis]
     networks:

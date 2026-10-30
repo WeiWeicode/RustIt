@@ -136,11 +136,11 @@
         "command_id": { "type": "string", "format": "uuid" },
         "state": { "type": "string", "enum": ["acked", "running", "succeeded", "failed"] },
         "progress": { "type": "integer", "minimum": 0, "maximum": 100 },
-        "result": { "type": "object", "description": "結果摘要(序列化後 4,000 字元內;超過主機只記大小);大量資料(日誌)以 HTTPS POST /agent/v1/commands/{commandId}/files 上傳,result 只放 file_id(command-file.schema.json)" },
+        "result": { "type": "object", "description": "結果摘要(序列化後 4,000 字元內;超過主機只記大小)。running 時只有 software.install 的 A6 延後中帶 {\"deferred\": {\"reason\": \"battery\"|\"metered\", \"next_check_at\": UTC}}(Agent 0.9.3,command-kinds.md),主機暫存並重設執行逾時;大量資料(日誌)以 HTTPS POST /agent/v1/commands/{commandId}/files 上傳,result 只放 file_id(command-file.schema.json)" },
         "error_code": {
           "type": "string",
           "maxLength": 64,
-          "description": "UNSUPPORTED_COMMAND、EXPIRED、INVALID_PARAMS、NO_ACTIVE_SESSION、NOT_RUNNING_AS_SERVICE、EXECUTION_FAILED;P4-2 起 NO_LOGS、UPLOAD_FAILED;P6-2 起 AGENT_UPGRADING(command-kinds.md)"
+          "description": "UNSUPPORTED_COMMAND、EXPIRED、INVALID_PARAMS、NO_ACTIVE_SESSION、NOT_RUNNING_AS_SERVICE、EXECUTION_FAILED;P4-2 起 NO_LOGS、UPLOAD_FAILED;P6-2 起 AGENT_UPGRADING;P7 起 DOWNLOAD_FAILED、HASH_MISMATCH、SIGNATURE_INVALID、SIGNER_NOT_TRUSTED、DISK_FULL、INSTALL_FAILED、INSTALL_TIMEOUT、INSTALL_BUSY、DETECT_FAILED、UNINSTALL_NOT_SUPPORTED、DEFERRED_TIMEOUT(command-kinds.md)"
         },
         "error_message": { "type": "string", "maxLength": 1000 },
         "occurred_at": { "type": "string", "format": "date-time", "description": "端點時間" }

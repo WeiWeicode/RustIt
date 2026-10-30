@@ -1,0 +1,46 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://giganexus.local/rustit/contracts/sign-queue.schema.json",
+  "title": "送簽佇列 sign-queue\\(endpoint-server ↔ 簽章工作站)",
+  "description": "S1-3(S1-SIGNING-DESIGN §4.3):NAS RustIT\\<區>\\sign-queue\\ 內的檔案。endpoint-server 核可後寫 {upload_id}.json(SignJob,先寫暫存檔再改名);簽章工作站處理後最後才寫 {upload_id}.result.json(SignResult,UTF-8,可帶 BOM,64 KB 內)。主機不採信結果檔作安全判斷:signed 時以軟體庫實際檔案重算 SHA-256,必須等於 signed_sha256 且 signed_file 等於工作單的 file_name;工作站也不採信工作單:重算 incoming 檔案雜湊、依本機白名單檢查原廠簽章。",
+  "definitions": {
+    "SignJob": {
+      "type": "object",
+      "required": ["schema", "upload_id", "environment", "file_name", "sha256", "size_bytes", "uploaded_by", "approved_by", "approved_at"],
+      "properties": {
+        "schema": { "const": "sign-job/1" },
+        "upload_id": { "type": "string", "format": "uuid" },
+        "environment": { "type": "string", "description": "endpoint-server 的 GW_ENV;工作站確認與自己處理的部署區相同" },
+        "file_name": { "type": "string", "maxLength": 260, "description": "{軟體}/{版本}/{安裝檔}:incoming\\ 的來源與 software\\ 的目的地(路徑規則同軟體庫)" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "incoming 原始檔的 SHA-256(核可時主機重算過)" },
+        "size_bytes": { "type": "integer", "minimum": 1 },
+        "uploaded_by": { "type": "string" },
+        "approved_by": { "type": "string", "description": "≠ uploaded_by" },
+        "approved_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "SignResult": {
+      "type": "object",
+      "required": ["schema", "upload_id", "state"],
+      "properties": {
+        "schema": { "const": "sign-result/1" },
+        "upload_id": { "type": "string", "format": "uuid" },
+        "state": { "enum": ["signed", "rejected"] },
+        "vendor_signer": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$", "description": "原廠簽章者 SHA-1 指紋(小寫);未簽章為 null" },
+        "vendor_signer_subject": { "type": ["string", "null"], "maxLength": 400 },
+        "vendor_check": { "enum": ["allowlist", "manual", null], "description": "allowlist = 工作站白名單 vendor-signers.json;manual = 簽章人員人工確認" },
+        "signed_file": { "type": ["string", "null"], "maxLength": 260, "description": "signed 時必填:放進 software\\ 的相對路徑,必須等於工作單的 file_name" },
+        "signed_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$", "description": "signed 時必填:重簽後檔案的 SHA-256" },
+        "signed_signer": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$", "description": "signed 時必填:軟體發佈憑證指紋" },
+        "signed_at": { "type": ["string", "null"], "maxLength": 40 },
+        "operator": { "type": ["string", "null"], "maxLength": 100, "description": "執行簽章的 Windows 帳號" },
+        "reject_code": { "type": ["string", "null"], "pattern": "^[A-Z][A-Z0-9_]{1,39}$", "description": "rejected 時必填:HASH_MISMATCH、VENDOR_NOT_ALLOWED、SIGN_FAILED、ENVIRONMENT_MISMATCH、TARGET_EXISTS…" },
+        "reject_reason": { "type": ["string", "null"], "maxLength": 500 }
+      },
+      "allOf": [
+        { "if": { "properties": { "state": { "const": "signed" } } }, "then": { "required": ["signed_file", "signed_sha256", "signed_signer"], "properties": { "signed_file": { "type": "string" }, "signed_sha256": { "type": "string" }, "signed_signer": { "type": "string" } } } },
+        { "if": { "properties": { "state": { "const": "rejected" } } }, "then": { "required": ["reject_code"], "properties": { "reject_code": { "type": "string" } } } }
+      ]
+    }
+  }
+}

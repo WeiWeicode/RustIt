@@ -2,10 +2,69 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-29 S1-5 放寬:endpoint-server 的 NAS 帳號兩區共用
+- 內容:需求方決定測試區與正式區的 endpoint-server 共用一個 NAS 帳號(`rustit-upload`):兩區 `incoming\`、`sign-queue\` 讀寫,兩區 `releases\`、`software\` 只讀,唯讀掛載也用這個帳號(靠 `ro`)。取消原本「上傳帳號不可寫 `RustIT\prod\`」與「唯讀掛載用唯讀帳號」;仍要求寫不到任何一區的 `releases\`、`software\`,簽章人員寫入群組仍兩區分開。設計補上接受的風險(測試區主機被入侵可在正式區送簽目錄放檔、刪改工作單)與防線(正式區工作站向正式區主機確認 `queued`)。`host2-set-nas-upload.sh` 改為 `GW_ENV` 選區(主機 3 用 `GW_ENV=prod`),試寫兩區 `software\`、`releases\`,不再試寫整個 `prod\`。起因:主機 3 以 `rustit-upload` 唯讀掛載 RustIT 時讀不到 `prod/releases`、`prod/software`(Permission denied),NAS 管理員將補讀取權。
+- 檔案:`docs/S1-SIGNING-DESIGN.md` §0、§1、§6;`ItAgentBack/deploy/host2-set-nas-upload.sh`、`host2-set-nas-credentials.sh`(說明文字);`docs/RUNBOOK.md` §3.1;`docs/HANDOFF.md`
+- 驗證:`sh -n` 兩支腳本通過;主機 3 實測 `rustit-upload` 唯讀掛載:`prod/incoming`、`prod/sign-queue` 可讀,`releases`、`software`(兩區)Permission denied(待 NAS 權限後重測)
+
+## 2026-10-28 S1-3 套件上傳與送簽(後端、簽章工作站 software 模式)
+- 內容:
+  - ItAgentBack:migration 0011 `ita.software_upload`(uploaded → queued → signed / rejected,核可人 ≠ 上傳者三道);`/v1/software/uploads` 串流上傳(收檔前檢查 Content-Length、同時 2 筆、軟體庫與進行中同路徑;閒置 2 分鐘中止;失敗刪檔)、登錄 `incoming\` 檔案、清單 / 詳情、核可(重算雜湊 → 寫工作單 → 重讀狀態)、駁回(一律移除工作單);每分鐘讀工作站結果,以軟體庫實際檔案重算雜湊確認;`GET …/{id}/sign-status`(`x-auth-mode: api_key`、`endpoint.software.sign-check`)給工作站確認。設定 `INCOMING_DIR`、`SIGN_QUEUE_DIR`(預設不啟用);compose 兩個讀寫掛載;`deploy/host2-set-nas-upload.sh`(上傳帳號讀寫掛載、試寫 software / releases / prod 應失敗)。
+  - 契約 `docs/contracts/sign-queue.schema.json`(sign-job/1、sign-result/1)與範例。
+  - 工作站:`sign-software-queue.ps1`(`signing-workstation.ps1 software` 轉交):向主機確認 → 本機副本重算 → 原廠簽章白名單 / 人工確認 → 重簽 → 不覆蓋放進 `software\` → 結果檔;`gateway-api.ps1` 抽出 API Key 讀取與 Gateway 呼叫,`publish-release.ps1` 改用。
+  - 資安審查(`security-auditor`):無 Critical / High;Medium 3 項(駁回與核可競態、工作單可偽造、上傳資源耗盡)與 Low(結果檔讀取、腳本細節、備註進日誌)已修;P7 登錄時檢查上傳紀錄狀態、暫存檔清理列為待做。
+- 檔案:`ItAgentBack/db/migrations/0011_software_upload.sql`、`src/stores/sql-upload-store.ts`、`src/stores/types.ts`、`src/services/upload-files.ts`、`src/services/upload-service.ts`、`src/routes/uploads.ts`、`src/mgmt-app.ts`、`src/server.ts`、`src/config.ts`、`src/openapi.ts`、`deploy/docker-compose.yml`、`deploy/test.env.example`、`deploy/host2-set-nas-upload.sh`、`docs/DB_SCHEMA.md`、`test/upload.test.ts`、`test/contract.test.ts`;`RustAgent/installer/sign-software-queue.ps1`、`gateway-api.ps1`、`signing-workstation.ps1`、`publish-release.ps1`、`vendor-signers.example.json`;`docs/contracts/`、`docs/RUNBOOK.md` §3.1、`docs/S1-SIGNING-DESIGN.md`
+- 驗證:`npm run typecheck`;`npm test` 242 項通過(新增上傳 / 核可 / 駁回 / 結果確認 / 上限 / 逾時 / sign-status / 契約);腳本 PowerShell 5.1 解析通過;工作站以測試憑證在暫存目錄實測(正常重簽放置、五種拒絕代碼、主機 `parseSignResult` 可解析結果檔);`sh -n host2-set-nas-upload.sh`。**未實測**:測試區(要 NAS 上傳帳號、migration 0011、Gateway 路由發佈與 API Key)、正式憑證 signtool 路徑、NSIS / MSI 重簽後實際安裝(VM)
+
+## 2026-10-28 S1-1 版本號查重改走 API Key
+- 內容:需求方確認 S1 §9 全部照建議。ItAgentBack 新增 `GET /v1/releases/registry?component=&version=`(operationId / 權限 `endpoint.release.registry`,OpenAPI `x-auth-mode: api_key`):回 `environment`(GW_ENV)與同元件同版本號的登錄紀錄(含已撤回),只有元件、版本、狀態。`publish-release.ps1` 新增 `-GatewayUrl`、`-ApiKeyFile`:以 `X-Api-Key` 查詢,回應部署區須等於 `-Environment`;金鑰檔只允許本人、SYSTEM、Administrators 有權限(SID 白名單)、擁有者須為本人、不可放網路分享;`-GatewayUrl` 主機限每區允許清單(test `10.10.130.124`、prod `giganexus.gigasolar.com.tw`)、不跟隨重新導向(避免 X-Api-Key 被帶到別台)、每筆回應部署區都比對(資安審查 M1、M2、L1、L2);未給時沿用 ssh 舊方式並印警告。`signing-workstation.ps1` 轉交兩個參數。需要 Gateway `x-auth-mode` 支援(Gateway 分支 `feature/openapi-api-key-auth`)。
+- 檔案:`ItAgentBack/src/routes/releases.ts`、`src/services/release-service.ts`、`src/mgmt-app.ts`、`src/openapi.ts`、`test/release.test.ts`;`RustAgent/installer/publish-release.ps1`、`signing-workstation.ps1`;`docs/RUNBOOK.md` §1、`docs/S1-SIGNING-DESIGN.md`
+- 驗證:`npm run typecheck`;`npm test`(新增版本號查重測試);兩支腳本 PowerShell 5.1 解析通過;金鑰檔 ACL / 格式檢查以暫存檔實測(預設繼承的 ACL 拒絕、只有本人通過、加 INTERACTIVE 拒絕、UNC 拒絕、過短拒絕);`security-auditor` 審查無 Critical / High,Medium 2 項已修。**未實測**:對測試區 Gateway 呼叫(要等 Gateway 合併部署、IT 建立 API Key `rustit-publish-test`)
+
+## 2026-10-28 S1 簽章上架優化:設計與簽章工作站 release 模式
+- 內容:新增 S1 設計(ADR 0005 第一階段,甘特圖 W6-25):S1-1 版本查重改走 API Key 唯讀路由(需 Gateway 支援 OpenAPI 宣告 `api_key` 路由)、S1-2 簽章工作站、S1-3 套件上傳與送簽(`ita.software_upload`、NAS `incoming\` / `sign-queue\`、上傳者 ≠ 核可人)、S1-4 GigaItApp 畫面、S1-5 NAS 權限;待確認 7 項(§9)。先實作不受待決事項影響的 S1-2 `release` 模式:`signing-workstation.ps1 release` 串接 `sign-release.ps1` 與 `publish-release.ps1`,CI 產物 zip 解壓到新的暫存目錄後簽章、上架,參數照原樣轉交;`software` 模式待 S1-3。
+- 檔案:`docs/S1-SIGNING-DESIGN.md`(新)、`RustAgent/installer/signing-workstation.ps1`(新)、`docs/PROJECT-MAP.md`
+- 驗證:PowerShell 5.1 語法解析通過;錯誤路徑實測:zip 內沒有 SHA256SUMS.txt → 停止並清掉暫存、`-Artifact` 不是 zip 或目錄 → 停止、正式區加 `-Test` → 停止、目錄沒有 SHA256SUMS.txt → 由 sign-release.ps1 擋下。**未實測**完整簽章與上架(要用測試憑證與 CI 產物,需求方操作)
+
+## 2026-10-28 ADR 0005 簽章與上架流程改善(建議中)
+- 內容:評估目前依賴簽章人員電腦的發版與軟體上架流程,提出:GigaItApp 上傳套件;所有派送套件以公司「軟體發佈憑證」重簽、端點只信任公司指紋(不採主機下發信任清單);Agent 發版與軟體重簽共用「簽章工作站」程式(經 NAS 佇列、不開連入 port,先在簽章人員電腦手動、再搬專用簽章機);登錄改走 GigaItApp 取代 ssh + SQL;分 S1~S3 階段與待決事項。
+- 檔案:`docs/decisions/0005-signing-and-publishing-pipeline.md`(新)、`docs/PROJECT-MAP.md`、`AGENT.md`
+- 驗證:文件,無程式變更
+
+## 2026-10-21 P6-6 收尾:P6 升級測試區完成
+- 內容:依設計 §0「P6-6 收尾」:RUNBOOK 新增 §2 版本回滾(撤回止血、設回舊版需 `force`、版本下限 Agent 0.7.0 / Watchdog 0.3.0、單台 `agent.upgrade`、`ROLLBACK_FAILED` 處理),§1 上架指令補必填 `-Environment`;HANDOFF 目前狀態改為 Agent 0.8.2 / Watchdog 0.3.2、P6 完成與上線前待辦、修正 P6-5 狀態(GigaItApp MR !9 已上測試區);設計文件加完成摘要。跨 repo(需求方同意):Gateway `ENDPOINT-AGENT-GUIDE.md` v0.11(giga-api-gateway-bff MR !7,`978334b`)、根目錄 `workspace.json` / `PROJECT-MAP.md` / 甘特圖 seed W6-19 100% done(giganexusai MR !8,`94a5d40`;甘特圖 DB 已經 API 更新)。`command-kinds.md` 已有 `agent.upgrade`,不需修改。
+- 檔案:`docs/RUNBOOK.md`、`docs/HANDOFF.md`、`docs/P6-UPGRADE-DESIGN.md`
+- 驗證:文件;根目錄 `npm run arch:check` 通過。未做:測試痕跡清理(測試區版本登錄撤回需瀏覽器登入、主機 2 測試版本檔要等撤回後再刪、VM 測試根憑證由需求方在 VM 移除),列在 HANDOFF §2 第 0 項
+
+## 2026-10-21 P6-4 第一次正式發版流程(Agent 0.8.2 / Watchdog 0.3.2)測試區完成
+- 內容:以 MR !47(rustls 弱點修補)為第一個正式流程版本:Windows Runner `build:release` → 需求方以測試憑證執行 `sign-release.ps1` → `publish-release.ps1 -Environment test` 上架主機 2 → 測試區登錄草稿 → pilot 環 VM `RUSTIT-P34` 自動升級(Agent 44 秒、Watchdog 22 秒)→ 需求方在 GigaItApp 發佈並清空 pilot 目標。
+- 檔案:`docs/test-reports/2026-10-21-p6-4-first-release.md`(新)、`docs/HANDOFF.md`
+- 驗證:見報告 §3、§4;未演練受保護 tag 與正式憑證(報告 §6)
+
+## 2026-10-21 P6-4 主機 2 Windows Runner 上線與設定文件回寫
+- 內容:MR !45(發版流水線)合併後,在主機 2 Windows 本機裝建置工具並註冊 project runner `host2-windows`(#4,tag `windows`、鎖定 RustIt、服務帳號 `gitlab-runner-svc`、`concurrent = 1`)。實裝與原文件不同處回寫 `WINDOWS-RUNNER-SETUP.md` §2、§3,並新增 §6 維護:Runner shell 必須 `pwsh`(`powershell` 5.1 在 CP950 系統解析 Runner 產生的腳本失敗,`exit status 0xfffd0000`);主機 2 無 D 槽,建置目錄 `C:\ci`;工具全機共用安裝(`C:\Rust`、`C:\Tools\wix`)、`CARGO_HOME` 由 Runner 設定指到 `C:\ci\cargo-home`;`gitlab-runner install --user` 不會授予 `SeServiceLogonRight`,要另外授予;`config.toml` ACL 限縮;服務帳號密碼重設方式。新增 `install-runner-tools.ps1`(可重跑,含 gitlab-runner SHA256 與 PowerShell MSI 簽章檢查);補專案地圖 P6-4 檔案。
+- 檔案:`docs/WINDOWS-RUNNER-SETUP.md`、`RustAgent/installer/install-runner-tools.ps1`(新)、`docs/PROJECT-MAP.md`、`docs/HANDOFF.md`
+- 驗證:主機 2 `cargo build --release` 試編(MSVC 14.44)通過;pipeline 378 `build:release`(重試後 job 1075,develop `ecca9dcd`)成功:`agent/0.8.0/rustit-agent.exe`、`watchdog/0.3.0/rustit-watchdog.exe` ProductVersion 相符、未簽章、雜湊與 `SHA256SUMS.txt` 相符;第一次 job 1073 因 shell `powershell` 失敗(見上)
+
+## 2026-10-21 P6-3 測試區 VM 驗收完成
+- 內容:MR !43 已合併 develop;測試區 VM `RUSTIT-P34` 完成設計 §8.6 步驟 0~6:Watchdog 0.3.0 → 0.3.1 升級成功、壞版 0.3.2-broken 自動還原、未簽章 / 第二張憑證在 Watchdog 驗證階段被擋、降版 0.3.0、替換中重開機由 Agent `resume` 收尾、Agent 0.8.0 → 0.8.1 回歸。
+- 檔案:`docs/test-reports/2026-10-21-p6-3-replace-watchdog.md`(新)、`docs/P6-UPGRADE-DESIGN.md`、`docs/HANDOFF.md`
+- 驗證:測試區 BFF API(`/devices/{id}/upgrade`、`/release-rings`、`/admin-commands`)、`ita.device_event`、`ita.device_upgrade`、VM Agent 日誌;MR !43 第一次 pipeline 失敗是漏跑 ItAgentBack 契約測試登記(報告 §2)。「失敗 2 次後停止」未實測(要等 30 分鐘冷卻),由單元測試涵蓋
+
+## 2026-10-21 P6-3 Agent 替換 Watchdog(Agent 0.8.0、Watchdog 0.3.0)
+- 內容:依 `P6-UPGRADE-DESIGN.md` §5.3。Watchdog `run_watchdog` 下載、驗證 `target.watchdog` 後經管道 `replace_watchdog` 交給 Agent;Agent `upgrade_watchdog.rs` 再驗一次(路徑、SHA-256、Authenticode、簽章者、版本資源)後停止 / 備份 / 替換 / 健康檢查 / 必要時還原 Watchdog 服務,中途重啟依標記收尾;看守在替換中暫停。新版 Watchdog 啟動時 `resume_watchdog` 收尾本機紀錄。契約 `pipe.schema.json` `ReplaceWatchdog` / `ReplaceWatchdogAck`。code-reviewer 審查(必修 3)已修正:Agent 端旗標 RAII 與 accept 獨立 task 等;Watchdog 端 `succeeded` 後被換回舊版記 `rolled_back` 並設冷卻(必修 A)、`installing` 超過 15 分鐘記 `rolled_back`(必修 B);看守暫停抽成 `Guard::paused`。security-auditor 稽核(High / Medium 0、Low 6)修 L-1(要求方已放棄不替換、Agent 驗證 50 秒期限)、L-2(換上前對 `.new` 再驗簽章與版本)、L-3(`cache\`、`cache\watchdog\`、標記不可是連結;`not_reparse` 搬到 `rustit_common::winfile`)、L-5(標記 ≤ 4 KB、存舊版雜湊,還原前比對 `previous\`);L-4、L-6 列入上線前檢查。細節與不做的項目見設計 §8.5「審查後調整」「資安稽核後調整」。
+- 檔案:`RustAgent/crates/agent/src/upgrade_watchdog.rs`(新)、`upgrade_watchdog/tests.rs`(新)、`agent/src/{pipe,guard,lib,protocol}.rs`、`agent/tests/contract.rs`、`agent/Cargo.toml`;`crates/watchdog/src/upgrade/{mod,swap,tests}.rs`、`watchdog/src/{lib,report}.rs`、`watchdog/tests/contract.rs`、`watchdog/Cargo.toml`;`Cargo.lock`;`installer/build-test-release.ps1`;`crates/common/src/winfile.rs`(`not_reparse`、`plain_file`);契約 `docs/contracts/pipe.schema.json`、範例 `pipe-replace-watchdog*.sample.json`(新);文件 `docs/P6-UPGRADE-DESIGN.md`(§8.5)、`docs/PROJECT-MAP.md`
+- 驗證:`cargo test -p rustit-common -p rustit-watchdog -p rustit-agent` 全過:Agent 單元 68 項(含替換 Watchdog 34 項、看守 4 項)+ main 2 項 + 契約 9 項;Watchdog 單元 42 項(含升級狀態機 29 項,其中 P6-3 新增 succeeded 後換回舊版、installing 未滿 / 超過 15 分鐘等)+ main 1 項 + 契約 5 項;common 31 項(含 junction 測試;1 項需已簽章檔而略過)。`cargo clippy -p rustit-common -p rustit-watchdog -p rustit-agent --all-targets` 無警告。**未驗證**:SCM 停止 / 替換 / 還原 Watchdog、管道 `replace_watchdog` 實際連線、WinVerifyTrust 對已簽章檔(要在 VM 驗收,步驟見設計 §8.6)。
+
 ## 2026-10-21 P6-2 VM 驗收完成
 - 內容:測試區 VM `RUSTIT-P34` 完成設計 §8.4 步驟 0~9:升級成功、兩種壞版本還原且失敗 2 次後停止、未簽章 / 簽章者不符拒絕、`agent.upgrade`、降版、升級中重開機收尾皆通過;步驟 9 因 `logs.collect` 太快只算部分。待補項目併入 P6-3。
 - 檔案:`docs/test-reports/2026-10-21-p6-2-watchdog-upgrade.md`(新)、`docs/P6-UPGRADE-DESIGN.md`、`docs/HANDOFF.md`
 - 驗證:VM 日誌(`watchdog-*.log`)、`GET /api/endpoint/devices/{id}/upgrade`、`ita.device_event`;pilot 目標驗收後已清空
+
+## 2026-10-20 P7-1 軟體目錄與下載(後端)
+- 內容:依 `P7-SOFTWARE-DESIGN.md` §0 P7-1 列、§1–§4、§6(§9 已全部確認)。migration `0008_software.sql`:`ita.software_package`(兩人覆核 CHECK、同一檔案只登錄一次)、`ita.command_batch.state` 與駁回欄位(核可人 ≠ 建立人 CHECK)。ItAgentBack:軟體目錄狀態機 draft → tested → published → revoked(改安裝參數 / 偵測規則退回 draft;`published_by ≠ created_by`;`mark-tested` 需 pilot 測試機以目前檔案與參數安裝成功、IT 填的簽章者必須是回報的 `result.signer`);目錄維護需 `endpoint.software.manage` 且全部公司角色;`software.install` / `software.uninstall` / `system.reboot` 三個 admin 類型(IT 只送 `packageId`,主機換成目錄快照;draft / tested 只派 pilot;已發佈套件檢查授權數);安裝參數字元白名單、不可指到其他檔案、不可含機密字樣(登錄、修改、建立指令時都驗);批次派送 `POST /v1/software/{id}/deploy` 與第二人核可(> `BATCH_APPROVAL_THRESHOLD` 台 `pending_approval`、`POST /v1/batches/{id}/approve` / `reject`、同人 403、24 小時逾期取消);`SOFTWARE_MAX_CONCURRENT` 跨批次與單台的全域並行上限;Agent 下載 `GET /agent/v1/packages/{packageId}`(只給有尚未結束的此套件 `software.install` 的裝置、Range / 416、回應前複驗 SHA-256、稽核每台每套件每小時一筆)。`release-files.ts` 的路徑檢查、雜湊快取與 Range 抽到 `rooted-files.ts` 與軟體庫共用。契約 `command-kinds.md` 補三類型、P7 錯誤代碼、套件下載與批次核可,新增 5 個範例。**migration 0008 只套用整合測試庫 `giganexus_It_Agent_poc_test`,尚未套用 `giganexus_It_Agent_test`**(需求方看過後再套,且須先於部署)。
+- 檔案:`ItAgentBack/db/migrations/0008_software.sql`(新)、`src/services/{software-service,software-files,rooted-files}.ts`(新)、`src/stores/sql-software-store.ts`(新)、`src/routes/software.ts`(新)、`src/services/{command-dispatcher,release-files}.ts`、`src/stores/{types,sql-command-store}.ts`、`src/routes/commands.ts`、`src/commands/kinds.ts`、`src/{agent-app,mgmt-app,server,config}.ts`、`deploy/{docker-compose.yml,test.env.example}`、`.env.example`、`docs/DB_SCHEMA.md`;`test/{software.test,software-helpers}.ts`(新)、`test/{helpers,scope.test,contract.test,config.test,commands.test}.ts`、`test/int/stores.int.test.ts`;`docs/contracts/{command-kinds.md,README.md,ws-envelope.schema.json}`、`docs/contracts/examples/ws-command-{software-install,software-uninstall,system-reboot}.sample.json`、`ws-command-update-software-{install,failed}.sample.json`(新);`docs/PROJECT-MAP.md`、`docs/PLATFORM-PLAN.md`(§4.4、§4.6、§5.1)、`docs/P7-SOFTWARE-DESIGN.md`(進度、§8.1)、`docs/DevelopmentProcess/BackendCorrection.md`(新)
+- 驗證:`npm run typecheck` 通過;`npm test` 200/200;`npm run test:int` 13/13(新增 P7 案例;0008 經整合測試套用 `_poc_test`);`npm run build` 通過。測試區、`giganexus_It_Agent_test`、主機 2、VM 未動。code-reviewer 審查已處理;security-auditor 待重跑(設計 §8.1.1)。
 
 ## 2026-10-20 P7 軟體派送設計草案
 - 內容:新增 `docs/P7-SOFTWARE-DESIGN.md`(待需求方確認 §9,確認前不動程式)。依 PLATFORM-PLAN §4.6、ADR 0002、B1 與 A6:分 P7-1 軟體目錄與下載(migration 0008、兩人覆核狀態機、參數快照、`GET /agent/v1/packages/{id}`、授權數)、P7-2 Agent `software` 模組(從 `deploy.rs` 移植,Agent 0.8.0)、P7-3 `system.reboot` 與批次第二人核可(> 20 台)、P7-4 NAS 唯讀掛載、P7-5 GigaItApp 軟體派送頁、P7-6 收尾。重點決定待確認:未簽章套件由公司憑證加簽(§9-2)、覆核與核可規則、重開機政策、A6 延後上限。

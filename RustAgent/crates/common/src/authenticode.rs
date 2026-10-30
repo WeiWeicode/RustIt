@@ -18,10 +18,17 @@ pub fn signer_allowed(signer: &str, host: &[String], local: &[String]) -> bool {
 /// 驗證檔案的 Authenticode 簽章,回傳主要簽章者憑證的 SHA-1 指紋(40 個小寫十六進位字元)
 #[cfg(windows)]
 pub fn signer_thumbprint(path: &std::path::Path) -> Result<String, String> {
+    signer_details(path).map(|(thumbprint, _)| thumbprint)
+}
+
+/// 同 [`signer_thumbprint`],另回傳簽章者名稱(憑證主體的顯示名稱,通常是 CN;軟體派送回報 `signer_subject`,P7)
+#[cfg(windows)]
+pub fn signer_details(path: &std::path::Path) -> Result<(String, String), String> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::Security::Cryptography::{
-        CERT_SHA1_HASH_PROP_ID, CertGetCertificateContextProperty,
+        CERT_NAME_SIMPLE_DISPLAY_TYPE, CERT_SHA1_HASH_PROP_ID, CertGetCertificateContextProperty,
+        CertGetNameStringW,
     };
     use windows_sys::Win32::Security::WinTrust::{
         WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_FILE_INFO,
@@ -98,7 +105,18 @@ pub fn signer_thumbprint(path: &std::path::Path) -> Result<String, String> {
                         std::io::Error::last_os_error()
                     ))
                 } else {
-                    Ok(hex::encode(hash))
+                    let mut name = [0u16; 256];
+                    let n = CertGetNameStringW(
+                        (*cert).pCert,
+                        CERT_NAME_SIMPLE_DISPLAY_TYPE,
+                        0,
+                        std::ptr::null(),
+                        name.as_mut_ptr(),
+                        name.len() as u32,
+                    );
+                    // n 含結尾 NUL;取不到名稱(n <= 1)時為空字串,不影響驗證結果
+                    let subject = String::from_utf16_lossy(&name[..(n as usize).saturating_sub(1)]);
+                    Ok((hex::encode(hash), subject))
                 }
             }
         }
