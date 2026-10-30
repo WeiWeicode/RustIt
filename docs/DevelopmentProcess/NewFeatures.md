@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-30 正式區臨時裝置憑證簽發腳本
+- 內容:新增 `RustAgent/installer/host3-issue-device-cert.sh`:本人在主機 3 以 root 執行,用正式區臨時 Agent CA(Gateway `deploy/host3-prod-temp-pki.sh` 產生)為一台電腦簽 EC P-256 用戶端憑證(`O=GigaNexus`、EKU clientAuth、365 天、隨機序號),打包成含 Agent CA 的 PFX(AES-256)與隨機密碼檔,輸出到 `C:\Users\user\agent-certs\<電腦名稱>\`;另複製根 CA 公開憑證 `ca-prod.crt` 供建正式區 MSI。與測試區 `host2-issue-test-device-cert.sh` 的差異:`agent-ca.crt` 是 `(prod)` 才簽(避免 pki 被還原成測試區那套)、簽完以根 CA 驗證憑證鏈、簽發紀錄(時間、CN、序號、到期日)追加到 `pki/issued-devices.log` 供撤銷、同一 CN 重簽需 `REISSUE=1`(並提示舊憑證不會撤銷)、FQDN 的網域須在 `ita.env` 的 `ENDPOINT_COMPANY_DOMAINS` 內(避免簽出歸到別家公司的憑證)、CN 不是 FQDN 時提示所屬公司要手動指定(E1)、中斷(INT / TERM / HUP)時也清除暫存私鑰、完成訊息改用 `printf`(dash 的 `echo` 會把 `\a`、`\c` 當跳脫字元;測試區腳本的完成訊息因此被截斷,未改)。私鑰只在暫存目錄、密碼不印在畫面,AI 不經手。
+- 檔案:`RustAgent/installer/host3-issue-device-cert.sh`、`docs/RUNBOOK.md` §1.2、`docs/PROJECT-MAP.md`
+- 驗證:開發機 WSL(OpenSSL 3.0.13)以 `gen-temp-pki.sh`(`GW_ENV=prod`)產生的拋棄式 PKI 執行(略過 root 檢查):FQDN 簽發成功,PFX 含裝置憑證、Agent CA 與私鑰,EKU clientAuth,`openssl verify -crl_check` 通過;同 CN(大小寫不同)重簽被擋、`REISSUE=1` 可重簽;輸出資料夾已存在被擋;非 FQDN 出現提示;`a..b` 被擋;`GW_ENV=test` 的 PKI 被拒;`ca-prod.crt` 與根 CA 相同;網域檢查:`gsmc.com.tw`、`ygdmc.gsc.com.tw` 通過,`other.com.tw`、`xgsmc.com.tw` 與缺 `ita.env` 被拒;執行後無暫存目錄殘留。security-auditor 稽核無 High 以上;採納網域白名單、中斷清理、重簽提示,未採納「密碼檔與 PFX 分開」(沿用測試區做法,資料夾在 `C:\Users\user`,匯入後即刪)。主機 3 實際簽發待本人執行
+
 ## 2026-10-29 S1-5 放寬:endpoint-server 的 NAS 帳號兩區共用
 - 內容:需求方決定測試區與正式區的 endpoint-server 共用一個 NAS 帳號(`rustit-upload`):兩區 `incoming\`、`sign-queue\` 讀寫,兩區 `releases\`、`software\` 只讀,唯讀掛載也用這個帳號(靠 `ro`)。取消原本「上傳帳號不可寫 `RustIT\prod\`」與「唯讀掛載用唯讀帳號」;仍要求寫不到任何一區的 `releases\`、`software\`,簽章人員寫入群組仍兩區分開。設計補上接受的風險(測試區主機被入侵可在正式區送簽目錄放檔、刪改工作單)與防線(正式區工作站向正式區主機確認 `queued`)。`host2-set-nas-upload.sh` 改為 `GW_ENV` 選區(主機 3 用 `GW_ENV=prod`),試寫兩區 `software\`、`releases\`,不再試寫整個 `prod\`。起因:主機 3 以 `rustit-upload` 唯讀掛載 RustIT 時讀不到 `prod/releases`、`prod/software`(Permission denied),NAS 管理員將補讀取權。
 - 檔案:`docs/S1-SIGNING-DESIGN.md` §0、§1、§6;`ItAgentBack/deploy/host2-set-nas-upload.sh`、`host2-set-nas-credentials.sh`(說明文字);`docs/RUNBOOK.md` §3.1;`docs/HANDOFF.md`
