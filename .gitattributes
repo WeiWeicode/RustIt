@@ -1,2 +1,10 @@
+# 一律以 LF 存入與檢出(公司 Windows 電腦的 Git 預設 core.autocrlf=true 會轉成 CRLF,造成整份檔案都變更的假衝突);見工作區 AGENT.md §9.6
+* text=auto eol=lf
+
 # shell 腳本會複製到主機 2(Linux / WSL)以 sh 執行,一律 LF;Windows checkout(core.autocrlf=true)轉成 CRLF 會執行失敗
 *.sh text eol=lf
+
+# Windows 腳本以 CRLF 檢出(cmd.exe 執行 LF 的 .bat / .cmd 可能解析錯誤)
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
