@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-30 待開發功能清單(對照 SmartIT 主控端)
+- 內容:新增 `docs/SMARTIT-FEATURE-BACKLOG.md`:瀏覽需求方開啟的 SmartIT Console(RDP,只看不改)整理其功能,逐項對照 RustIt / GigaItApp 現況(已有 / 部分 / 待開發 / 不做),建議新增「資產管理」「報表」分類與開發中 Tab、優先順序;§5 四項待決
+- 檔案:`docs/SMARTIT-FEATURE-BACKLOG.md`
+- 驗證:文件,無程式變更
+
 ## 2026-10-30 遠端移除 Windows 更新(KB)設計草案
 - 內容:新增 `docs/KB-UNINSTALL-DESIGN.md`(草案):新指令 `system.update.uninstall`(admin,參數只收 KB 編號,Agent 以 DISM 移除 CBS 套件、永不自動重開機)、蒐集 KB 清單由 8 筆放寬、GigaItApp「安全」Tab 移除入口;分批 U1–U5,§9 五項待需求方決定(重新安裝的封鎖方式、核可門檻、不可移除清單、清單上限、畫面入口)
 - 檔案:`docs/KB-UNINSTALL-DESIGN.md`
