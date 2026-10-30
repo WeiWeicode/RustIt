@@ -2,6 +2,11 @@
 
 新紀錄加在最上方;格式見 `AGENT.md` §10。
 
+## 2026-10-30 待開發功能清單(對照 SmartIT 主控端)
+- 內容:新增 `docs/SMARTIT-FEATURE-BACKLOG.md`:瀏覽需求方開啟的 SmartIT Console(RDP,只看不改)整理其功能,逐項對照 RustIt / GigaItApp 現況(已有 / 部分 / 待開發 / 不做),建議新增「資產管理」「報表」分類與開發中 Tab、優先順序;§5 四項待決
+- 檔案:`docs/SMARTIT-FEATURE-BACKLOG.md`
+- 驗證:文件,無程式變更
+
 ## 2026-10-30 AD CS 端點電腦憑證申請說明
 - 內容:新增 `docs/ADCS-REQUEST.md`,給需求方向系統工程師說明與申請:Agent 專用中繼 CA、範本「GigaNexus Agent」規格(EKU 只有 Client Authentication、CNG / KSP 金鑰、私鑰不可匯出、主體名稱格式「DNS 名稱」= FQDN)、GPO 自動註冊與試點群組、根 CA 派送、CRL HTTP 發佈(主機 3 可下載)、非網域電腦 `certreq` 流程,以及待 IT 回覆與提供的清單、我們這邊的配合變更與過渡期。內容依 Gateway ENDPOINT-AGENT-GUIDE §3、§10 E1 / E2 / E8 / G1 整理;線上版在 Claude Docs 同名文件
 - 檔案:`docs/ADCS-REQUEST.md`、`docs/PROJECT-MAP.md`
