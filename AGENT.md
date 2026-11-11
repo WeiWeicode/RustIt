@@ -13,16 +13,20 @@
 
 同 `../giga-api-gateway-bff/AGENT.md` §10.8(有出入時以該節為準)。
 
-寫程式、寫測試、寫文件由 **Claude** 負責;**Gemini** 只負責執行測試、撰寫測試報告,以及非邏輯性的修改。Gemini 開始動手前,先確認工作在下表 Gemini 欄是 ✅。
+**Claude** 負責前後端,著重在邏輯、框架、架構規劃與寫計畫:Rust Agent、Endpoint Server、通訊協定、測試、技術文件。**Gemini** 負責前端的頁面與元件、寫需求企劃,以及執行測試、撰寫測試報告。本 repo 的前端只有示範介面(`RustAgent/crates/demo/ui`);端點管理畫面在 GigaItApp。Gemini 開始動手前,先確認工作在下表 Gemini 欄是 ✅。
 
 | 工作 | Claude | Gemini |
 | --- | --- | --- |
-| 寫程式(新功能、業務邏輯、API、資料存取、通訊協定、修 bug、重構) | ✅ | ❌ |
+| 寫程式(Rust Agent / Watchdog / 托盤、`ItAgentBack/` 後端、通訊協定、資料存取、修 bug、重構) | ✅ | ❌ |
+| 前端頁面與元件:示範介面(`RustAgent/crates/demo/ui`)的畫面、版面、樣式、互動、文案、假資料;呼叫 Agent / 後端的 JS 邏輯除外 | ✅ | ✅ |
+| 架構與框架:新 crate / 模組、目錄慣例、選用套件、通訊協定與介面設計 | ✅ | ❌ |
+| 寫計畫與技術文件:`PLATFORM-PLAN.md`、`INTEGRATION-PLAN.md`、各 `*-DESIGN.md`、`HANDOFF.md`、`PROJECT-MAP.md`、`AGENT.md`、`README.md`、`docs/decisions/`(ADR)、修正紀錄 | ✅ | ❌ |
+| 寫需求企劃:`docs/PRD.md`、功能企劃(例 `SMARTIT-FEATURE-BACKLOG.md` 的需求描述)、驗收場景 | ✅ | ✅ |
 | 寫測試(單元 / 整合 / 契約測試碼、測試用 fixture 的邏輯) | ✅ | ❌ |
-| 寫文件(`AGENT.md`、`README.md`、`docs/`、`PROJECT-MAP.md`、架構 JSON、修正紀錄) | ✅ | ❌(測試報告除外) |
 | 執行測試(既有的 `cargo test`、`ItAgentBack/` 的 `npm test` 等)並撰寫測試報告 | ✅ | ✅ |
-| 非邏輯性修改:示範介面(`RustAgent/crates/demo/ui`)的假資料、版面與樣式、畫面文案錯字 | ✅ | ✅ |
 | CI/CD 與容器、部署設定 | ✅ | ❌ **禁止** |
+
+**Gemini 寫需求企劃**:只描述需求、畫面與驗收行為。通訊協定、API 介面、權限代碼、錯誤代碼、資料表屬技術設計,企劃中需要時列為「待決事項」交給 Claude,不直接定案。
 
 **Gemini 禁止修改**(即使只改一行):
 
@@ -31,6 +35,7 @@
 - 相依與建置設定:`Cargo.toml`、`Cargo.lock`、`build.rs`、`tauri.conf.json`、`ItAgentBack/package.json`(含 scripts)、lock 檔、`tsconfig*.json`。
 - 憑證與簽章:任何 PKI、憑證、金鑰相關檔案與腳本(ADR 0003)。
 - 資料庫:schema、`ItAgentBack/db/migrations/`、seed、連線帳密。
+- Rust 程式、`ItAgentBack/` 程式(見上表)。
 - 測試程式碼:測試失敗時**不得**為了讓測試通過而修改測試或程式、跳過測試、調整門檻;把失敗寫進報告,交給 Claude 處理。
 
 **測試報告**(Gemini 執行測試後必寫):
@@ -39,7 +44,17 @@
 - 內容:1. 環境(分支 / commit、部署區、執行的指令)2. 結果(通過 / 失敗 / 略過數量)3. 失敗項目(測試名稱、錯誤訊息摘錄)4. **可能問題**:推測原因、相關檔案與行號、重現步驟、影響範圍 5. 建議交給 Claude 處理的項目。
 - 測試全部通過也要寫,並列出觀察到的潛在風險(警告訊息、偶發失敗、執行過慢等)。
 
-**判斷不了是否屬於「非邏輯性」時,一律視為邏輯修改**:不動程式,寫進報告交給 Claude 處理。
+**判斷不了屬於畫面還是邏輯時,一律視為邏輯**:不動程式,寫進 MR 說明或報告交給 Claude 處理。
+
+---
+
+## 找程式碼:CodeGraph 優先 — 必讀
+
+同 `../giga-api-gateway-bff/AGENT.md` §10.7(有出入時以該節為準)。
+
+- repo 根目錄有 `.codegraph/`(CodeGraph 索引)時,找檔案、符號、呼叫關係與修改的影響範圍**先用 CodeGraph**:Claude Code 用 MCP 工具 `codegraph_explore`;其他 AI 或人在 repo 根目錄執行 `codegraph explore "<符號名稱或問題>"`。
+- CodeGraph 找不到(剛新增尚未索引的檔案、設定檔與文件不在索引內),或要看目錄職責與「要改 X → 看哪裡」時,再看 `docs/PROJECT-MAP.md`。
+- 沒有 `.codegraph/` 時直接看專案地圖;是否建立索引由使用者決定。`.codegraph/` 是本機索引,不進版控(列在 `.gitignore`)。
 
 ---
 
