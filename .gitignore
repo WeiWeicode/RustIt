@@ -43,3 +43,6 @@ $RECYCLE.BIN/
 .env
 .env.*
 !.env.example
+
+# CodeGraph 本機索引
+.codegraph/
